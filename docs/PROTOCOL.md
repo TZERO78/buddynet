@@ -28,7 +28,7 @@ candidate and the same NAT mapping is reused for the tunnel.
 
 | Field | Meaning |
 |---|---|
-| `token` | shared secret pairing two buddies |
+| `token` | the **rendezvous secret** the server pairs on: a one-time invite token on first pairing, or the derived session secret on later reconnects (see *Pairing secret* below). The server treats it as opaque. |
 | `role` | `buddy` / `relay` |
 | `id` | ephemeral per-run id (dedupes a peer's v4+v6 registrations) |
 | `pubkey` | base64 Ed25519 identity |
@@ -54,7 +54,42 @@ Sent only after a token pairs two distinct peers, and only to the sender. In
 **Verification (buddy side):** reconstruct the canonical payload (peers
 ID-sorted, candidates Addr-sorted), verify `sig` against the **pinned** server
 key, check `ts` is within ±60 s, then apply the trust policy to the partner's
-identity and confirm its `virtual_ip` matches `SHA-256(pubkey)[0]`.
+identity and confirm its `virtual_ip` matches `SHA-256(pubkey)[0]`. The trust
+policy is, strongest first: `--peer-key` (strict pin) → trust-on-first-use, where
+on the **first** contact both ends compare a Short Authentication String (below)
+before the key is trusted → `--insecure` (none). A reconnect via a stored session
+pins the key recorded at pairing and skips the SAS.
+
+## SAS — first-contact verification
+
+This is a human step, not a wire message. On a trust-on-first-use first contact,
+once the QUIC tunnel is up but **before** the key is trusted, both ends compute a
+6-character Short Authentication String
+
+```
+SAS = base32( SHA-256( sort(pubA,pubB) || EKM ) )[0:6]
+```
+
+where `EKM` is the TLS exported keying material (RFC 5705 channel binding) of the
+live session. Both ends derive the same string; a man in the middle — a different
+TLS session per side — derives a different one. The humans compare it out of
+band; a mismatch (or `--no-interactive`) refuses the key. See
+[`internal/role/sas.go`](../internal/role/sas.go).
+
+## Pairing secret (invite token vs. session secret)
+
+`--invite`/`--join` use a **one-time invite token**, valid only until the first
+pairing. On that first SAS-confirmed (or `--peer-key`-pinned) pairing both ends
+derive a long-lived **session secret** from the same channel binding
+
+```
+session_secret = base64url( EKM("buddynet-session-rendezvous-v1", sort(pubA,pubB), 32) )
+```
+
+It is **never transmitted** and becomes the `token` in REGISTER on every later
+reconnect, so the invite is retired after first use. `--token` is the legacy mode:
+a fixed token reused as the rendezvous secret on every connect (no session
+secret). See [SECURITY.md](../SECURITY.md).
 
 ## RELAY_OFFER  (advertise a relay)
 
@@ -72,10 +107,11 @@ multi-relay futures.
 
 Opens a session. Names both identities and carries a short-lived
 `session_token`. In v1 the session token is **derived deterministically** by
-both buddies as
+both buddies from the rendezvous secret they used this connection (the invite
+token, or the session secret on reconnect):
 
 ```
-session = base64url( SHA-256(token || "\0" || lo(pubA,pubB) || "\0" || hi(pubA,pubB)) )[0:16]
+session = base64url( SHA-256(rendezvous || "\0" || lo(pubA,pubB) || "\0" || hi(pubA,pubB)) )[0:16]
 ```
 
 so the two sides agree with **no extra round trip**, and the relay treats it as
@@ -115,6 +151,8 @@ endpoint — the relay forwards ciphertext and never sees content.
 |---|---|
 | MITM on the control path | server-signed `PEER_LIST`, pinned server key |
 | Impersonating the partner | partner cert must carry the pinned/learned pubkey |
+| MITM at first contact (TOFU) | SAS compared out of band over the TLS channel binding before the key is trusted |
+| Leaked pairing token | invite token is one-time/short-lived; the long-lived session secret is derived from the channel binding and never sent |
 | Replaying an old roster | `ts` freshness window binds each roster in time |
 | Spoofed-source memory blowup | hard caps on tokens / ids / candidates |
 | Turning a server into a reflector | reply only to a just-heard source |
