@@ -105,9 +105,10 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 
 	for {
 		if err := buddyRun(ctx, cfg, serverPub, trust, reg, myID, myPub, myVIP, priv); err != nil && ctx.Err() == nil {
-			// A rejected SAS is a deliberate "do not trust" — retrying would just
-			// re-prompt forever, so stop instead of reconnecting.
-			if errors.Is(err, ErrSASRejected) {
+			// An unconfirmed SAS (mismatch or timeout) is a deliberate "do not
+			// trust" — retrying would just re-prompt forever, so stop instead of
+			// reconnecting.
+			if errors.Is(err, ErrSASRejected) || errors.Is(err, ErrSASTimeout) {
 				return fmt.Errorf("aborted: %w", err)
 			}
 			log.Printf("tunnel error: %v", err)
@@ -232,7 +233,8 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 		myEdPub := priv.Public().(ed25519.PublicKey)
 		sas := ComputeSAS(myEdPub, partnerPub, ekm)
 		if err := PromptSAS(sas, cfg.SASTimeout); err != nil {
-			return err // ErrSASRejected — Buddy stops the reconnect loop, key not stored
+			logSASFailure(err, sess, used, partner, cfg.Token)
+			return err // Buddy stops the reconnect loop, key NOT stored
 		}
 		if err := trust.confirm(cfg.Token, partnerPub); err != nil {
 			return err
@@ -326,6 +328,33 @@ type ProbeError struct {
 }
 
 func (e *ProbeError) Error() string { return e.Msg }
+
+// logSASFailure records everything known about a failed first-contact SAS, so an
+// operator can later tell whether there was an attack (journalctl --namespace=
+// buddynet | grep "SAS REJECTED"). An explicit mismatch is a positive attack
+// signal; a timeout is only logged as caution (the user may have stepped away).
+// The remote endpoint is the peer's real IP ONLY on a direct path; over a relay
+// it is the relay's address, so it is annotated accordingly and must not be
+// mistaken for the attacker.
+func logSASFailure(reason error, sess tunnel.Session, used relay.Path, partner protocol.Peer, token string) {
+	headline := "SAS REJECTED — possible MITM / token-theft attack"
+	if errors.Is(reason, ErrSASTimeout) {
+		headline = "SAS NOT CONFIRMED (timed out) — aborting, treat with caution"
+	}
+	remoteNote := "direct path: this is the peer's real address"
+	if used.Kind == relay.Relayed {
+		remoteNote = "RELAYED path: this is the RELAY's address, NOT the peer — do not ban it"
+	}
+	log.Printf("%s\n"+
+		"  remote endpoint : %s   [%s]\n"+
+		"  virtual IP claim: %s\n"+
+		"  partner pubkey  : %s\n"+
+		"  token hash      : %s\n"+
+		"  timestamp       : %s\n"+
+		"  -> key NOT trusted. Run --invite to generate a fresh token for your buddy.",
+		headline, sess.RemoteAddr(), remoteNote, partner.VirtualIP, partner.PubKey,
+		tokenKey(token), time.Now().UTC().Format(time.RFC3339))
+}
 
 // buddyProbe answers "is my buddy online and reachable?" without forwarding. It
 // returns nil when online and directly reachable, a *ProbeError carrying a

@@ -12,10 +12,15 @@ import (
 	"time"
 )
 
-// ErrSASRejected is returned when the human did not confirm the Short
-// Authentication String (mismatch, explicit no, or timeout). The partner key is
-// then NOT trusted and the connection is dropped.
-var ErrSASRejected = errors.New("SAS not confirmed")
+// ErrSASRejected is returned when the human explicitly said the SAS did NOT
+// match — a positive attack signal (MITM or token theft). ErrSASTimeout is
+// returned when no answer arrived in time, which is ambiguous (the user may just
+// be away). Either way the partner key is NOT trusted and the connection drops;
+// they differ only in how loudly the event is logged.
+var (
+	ErrSASRejected = errors.New("SAS rejected (mismatch)")
+	ErrSASTimeout  = errors.New("SAS not confirmed in time")
+)
 
 // sasLabel is the RFC 5705 exporter label binding the SAS to this TLS session.
 const sasLabel = "buddynet-sas-v1"
@@ -91,8 +96,8 @@ Do they match? [y/N] `, sas, timeout)
 
 	select {
 	case <-time.After(timeout):
-		fmt.Fprintln(os.Stderr, "\n⏰ no answer — treating as MISMATCH, aborting (key NOT trusted).")
-		return ErrSASRejected
+		fmt.Fprintln(os.Stderr, "\n⏰ no answer — aborting (key NOT trusted).")
+		return ErrSASTimeout
 	case r := <-ch:
 		if r.err != nil {
 			return ErrSASRejected

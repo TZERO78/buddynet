@@ -91,11 +91,12 @@ func TestPromptSAS(t *testing.T) {
 		t.Errorf("garbage should reject, got %v", err)
 	}
 
-	// Timeout with no input must reject (never silently confirm).
+	// Timeout with no input must reject (never silently confirm), distinctly from
+	// an explicit mismatch so callers can log them differently.
 	r, w, _ := os.Pipe()
 	os.Stdin = r
 	defer w.Close()
-	if err := PromptSAS("K7QX2M", 100*time.Millisecond); err != ErrSASRejected {
-		t.Errorf("timeout should reject, got %v", err)
+	if err := PromptSAS("K7QX2M", 100*time.Millisecond); err != ErrSASTimeout {
+		t.Errorf("timeout should return ErrSASTimeout, got %v", err)
 	}
 }
