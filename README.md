@@ -83,6 +83,9 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 - Optional allowlist (approval mode) on the handshake server, with sealed
   enrollment codes so a code can't be read off the wire.
 
+The full threat model — what BuddyNet protects against, the trust hierarchy, and
+its honest limits — is in **[SECURITY.md](SECURITY.md)**.
+
 ## Build & run
 
 ```bash
