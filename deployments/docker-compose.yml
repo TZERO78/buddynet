@@ -1,14 +1,17 @@
 # BuddyNet server side on a VPS: the handshake (matchmaking) server plus an
 # optional relay for buddies that cannot punch a direct path.
 #
+#   cp deployments/.env.example deployments/.env   # then edit ports if needed
 #   docker compose -f deployments/docker-compose.yml up -d --build
 #   docker compose -f deployments/docker-compose.yml run --rm \
 #       handshake --role=handshake --key /var/lib/buddynet/id.key identity
 #       # ^ prints the SERVER_KEY your buddies pin with --server-key
 #
-# The relay is a separate service on its own port; it forwards encrypted QUIC
-# packets blindly and never sees content. Advertise it to buddies by adding
-#   --relay-endpoint your.vps.example:51821
+# Ports are picked once via .env (BUDDYNET_HANDSHAKE_PORT / BUDDYNET_RELAY_PORT);
+# unset, they fall back to the documented defaults 51820 / 51821. The relay is a
+# separate service on its own port; it forwards encrypted QUIC packets blindly
+# and never sees content. Advertise it to buddies by adding
+#   --relay-endpoint your.vps.example:${BUDDYNET_RELAY_PORT}
 # to the handshake command below.
 services:
   handshake:
@@ -19,26 +22,36 @@ services:
     command:
       - --role=handshake
       - --listen
-      - "[::]:51820"
+      - "[::]:${BUDDYNET_HANDSHAKE_PORT:-51820}"
       - --key
       - /var/lib/buddynet/id.key
       # approval mode: also pass  --authorized /var/lib/buddynet/clients.txt
-      # advertise the relay:       --relay-endpoint your.vps.example:51821
+      # advertise the relay:       --relay-endpoint your.vps.example:${BUDDYNET_RELAY_PORT:-51821}
     ports:
-      - "51820:51820/udp"
+      - "${BUDDYNET_HANDSHAKE_PORT:-51820}:${BUDDYNET_HANDSHAKE_PORT:-51820}/udp"
     volumes:
       - buddynet:/var/lib/buddynet   # persistent identity key (and allowlist)
     restart: unless-stopped
+    # --- container hardening -------------------------------------------------
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
 
   relay:
     image: ghcr.io/tzero78/buddynet:latest
     command:
       - --role=relay
       - --listen
-      - "[::]:51821"
+      - "[::]:${BUDDYNET_RELAY_PORT:-51821}"
     ports:
-      - "51821:51821/udp"
+      - "${BUDDYNET_RELAY_PORT:-51821}:${BUDDYNET_RELAY_PORT:-51821}/udp"
     restart: unless-stopped
+    # --- container hardening -------------------------------------------------
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
 
 volumes:
   buddynet:

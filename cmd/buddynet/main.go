@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -50,8 +51,8 @@ func main() {
 
 	roleFlag := flag.String("role", "", "node role: buddy | relay | handshake (required; never auto-detected)")
 	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
-	listen := flag.String("listen", "", "UDP address to listen on (handshake default [::]:51820, relay default [::]:51821)")
-	relayListenFlag := flag.String("relay-listen", "", "relay: UDP address for the relay when combined with another role on one node (default [::]:51821)")
+	listen := flag.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr))
+	relayListenFlag := flag.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr))
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
@@ -69,7 +70,7 @@ func main() {
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
 	punchDur := flag.Duration("punch", 2*time.Second, "buddy: how long to hole-punch before bringing up QUIC")
 	idleTimeout := flag.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all")
-	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit")
+	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)")
 	invite := flag.Bool("invite", false, "buddy: mint a fresh pairing token, print it, and wait for your buddy to join")
 	join := flag.String("join", "", "buddy: join using the pairing token your buddy gave you (alias for --token)")
 
@@ -176,7 +177,7 @@ func main() {
 			switch r {
 			case protocol.RoleHandshake:
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
-					Listen: orDefault(*listen, "[::]:51820"), KeyPath: *keyPath,
+					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
 				}))
 			case protocol.RoleRelay:
@@ -233,7 +234,7 @@ func relayListen(relayFlag, listen string, roles []protocol.Role) string {
 	if listen != "" && len(roles) == 1 {
 		return listen
 	}
-	return "[::]:51821"
+	return protocol.DefaultRelayAddr
 }
 
 func orDefault(v, def string) string {
@@ -278,12 +279,19 @@ func (a buddyArgs) validate() {
 	}
 }
 
-// runBuddy runs the one-shot --status probe and exits with its result code.
+// runBuddy runs the one-shot --status probe and exits with its result code:
+// 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error.
 func runBuddy(ctx context.Context, a buddyArgs) {
 	a.validate()
-	if err := role.Buddy(ctx, a.config()); err != nil {
-		os.Exit(1) // probe maps "offline / unreachable / untrusted" to non-zero
+	err := role.Buddy(ctx, a.config())
+	if err == nil {
+		return // online and directly reachable
 	}
+	var pe *role.ProbeError
+	if errors.As(err, &pe) {
+		os.Exit(pe.Code) // offline / unreachable / untrusted, by distinct code
+	}
+	os.Exit(1) // local failure (socket / DNS)
 }
 
 // mintInviteToken mints a fresh pairing token, shows it (reveal-and-hide on a
