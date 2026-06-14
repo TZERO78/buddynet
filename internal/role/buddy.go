@@ -87,7 +87,13 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		}
 		log.Print("buddy identity pinned via --peer-key (strict)")
 	case cfg.Insecure:
-		log.Print("WARNING: --insecure set — the buddy's identity will NOT be verified")
+		log.Print("!!! INSECURE MODE — the buddy's identity is NOT verified: no pin, no SAS.")
+		log.Print("!!! Anyone who can answer with this token can impersonate your buddy (MITM).")
+		log.Print("!!! Use --peer-key (or default trust-on-first-use with SAS) instead. Testing only.")
+		if !cfg.Interactive {
+			log.Print("!!! --insecure on an unattended/daemon node is especially dangerous — there is")
+			log.Print("!!! no human to catch an impostor. Pin the buddy with --peer-key.")
+		}
 	case cfg.KnownPeers == "":
 		return errors.New("no trust source: set --peer-key, or --known-peers <path> for trust-on-first-use, or --insecure")
 	default:
