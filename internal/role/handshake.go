@@ -18,6 +18,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -40,6 +41,17 @@ const (
 	maxIDsPerToken  = 2
 	maxCandsPerPeer = 8
 	maxCodeEncLen   = 512
+)
+
+// Rate-limit ceilings for the public UDP listener. The global rate bounds total
+// per-packet crypto (signature verify + sealed-code open in approval mode) so a
+// flood cannot saturate the single read loop; the per-source rate keeps one
+// address from consuming the whole budget. A legitimate buddy re-registers only
+// ~1/s, so the per-source allowance is generous.
+const (
+	rlGlobalRate = 1000 // admitted packets/sec across all sources
+	rlSrcRate    = 50   // admitted packets/sec per source address
+	rlMaxSources = 8192 // bound on the tracked-source map
 )
 
 // hsPeer accumulates what the server knows about one (token,id) across its v4
@@ -245,6 +257,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 
 	reg := newHSRegistry(cfg.TTL)
 	go reg.reap()
+	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
 
 	hsDebug = cfg.Debug
 	buf := make([]byte, 1500)
@@ -256,6 +269,12 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 				return nil
 			}
 			log.Printf("read: %v", err)
+			continue
+		}
+		// Gate before any parsing or crypto so a flood is dropped cheaply and the
+		// expensive per-packet work stays bounded (DoS / reflection defense).
+		if !rl.Allow(src.IP.String()) {
+			hsDebugf("rate-limited %s", src)
 			continue
 		}
 		raw := make([]byte, n)
