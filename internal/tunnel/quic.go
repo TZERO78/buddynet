@@ -7,7 +7,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"errors"
 	"math/big"
 	"net"
 	"time"
@@ -164,20 +163,7 @@ func tlsConfig(priv ed25519.PrivateKey, partnerPub ed25519.PublicKey) *tls.Confi
 		InsecureSkipVerify: true,
 		MinVersion:         tls.VersionTLS13,
 		NextProtos:         []string{ALPN},
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return errors.New("peer presented no certificate")
-			}
-			c, err := x509.ParseCertificate(rawCerts[0])
-			if err != nil {
-				return err
-			}
-			pk, ok := c.PublicKey.(ed25519.PublicKey)
-			if !ok || !pk.Equal(partnerPub) {
-				return errors.New("peer identity does not match the expected key (possible MITM)")
-			}
-			return nil
-		},
+		VerifyPeerCertificate: pinnedPeerVerify(partnerPub),
 	}
 }
 
