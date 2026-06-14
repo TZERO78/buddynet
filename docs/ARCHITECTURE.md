@@ -34,6 +34,12 @@ three roles; in a buddy the relay and handshake code sit dormant as fallback.
 | `relay` | public IP | Blindly forward encrypted datagrams between two session legs. |
 | `handshake` | public IP | Learn peer endpoints, pair peers by token, hand back a **signed** `PEER_LIST`. No data flows through it. |
 
+A node may run **several roles at once**, comma-separated:
+`--role=handshake,relay` runs both in one process, each on its own port (the
+relay defaults to `:51821`, or set `--relay-listen`). This is the usual VPS
+setup — one box, bootstrap + relay. Roles are still always explicit; combining
+them is opt-in, never auto-detected.
+
 ## Identity & the virtual IP
 
 Each node holds one long-term **Ed25519** key. That single key is:

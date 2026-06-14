@@ -89,6 +89,10 @@ runtime dependencies. Server side via Docker:
 docker compose -f deployments/docker-compose.yml up -d --build
 ```
 
+On a VPS you can run both server roles in one process:
+`buddynet --role=handshake,relay`. On **Unraid**, the buddy role ships as a
+plugin — see [unraid/BuddyNet](unraid/BuddyNet/README.md).
+
 ## Status
 
 v1 / BuddyPeer (two peers) is implemented and tested end to end. Multi-peer mesh,

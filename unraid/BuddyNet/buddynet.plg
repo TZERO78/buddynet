@@ -1,0 +1,639 @@
+<?xml version="1.0" standalone="yes"?>
+<!DOCTYPE PLUGIN [
+<!ENTITY name      "buddynet">
+<!ENTITY author    "TZERO78">
+<!ENTITY version   "2026.06.14">
+<!ENTITY launch    "Tools/buddynet">
+<!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
+<!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
+<!ENTITY plgPATH   "/boot/config/plugins/&name;">
+<!ENTITY emhttp    "/usr/local/emhttp/plugins/&name;">
+]>
+
+<PLUGIN name="&name;" author="&author;" version="&version;" launch="&launch;"
+        pluginURL="&pluginURL;" min="6.10.0"
+        icon="exchange"
+        project="https://github.com/TZERO78/buddynet"
+        support="https://github.com/TZERO78/buddynet/issues"
+        readme="https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/README.md">
+
+<CHANGES>
+**BuddyNet** — one binary, three roles. On Unraid you run the `buddy` role: a
+zero-config, end-to-end-encrypted tunnel to your buddy. It finds your partner via
+a small handshake server, hole-punches through NAT (no port forwarding), and
+falls back to a blind relay only if a direct path is impossible. Point
+rsync/borg/kopia at the local socket and back up directly between two sites — in
+either direction over one tunnel. BuddyPeer (two buddies) is the v1 milestone.
+
+###2026.06.14
+- Initial BuddyNet Unraid client plugin, ported from the hardware-tested
+  BuddyPeer plugin:
+  - Settings page (Tools -&gt; BuddyNet) + boot/array-managed service running
+    `buddynet --role=buddy`.
+  - Bidirectional over one tunnel: -L (push to buddy) and -forward (receive).
+  - Live status: buddy traffic-light, per-direction transfer + throughput.
+  - Dashboard tile with a buddy online/offline traffic-light.
+  - Binary verified against a pinned SHA256 on every install.
+  - Secrets kept off the FAT flash: token file and the identity key + trust
+    store + peer cache live on /mnt/user/appdata/buddynet/ (real 0600).
+  - Danger zone: reset identity / forget buddy (shred where supported).
+  - Clean uninstall removes config, identity, trust store and peer cache.
+
+> **Maintainer note:** before publishing, set BINVER/BINURL/BINSHA in the
+> install section below to a real `buddynet` release asset
+> (`buddynet-linux-amd64`) and its sha256. Until then the checksum gate will
+> (correctly) refuse to install.
+</CHANGES>
+
+<!-- webGUI settings page (Tools -> BuddyNet) -->
+<FILE Name="&emhttp;/buddynet.page">
+<INLINE>
+<![CDATA[
+Menu="Utilities"
+Title="BuddyNet"
+Icon="buddynet.png"
+---
+<?php
+$cfg = parse_plugin_cfg("buddynet");
+function v($cfg,$k,$d=''){ return htmlspecialchars(isset($cfg[$k])?$cfg[$k]:$d); }
+$running = trim(shell_exec("/etc/rc.d/rc.buddynet status 2>/dev/null"));
+$last = trim(shell_exec("grep -aE 'ONLINE|OFFLINE|REACHABLE|DISCONNECTED|waiting for buddy|tunnel error|^error' /var/log/buddynet.log 2>/dev/null | tail -n 1"));
+$ident = trim(shell_exec("grep -aoE 'identity [A-Za-z0-9+/=]{40,}' /var/log/buddynet.log 2>/dev/null | tail -n 1 | cut -d' ' -f2"));
+// online state from the last meaningful log line
+if    (strpos($last,'✓ ONLINE')!==false || strpos($last,'REACHABLE')!==false) $online='🟢 online';
+elseif(strpos($last,'waiting')!==false)                                        $online='🟡 waiting for buddy';
+elseif(strpos($last,'OFFLINE')!==false || strpos($last,'DISCONNECTED')!==false)$online='🔴 buddy offline';
+else                                                                            $online=$last?:'unknown';
+?>
+<div style="margin-bottom:1em;color:#777">
+The encrypted "cable" between two buddies — finds your partner via the handshake
+server, punches through NAT (no port forwarding), runs a direct QUIC tunnel, and
+falls back to a blind relay only if needed. Point rsync/borg/kopia at the local
+socket.
+</div>
+
+<div style="margin-bottom:1em">
+<b>Service:</b> <?=$running==='running'?'🟢 running':'⚪ '.($running?:'unknown')?>
+&nbsp;|&nbsp; <b>Buddy:</b> <?=$online?>
+&nbsp; <a href="<?=htmlspecialchars($_SERVER['REQUEST_URI'])?>" title="reload status">↻</a>
+<?php if($ident): ?>
+<br><span style="color:#777">Your identity (give your buddy to pin):</span> <code style="font-size:.85em"><?=htmlspecialchars($ident)?></code>
+<?php endif; ?>
+</div>
+
+<div style="margin-bottom:1.5em">
+<?php foreach (array('start'=>'Start','stop'=>'Stop','restart'=>'Restart') as $a=>$label): ?>
+<form method="POST" action="/update.php" target="progressFrame" style="display:inline-block;margin:0 .3em 0 0">
+<input type="hidden" name="#command" value="/etc/rc.d/rc.buddynet">
+<input type="hidden" name="#arg[1]" value="<?=$a?>">
+<input type="submit" value="<?=$label?>"></form>
+<?php endforeach; ?>
+</div>
+
+<script>
+function bnShow(id,b){var e=document.getElementById(id);
+  if(e.type==='password'){e.type='text';b.textContent='hide';}
+  else{e.type='password';b.textContent='show';}}
+// Generate a strong 384-bit token (64 base64url chars), same shape as the
+// CLI's `buddynet gen-token`. Reveal it so it can be copied/shared.
+function bnGen(id){var a=new Uint8Array(48);crypto.getRandomValues(a);
+  var s=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_');
+  var e=document.getElementById(id);e.value=s;e.type='text';}
+</script>
+
+<form markdown="1" method="POST" action="/update.php" target="progressFrame">
+<input type="hidden" name="#file" value="buddynet/buddynet.cfg">
+<input type="hidden" name="#command" value="/etc/rc.d/rc.buddynet">
+<input type="hidden" name="#arg[1]" value="restart">
+
+Service:
+: <select name="SERVICE">
+  <option value="enable"  <?=v($cfg,'SERVICE')=='enable'?'selected':''?>>Enabled</option>
+  <option value="disable" <?=v($cfg,'SERVICE')=='disable'?'selected':''?>>Disabled</option>
+  </select>
+
+Handshake server (host:port):
+: <input type="text" name="SERVER" value="<?=v($cfg,'SERVER')?>" placeholder="vps.example:51820">
+
+Server key (public pin — must match the server's identity):
+: <input type="text" name="SERVER_KEY" value="<?=v($cfg,'SERVER_KEY')?>" placeholder="server Ed25519 public key, base64">
+
+Token (shared secret — for testing; prefer the Token file below):
+: <input type="password" id="bn_tok" name="TOKEN" value="<?=v($cfg,'TOKEN')?>"> <button type="button" onclick="bnShow('bn_tok',this)" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">show</button> <button type="button" onclick="bnGen('bn_tok')" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">generate</button>
+
+Token file (on the array — overrides the field above, recommended):
+: <input type="text" name="TOKEN_FILE" value="<?=v($cfg,'TOKEN_FILE')?>" placeholder="/mnt/user/appdata/buddynet/token (chmod 0600)">
+
+Buddy key (public pin — your buddy's identity, recommended):
+: <input type="text" name="PEER_KEY" value="<?=v($cfg,'PEER_KEY')?>" placeholder="buddy Ed25519 identity, base64">
+
+Expose local port (-L) — to push backups TO your buddy:
+: <input type="text" name="LISTEN" value="<?=v($cfg,'LISTEN')?>" placeholder="127.0.0.1:9000 (leave empty to disable)">
+
+Forward to local service (-forward) — to receive backups FROM your buddy:
+: <input type="text" name="FORWARD" value="<?=v($cfg,'FORWARD')?>" placeholder="127.0.0.1:873 (leave empty to disable)">
+
+&nbsp;
+: <input type="submit" value="Apply">
+
+</form>
+
+Set **both** addresses for back-and-forth backup over one tunnel: -L lets you
+rsync to your buddy (`rsync://localhost:9000/...`), -forward lets your buddy
+reach your local rsync daemon on :873. At least one is required.
+
+This node runs the **buddy** role. Its identity key, trust store and peer cache
+live on the array under `/mnt/user/appdata/buddynet/`. After first connect the
+buddy's key is recorded (trust-on-first-use); pin your buddy with the Buddy key
+for full MITM protection. See the project README and docs/PROTOCOL.md.
+
+**Secret note:** the USB flash is FAT, so file permissions are not enforced there
+— a Token typed above is effectively readable. For real protection put the token
+in a file on the array (e.g. `/mnt/user/appdata/buddynet/token`, `chmod 0600`),
+set "Token file" above and leave the Token field empty. The service then starts
+on array start, once that file is available.
+
+---
+####Danger zone
+<div style="display:flex;gap:1em;flex-wrap:wrap;margin-top:.5em">
+<form method="POST" action="/update.php" target="progressFrame" style="margin:0"
+      onsubmit="return confirm('Delete the trust store (known_peers)? The buddy key will be re-learned on the next connect (trust-on-first-use).');">
+  <input type="hidden" name="#command" value="/etc/rc.d/rc.buddynet">
+  <input type="hidden" name="#arg[1]" value="forget-buddy">
+  <input type="submit" value="Forget buddy (clear known_peers)">
+</form>
+<form method="POST" action="/update.php" target="progressFrame" style="margin:0"
+      onsubmit="return confirm('Really delete this node identity AND trust store? A NEW identity (and virtual IP) is generated on restart, so your buddy MUST re-pin your new Buddy key. This cannot be undone.');">
+  <input type="hidden" name="#command" value="/etc/rc.d/rc.buddynet">
+  <input type="hidden" name="#arg[1]" value="reset-identity">
+  <input type="submit" value="Reset identity (delete id.key + known_peers)">
+</form>
+</div>
+
+Keys are deleted with `shred` where supported. Note: on SSD/CoW filesystems a
+secure overwrite is not guaranteed (wear-levelling), but the files are removed.
+]]>
+</INLINE>
+</FILE>
+
+<!-- Dashboard tile: buddy traffic-light at a glance -->
+<FILE Name="&emhttp;/buddynet_dash.page">
+<INLINE>
+<![CDATA[
+Menu="Dashboard"
+Title="BuddyNet"
+Icon="buddynet.png"
+---
+<?php
+$running = trim(shell_exec("/etc/rc.d/rc.buddynet status 2>/dev/null"));
+$last = trim(shell_exec("grep -aE 'ONLINE|OFFLINE|REACHABLE|DISCONNECTED|waiting for buddy' /var/log/buddynet.log 2>/dev/null | tail -n 1"));
+if     ($running!=='running')                                                  { $dot='#888';     $txt='stopped'; }
+elseif (strpos($last,'✓ ONLINE')!==false || strpos($last,'REACHABLE')!==false) { $dot='#2ecc40';  $txt='buddy online'; }
+elseif (strpos($last,'waiting')!==false)                                       { $dot='#ffb700';  $txt='waiting for buddy'; }
+elseif (strpos($last,'OFFLINE')!==false || strpos($last,'DISCONNECTED')!==false){ $dot='#ff4136'; $txt='buddy offline'; }
+else                                                                            { $dot='#888';     $txt=$last?:'unknown'; }
+?>
+<tbody title='buddynet'>
+  <tr><td>
+    <span class='tile-header'>
+      <span class='tile-header-left'>
+        <i class='fa fa-exchange f32'></i>
+        <div class='section'>
+          <h3 class='tile-header-main'>BuddyNet</h3>
+          <span>P2P backup tunnel</span>
+        </div>
+      </span>
+    </span>
+  </td></tr>
+  <tr><td style='text-align:center;padding:.4em 0'>
+    <span style='font-size:1.5em;vertical-align:middle;color:<?=$dot?>'>&#9679;</span>
+    <b style='vertical-align:middle'><?=htmlspecialchars($txt)?></b>
+  </td></tr>
+</tbody>
+]]>
+</INLINE>
+</FILE>
+
+<!-- service control script -->
+<FILE Name="/etc/rc.d/rc.buddynet" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+# rc.buddynet — control the BuddyNet tunnel (buddy role)
+CFG=/boot/config/plugins/buddynet/buddynet.cfg
+BIN=/usr/local/bin/buddynet
+# Identity key, trust store and peer cache live on the array (real 0600 perms),
+# not the FAT flash. Requires the array to be started — the service runs on the
+# array event.
+STATE=/mnt/user/appdata/buddynet
+PIDFILE=/var/run/buddynet.pid
+LOG=/var/log/buddynet.log
+[ -f "$CFG" ] && . "$CFG"
+
+# Trim stray leading/trailing whitespace from values (a space pasted into a
+# field would otherwise break e.g. DNS resolution of the server address).
+trim() { local s="$*"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]]}"}"; printf '%s' "$s"; }
+SERVER="$(trim "${SERVER:-}")"; SERVER_KEY="$(trim "${SERVER_KEY:-}")"; TOKEN="$(trim "${TOKEN:-}")"
+TOKEN_FILE="$(trim "${TOKEN_FILE:-}")"; PEER_KEY="$(trim "${PEER_KEY:-}")"
+LISTEN="$(trim "${LISTEN:-}")"; FORWARD="$(trim "${FORWARD:-}")"
+
+is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
+
+start() {
+  [ "$SERVICE" = "enable" ] || { echo "disabled"; return 0; }
+  is_running && { echo "running"; return 0; }
+  [ -x "$BIN" ] || { echo "binary missing"; return 1; }
+  mkdir -p "$STATE" 2>/dev/null || { echo "appdata unavailable (is the array started?)"; return 1; }
+  args=(--role=buddy --server "$SERVER" --server-key "$SERVER_KEY"
+        --key "$STATE/id.key" --known-peers "$STATE/known_peers"
+        --peers "$STATE/peers.json")
+  [ -n "$PEER_KEY" ] && args+=(--peer-key "$PEER_KEY")
+  [ -n "$LISTEN" ]  && args+=(-L "$LISTEN")
+  [ -n "$FORWARD" ] && args+=(-forward "$FORWARD")
+  # Prefer the token from a file on the array (real 0600 perms) over the flash
+  # cfg value; /boot is FAT and cannot enforce permissions. Only override when the
+  # file is non-empty and readable (an empty file must not blank out the token).
+  tok="$TOKEN"
+  if [ -n "$TOKEN_FILE" ] && [ -s "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ]; then
+    ftok="$(trim "$(tr -d '\r\n' < "$TOKEN_FILE")")"
+    [ -n "$ftok" ] && tok="$ftok"
+  fi
+  # token via env so it does not appear in ps
+  BUDDYNET_TOKEN="$tok" nohup "$BIN" "${args[@]}" >>"$LOG" 2>&1 &
+  echo $! > "$PIDFILE"
+  echo "started"
+}
+stop() { is_running && kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; echo "stopped"; }
+# really delete a file: shred if available (best effort on SSD/CoW), else rm
+wipe() { [ -f "$1" ] && { shred -u "$1" 2>/dev/null || rm -f "$1"; }; }
+forget_buddy()   { wipe "$STATE/known_peers"; echo "trust store cleared"; stop; sleep 1; start; }
+reset_identity() { stop; wipe "$STATE/id.key"; wipe "$STATE/known_peers"; echo "identity + trust store deleted"; sleep 1; start; }
+# rate: connection counts + throughput (bytes/sec) per direction, measured on the
+# loopback forwarded sockets (-L listener = "out" path, -forward target = "in").
+rate() {
+  local lp="${LISTEN##*:}" fp="${FORWARD##*:}"
+  # ports come from the (user-written) cfg — keep only digits before they reach ss
+  lp="${lp//[^0-9]/}"; fp="${fp//[^0-9]/}"
+  bytes() { ss -tinH state established "$1" 2>/dev/null | grep -oE 'bytes_(sent|received):[0-9]+' | awk -F: '{s+=$2}END{print s+0}'; }
+  count() { ss -tnH  state established "$1" 2>/dev/null | grep -c . ; }
+  local oc=0 ic=0 o1=0 i1=0 o2=0 i2=0
+  [ -n "$lp" ] && { oc=$(count "sport = :$lp"); o1=$(bytes "sport = :$lp"); }
+  [ -n "$fp" ] && { ic=$(count "dport = :$fp"); i1=$(bytes "dport = :$fp"); }
+  sleep 1
+  [ -n "$lp" ] && o2=$(bytes "sport = :$lp")
+  [ -n "$fp" ] && i2=$(bytes "dport = :$fp")
+  echo "oc=$oc ic=$ic out=$((o2-o1)) in=$((i2-i1))"
+}
+case "$1" in
+  start)         start ;;
+  stop)          stop ;;
+  restart)       stop; sleep 1; start ;;
+  status)        is_running && echo running || echo stopped ;;
+  rate)          rate ;;
+  forget-buddy)  forget_buddy ;;
+  reset-identity) reset_identity ;;
+  *)             echo "usage: $0 {start|stop|restart|status|rate|forget-buddy|reset-identity}" ;;
+esac
+]]>
+</INLINE>
+</FILE>
+
+<!-- start on array-up (so a token file on /mnt/user is available), stop on array-down -->
+<FILE Name="&emhttp;/event/started" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+/etc/rc.d/rc.buddynet restart >/dev/null 2>&1 &
+]]>
+</INLINE>
+</FILE>
+
+<FILE Name="&emhttp;/event/stopping" Mode="0755">
+<INLINE>
+<![CDATA[
+#!/bin/bash
+/etc/rc.d/rc.buddynet stop >/dev/null 2>&1
+]]>
+</INLINE>
+</FILE>
+
+<!-- install: fetch binary (once, persisted on flash), seed config, start -->
+<FILE Run="/bin/bash" Method="install">
+<INLINE>
+<![CDATA[
+set -e
+PLG=/boot/config/plugins/buddynet
+mkdir -p "$PLG"
+
+# NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
+# version and URL are hard-coded here on purpose.
+# MAINTAINER: set these to a real published release before shipping the plugin.
+BINVER="v0.0.0-REPLACE"
+BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
+# SHA256 of the release binary; verified on every install so a corrupted or
+# tampered download is never installed. REPLACE with the real asset checksum.
+BINSHA="REPLACE_WITH_RELEASE_SHA256"
+verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
+
+# Download the buddynet binary to flash (only if missing or its checksum is wrong).
+if [ ! -s "$PLG/buddynet" ] || ! verify "$PLG/buddynet"; then
+  echo "Downloading buddynet ${BINVER} ..."
+  wget -qO "$PLG/buddynet" "$BINURL" || { echo "download failed"; rm -f "$PLG/buddynet"; exit 1; }
+fi
+if ! verify "$PLG/buddynet"; then
+  echo "checksum mismatch — refusing to install (expected $BINSHA)"
+  rm -f "$PLG/buddynet"; exit 1
+fi
+install -m0755 "$PLG/buddynet" /usr/local/bin/buddynet
+chmod 0755 /etc/rc.d/rc.buddynet
+
+# Install the plugin logo (used by the Tools tile and the Plugins page).
+EMHTTP=/usr/local/emhttp/plugins/buddynet
+mkdir -p "$EMHTTP"
+base64 -d > "$EMHTTP/buddynet.png" <<'PNG'
+iVBORw0KGgoAAAANSUhEUgAAAQAAAAEACAYAAABccqhmAAA1S0lEQVR4nO29eZRcR5Xn/4mIl2tV
+VqmqtFqSF8kbkpEsBLa8IQYDNuMxuMECu5luYAyy+zRN/zA/fn1mfkAddcPM0H3aNE2z2bixu3+s
+Em27jQcbDG2BF8lGWDKWvC+SVda+VFXu+SLu74+XWSrJWiuzsqqU8Tknj5fKzPfyRdxv3Lhx44Zi
+bFAsW6YBWLnSDv9D56V/1uWcPVcZs1CE0xG7CKW7EdeOUuciMiY37PEcF0qByLMonUXcXpR5Uile
+FWs3aG2e7X/4W/sOev+yZQaAlSsd0PTOrZp7OVEs+5AebvQzFi9PZ5N6gYJ3O+RShSwApisTi25P
+XPWpCDh7hO/1eMYR2gAqMi6lAUFsBWC7oJ7SqIcFftledE9tW3drfuhzy5YZVv7EgWqaEDRJAHo1
+yzapIcO/8i8S7bnylYi6RgmXK61mY2LgHOJCEAci1Qch1SeJiuTV4xnviAASjVy1Pqw0SqN0AFqD
+rSBOXhPFr1Byd7Ytfj/3f70EVIVgnsAKN9p3OsoGdfCIn1r6iVkxG9wA6jq0ORelImUUKwgWlEKh
+R/++PJ4xQRAciKAwKKOUiUV64eyzID+qmPD2wurvbgWa4hGMlqEpli41rF4dArRddNN5SnOzUnxQ
+mViHuBBs6EA5lOiqn+TxtBjiEOVANCbQSgeIrQyI8FNx3JJ77NtPA7B0acDq1ZZRiBE0XgB6ezUr
+ItclteTGmcaov1GKjygTi4stg3M2mh55o/d4DiAOQdDaKBNHbKUswvetlS8U1nynDzjIthpFYwUg
+UqqQxYtj7cm3/ZXS6i+UDqZKWAIRi1Levfd4jo4g4lDKqCCBuHCnOPl6tvjEV1i3rjJkYw2iQcbY
+q+kFVqxwmUuXX6iU+Ro6dmE04tsQpUzjruXxtASCiEWbQJk4uMpaEfuXgw/fujbyBKARQcL6jXLZ
+MlML8nVcelOvwOeVNoGE5RCF8ZF7j6ceRBCsCuKBOBsq+NLAw99eARxkeyOlPuOsuiPpy5bPMKK+
+p0ziCgmLINjI+D0eT0Oo2pQKkogtPWCVfDz/21u31TslGHkgbmlvwOrVYceSGy4wYtYpHbtCKoUQ
+EG/8Hk+DiWxKpFIIlY5dYcSs61hywwWsXh2ytDcY6deOTACW9gasXhFmLvnkf5NY4kGlmCFhKUSp
+AD/X93hGC4VSgYSlUClmSCzxYOaST/43Vq8YsQicuLFWjb/94k98UgfJW8VVwDlXjfB7PJ5mIOLQ
+Wisdw4XF5dlHv3tbzTZP5GtOTAAONX5bseD8mr7HMyaIAy3KxMxIReD4BeDwxq99lN/jGUtEQLuR
+isDxGW810pi5ZPlHlYnf4Y3f4xlPHBABseWPDT5y653HuzpwbNe9t1fXov1o801xFYc4vzPP4xk3
+KIU4Ja7i0OabQ6sDvb3HtO9jGbEGpO3CG6bqWPAUSk/Fhj7g5/GMR0QcJtCI2+kq4YLc2tt3Etn4
+ETMGj27Iy5YpAG3Mvyodm4oNQ2/8Hs84RSmNDUOlY1O1Mf8KDNnwkTiyMS/tDVi50nZc/Ikvqljy
+3cPW+T0ez3illicQS7674+JPfJGVK+3RcgQOrw7VbYedb79pkRO9Fmc1iN/J5/FMDASUQxunlbuw
+/zfffvJIW4kP5wEoNm1SzOuNO2tvV0rFqoU4vfF7PBMDhQhKqZiz9nbm9cbZtElxGBt+owAsW6ZZ
+udK2T3r9cypILzqwq8/j8UwYFEbCcqiC9KL2Sa9/jpUr7VAl7oPedjAaRNJL/3yatnajQk2Klvz8
+6O/xTEAEpUWQ/c6Y+fnV39hRXb4fmgocrAjLlilQoivl/61NohtnBW/8Hs9EReGsaJPo1pXy/wYl
+h64KHBCA3l7NypU2c/FN5ygdXCdh0a/3ezwTHaW0hEWndHBd5uKbzmHlSjs8QeiAgUdBAgT7P5SJ
+JRDxo7/HM/FRiIgysYRg/wcwZOvRHw/8U9ouvGGaDoKXgHS1ArEXAI9n4iNVU867MJybW3v7Dqo2
+H3kAy36iAYzRN6og3oY4hzd+j+dkQSHOqSDeZoy+ERiy+aqRi2LJzcl2nX1amdgcXOiop1yYx+MZ
+bzh0oMVWXs669vNYc0sRlGiWLg1ASUYNXq6DxBxsxRu/x3PyobEVp4PEnIwavByUsHRpoOEdACil
+r0Up4Sg7hzwez4TGoZQopa+N/vMdKEDNWrIs2a+7XkKbGYhf+/d4TlIEZRTObut0++ZuXbOyqAHp
+N50LlTHTcNYH/zyekxeFs04ZM63fdC6ktgogoq/AxHRUZNDj8Zy8iMPEtIi+AkBDr1ZwCdHKnx/9
+PZ6TGqVwDgWXQK/WnQtf7QAWiAtB+ei/x3NSo9DiQoAFnQtf7dDSljgTrbsR54N/Hs/Jj0KcoHW3
+tCXO1Gh1gdImVs3993g8JzsiorSJodUFWkSdFg38yguAx9MSKIn2CKnTtODOF3GgxLv/Hk8roESJ
+OAR3vkakZ6zvx+PxjAEiPRpFuy/66fG0FAoRULRrpfQ5iMXnAHg8rYJSiEUpfY7GB/89ntZExCf+
+eDytjBcAj6eF8QLg8bQwXgA8nhbGC4DH08J4AfB4WhgvAB5PC+MFwONpYbwAeDwtjBcAj6eF8QLg
+8bQwXgA8nhbGC4DH08J4AfB4WhgvAB5PC+MFwONpYbwAeDwtjBcAj6eF8QLg8bQwXgA8nhbGC4DH
+08J4AfB4WhgvAB5PC+MFwONpYbwAeDwtjBcAj6eF8QLg8bQwXgA8nhbGC4DH08J4AfB4WhgvAB5P
+C+MFwONpYbwAeDwtjBcAj6eF8QLg8bQwXgA8nhbGC4DH08J4AfB4WhgvAB5PC+MFwONpYbwAeDwt
+jBcAj6eF8QLgOSZKqbG+Bc8o4QXAc1ScCNY5tPYicDLiBcBzRJwT0sk4qUScYqmC0b67nGz4FvUc
+FqUUobV0tqe58399iu7ODPlCCWN8lzmZ8K3pOSJaK3KFEpcsOpe7//GzdLSnKXgROKnwLek5KkZr
+du8f5IJzZ3PPP33Oi8BJRuu0olJvfHmOi1hg2F8Wlsw/7eQUgRbuGydJCw5DKZTWKG1A6eglgtgQ
+sbb6iv691tjR+3VLNfyJEjOKPTnLknkTXAQObW+lDuoTtX9HZKj/KG1O2v4RjPUNNASlUQpEBAkr
+2EoFnEMZA0oRtLWjgljUqBA1ujjCwYFIHMIw6hhBDB2LRY0NiHNj+KPGH7FAs6dwQATe/6m/YyCb
+J5VKYO34fVbD29OVy0hYARFUEET9I9OBqg4U0QcUElYIc9nq4GFB66hvBDGUUtFbZfz+5uNl4gqA
+UtWGEFypgFiLjieId/WQmn0GyakzSEyfiUmmiHdPxiRTBwxaKXCO0q7tuEqF4rbXKO/ZRX7Ly5R2
+74waXilMIokyBhE50DlanJgxE0MEav3DWsJ8DkQwqTSpGTNJnzqHeM8UkjNmo2MxElOmgz4gAEpr
+bLFAee9ubLFAaXsfxZ3bKLz2CuV9e7HlEsoYdCI51Acnav9QmUuWT7A7j1w4F5ZxpRI6Fqft9DPp
+mH8+6TPOIjl1OqatHWUAF7WLhLaq1jUXTqojfqR/ykT/yxaKlHfvJP/aqwxsWk/2hWcIc1l0LIaO
+JyZ0Q58oSikqYUhPZ4ZHfvBlejrTVEIZygqsWEtPyrBm0+bxJQJVw3flEq5SIWhrp/2sN9Ex73zS
+s08nPnkqJpUEBWKjj0hYdfkP6h8aFZjI69fRe20uS3HndvKvvMDAxvXkXn0RVymjEwl0EK8OMBOr
+f0woAVBaI9ZiC3niPVPomH8+XW9ZQvr0M9Exg1jBVSqRy8aBBj1yKqscZM9qyM3TiIPitj76NzzO
+/g2/o9D3GjoWoBPJ6vef3BxLAGD8iYAyBlcq4iohqZmzmbTwrXQuvIDkjJlRKCh0Uf8YNrWLfs7h
++4cMdY6oLyljov5hFK5iyb/6Ivt+v4aBjesp79mFSaUjj3ECTR0nhgBUVT3MZYllOpn89nfRfeFS
+4t1diAVXKiJS7Zz1BmpEhhpexxPomMbmC+zf8AS7/uN+Cn2bMen2SIwmUEOfKMcjADA+RKDWFjaf
+JTXzNKb8pyuZtPBtmHQKV3G4cmnoNzWqfyiloimAgfLefexdu5rdv3mQymA/QVv7hPEWx70AKK0j
+1Q4rTHrLEqZf8X6SM0/BFSq4MGxMox6JWmNrjUknCAdy7HrofnatfgBXqWCSyZNWBI5XAGBsRSCa
+rxfRsRhTll7BlHdcSdDRhs2XEOea0j90EKBTMYp9r7P9gXvY//s1QwHl8d4/xrUAKG0I81ni3ZOZ
+de1H6Zy/EGctrlRq+rKMOIsyASYZp9C3la2r/oXs85swbe3VN4zbxzgiTkQAYAxEoHofNpel/ex5
+zLr2T0nNnIUtlhEbRsvAzUIEcS6KBRhD/8YNbF11J+W9uwnS7Ygbv1PG8SkAtcbNZ+mYv4jZH/44
+8a5uwnxhdBX9WFQbOlpRCNn2s1XseuiBatwgGPdqfyKcqABA80RAaY2EIa5SYco7rmDGf7kWpQNs
+sTC26/VVjyBIpyjv28trP/4eAxufxKTH7yAx/rI4ogV9XKnI1HdexZzlNxO0dxDm82OfjKGiQJAt
+FRHrmHnt9cy+/gYwBlcpD603138ZhdF6TF71bPs9dIlwNJKFoilhGYxh9vU3MPPa6xHrsKXiUN7H
+mFFNMgrzeYL2DuYsv5mp77wKVypWE4vGXyLR+MoDGGb8sz70caYsfQfhYDH6UzNdumNQM/RwIE/P
+xZeRnH4Kr9x6SzQXjcdH7AlorUCgWK5QqoRHiE2PHgIExpBKxDBGUwlP/DtGM09AaY0rlzHJJGcs
+v5m2OXMJB/IoYxomvo1AaYOEIRKGzFp2PYmpM9j6k++hE8mhPj5eGD9TgOHG/+GPM/mydww17nhG
+rCVoS5N79WVeufXvRywCxmiy+SKgOOvUaZw+cwpueOrCKCMCgYKdewd45pXXKRRLpFMJJmXajnsK
+MJxGTwcONv7P0nb6HMLcBOkfHWl2//Yhtv54/InAuBIAVyoya9nHmPz2iWH8NQ4WgVuw5SLKBMfd
+yMYY+geyLD7vTL70qWtZPH8une2JUb7rN6KAXMny0uZt/N0d9/Gje3/DabOn85v/729OWACggSKg
+FGJDTLw68k8Q468xJAK/eYitK++IRMALwLCb0IYwN8DUd17FrGXXU+mfOI1bQ6wl1pFm7++eYPMd
+30Anj6+RA2PY1z/INe+6kDv++pNk0gmyFbB2bJpFa0UqDnHgC9/5d772r/fxzM++xqRM8oQFABok
+AkrhikVO+9if0/3Wt1GZQINDDbGWWGearSt/yM5f30fQ1jEuVgfGfOIUBU2iaP8p77+OcLA44RoX
+oiy0ykCerre+jelXXoPNZY85L9VKkS8WmXfmbL79hRuIJxPszVtEIkMcixdAtujoLzl6b3wf1733
+EvYP5Bhpk9QbGFRaY3NZpl95DV0T1Pgh6h/hYJFT3n8dHfMXEeaP3T+awdjegVK4SoV492Rmf/jj
+Ez7FVhmDzRaZ9p730XHeImwhf9RG1lpRKpT59H+9immdKbJFSywY+85ttMahKFv478s/QEd7mtCO
+vDrwQSLw9UgE8oUS+hgGoLTGFvJ0nLeIae95HzY7MQeH4Yi10bJ292RcpTLmKwNjLgASVph17UeJ
+d3XjymP/QBqBOMfsD32cINOJq241PhyV0DJpUoYLF5xF0QnBONpbr5WiHMKUrnYmdaQI69TmIRGY
+fxp3/eP/TXdnO5VKeGRRUQoXhgSZTmZ/6OMnR46FUrhyhXhXN7Ou/Wi0LblVBaDm2nW9ZQkd5y2M
+knxGzQBkKIlHnIt2Bo5WEKbWyD3dTHv3+3DFwmE7eVR009GZSTO1p4NQVNOX/Y6FUlCxgrXSkHuL
+B4ad2ZBLzjud7335U4ThkZc6lVK4YoFp734f8Z5RHhxEQNyw/iGM1q4+ZTRhvkDHeQvpesuS45oq
+jiZjc2WlcDYkyHQw7co/irbrNrpxqwaPCEpHe7dNKoVJpdDJ1NBW4CFBaCBKK2yhRM9FS2mfe06U
+pHKYRtZakS+WGcgWxj4YcxgEMMNiA/USWkdnOuD1fTm+8t27jjgFUFpjS0Xa555Dz0VLsYUSqtHn
+ElQNHkAFATqZOtA/Esko72RYH2ooSiGhZdqVf0SQ6cDZI3uJo82Y9DulFK5QYMrb30PylOlRbn+j
+HkC10VQsTtCWQscT2GKB3CvPM/jMUww+8weyz22kMtCP0iZ6TyI1NAo0BKWq9xBj2ns/cNAOwwO3
+KcRjAbv37OfpF14jZcCOIzdXAK2EcsVSKofUa3/WOVJxTf9gng9+5qs8tOYPJBNx3GGMq7aTbtp7
+P4CqbahpWP+IDFonUgRtKZQ2VAb6yT63kcFn/sDgM0+Re+V5bLGAjiei98TiDRUCpRSuVCJ5ynSm
+vP09uMLhvcRm0PxMwOrcLt49me4lS3GFSsNcIHEOHYth4gGFrVsZ2LSB7AubKO3aTmWwPyr8AKA0
+QXuGeM8U2s84i8y882mfczYosMXDj9YnitIaVyySOftNZM45j8Fn/4BJpQ+eywpoo7lt1YO8b+kC
+jFI4J2N+Co8IhM4yOWX4ux//misvW8RZp02mWDrxZUA4YPwDg3mu+fQtrNnwHN3dHVQOE1ioBf4y
+576ZzNlvwjWoPYDqPo4kCGRfeo7BTevJvvIC5T27CLODQwOACgJimU4SU6bTftY8OuYtJDVrFq4c
+7T9oWP8oVOhespQ9j/4HYT4XBTibnB/QdAFQSmFLRTouuJR41yTCXKEhD1SsJWhPU96zh+0P3M3+
+9U9g89mooGMQi9JFEzFqcztbyJN/9SVyLz3HzoceIHPWm5j+3j+ibe6Z2FyxdrP13ZMIymi6Fl/M
+wDNPveHv1jky7Wl+8dvf89ff+Xe+dNP7yIZQqoxVZZno9wZGMTllWPXQBv72n+/hw//5Uka6QHNY
+45+UOazx1xARuhZfjDL6QJ2HeqgaVdCeIvfSi2z/+V0MvvAMElZQJoimAPF49c0KxFEZ6Ke8dzcD
+z2xgx4P3Mun8tzH9imuI9/QQZhuwFFkbCLsm0XHeInb/9sEDdQSaSNMFQETQsRhdiy9CGrVLTCRK
+wnnicV6/54dRdZZ0W5RsUQvoHOLiK21QCYNSSUSEgeeeJvvy80y7/CqmXXENElYOVA4eIVEgq0xm
+3gISk6dR6d8XxR6GNbK1js6Odr5y27+xffc+VvzZB5jRkxmzmIAAg6WQW37wEJ//2g/pnpQZ8SM4
+YeOvLgsnJk8jM28BrlhuiPErEw0C2++7mx2/ug9XKWOSKVSiVuaNYW1SrQsYBAcKgDrLnkf+g8Fn
+n+aU919P99suIMwWGzItEevoWnwRe9esbrrxQ5MFoFZssW3O2aRPm4srNWAHXbW667b77mH7/Xeh
+jCHIdETlnY+aaSVVXaiODlX3/PWfraS443VmfvC/YhKp+kRAKZy1xDrambTwrez45b0EscwbGtqJ
+kE4nuX3Vr/jFoxu4dNHZnHPGTJxAs9YGRASjoW/HXh7b8AIbX3yNeDxAaz2ijjmSkb/mHU5a+FZi
+He2E2Tq9w6rx21KBvh/cxt4nHiFoax9q66P+rurAUXtLkOkgzA6w+V++SWnnNqZeftVQNemRorTG
+lcqkT5tL+vQzyb38/MHFa5tA8z0AG9I5fxE6bgjL9Sm8OEeQSbH9vnvou+v7xLt6otLgI/BXaw89
+1jmJvWt/gy0WmLP85oYkJ0kodMxfxK7VvzhipxMRJnW2sXvvAD+871EY6gTNGhWq7aAU8USMzkwb
+pUq5acYPVe8wnqBj/iIkbFDALQjY8s+30b/hCWJdPdEuvREYmFhbrfITp++u7wMw/ar3Ew7WJ1Ii
+gokbOucvIvvCphF/z0hpqgCIc+h4gvQZZ9XdwOIcQVuKfU88zvaf3zVk/PUGUSQMiU3qYWDjk7x+
+z4+Y+YHr64pTKKWQSoXkjFnEu3so79v7hmlADWsdsVhAIhFr2sh/KIIgLjoSfCSPcqTGHy2NhcS7
+e0jOmIVUKvUPDm0p+v7thwxsfJLYpJ4DQeARf6kgQLyrh+0/v4vE1Bl0Lb6g7jiWhEL6jLOiytNN
+XglqngBUs/7ik3pITJ1RXwOLoGMB5b17ef3uH6CCxtbuFxti0u3sWv0AmXPOI/OmN2MLI2zk6pKg
+SadJnXIqpZ3bo1pxR/EEGrERaKhefR2fP1FGbPzV67lKmdQpp2LSaVxx5HNscQ6TSjGw8Q/sWv0A
+Jt0enfbTCKoioALD63f/gLYzziRoz4w4l6U2QCSmziA+qYfy/j0HH2IzyjQt1lT7oanZZxC0tdW1
+thu5ijG2//xuynt3o+OJhj+wqPSYZtu9P67WIBz5Ek1UWBTa5p7TlECP1grr3GHX2EeLeoy/hojQ
+Nvec6mluI7z3auKXK5XYdu+PiU6NanySmY4nKO/dzfaf342OH1nQj0l1gAja2kjNPqNuz+dEaWqw
+WZwjOW0Gyoy8gSPjj1Po62P/+rWYdNuobCIS5zCJBPmtm+nf8DtMKl6X8YqDxNQZB04aGiWM1hRL
+FVKJOOlkHOdGXwQaZfzKmMg7rMMLFhFMKk7/ht+R37oZkxgdt1qsxaTb2L9+LYW+vqgITD0DhIHk
+tBlNnwI0TQCGGnj6zPoS7kTQccPAxvXYfG7U86iV1vQ/9TvEjXw9Wg3Nb6dEa72NzGwbhjGafKFE
+d2eGO//Xp+hsTxNaO6ojSiOM/8Ao2E68ewoSHmWT0DG/SiFO6H/qd03pGzafY2DjenS8viQecZCY
+PnPUB4hDae5yswKTStcV2I6mEkL2hU2jvjVURFCxOPnXXqGyf399mVoi6GTyhCoFnQjGaAqFEh3t
+ae7+x89yyaJzyRVKo5pV2BDjryGCMsFxF1I58ncYKvv3k3/tlSiFd5SNSRlD9oVNSKXOhCWp2kaT
+Y7/NEYCawqczUbR+pApfbeAwN0hp57bRb+Bahxrsp7Rre5SXPpLr1X5/qq3uEe5wDDf+e/7pc1xw
+7mx27x/EjOII2EjjP8hDSo08PhQJdmwo9Xu0U2trA0Rp5zbC3OCIrzf0+7t6CNKZUfMQD0fzPIBq
+4+hkur5gWhBQ2rWDyuBA5OKNtsJXG6fQtwVVz9MSQcWiXWeN3H14qPEvmX8a+8syqoVFGjry1xAX
+7dKM1echKQ2Fvi0NF9nDItGpUZXBAUq7dkRnQ9TlIaZRseatAECzpwCN2HFXLR7a1GIKIrhCrn73
+TBhd4593GntylpiZIG7/oYirP+9JEbVVs4yourztSg1IDR7NOhVHYDxuQz82Y3E6UF3Df+M5rPEX
+LLFgNN1+GT3jbyTNbquxPK2qTsZXrz5OxuKEoPF0MMkRjX8Ug6LWCemJYPyMQVtVTwSaiDR9ClDP
+OmctmSg+ZRpBW6bu3XrHQ235MjnzVKTevl7n74cxMn7rSMUU/dnRNf5GFN0QC8mZpzZnOU2p6pkQ
+GeJTpjUkffnknALUounZAcoNiKbHMp3EexofTT/S9Uy6ncSU6XWvXlSyg9XfP7LVi7EZ+R3pZIL+
+wQLXfPrvR8X4a9H08q7tVLL1R9MTU6ZH6b+jHE0fit73TCGW6ax79SL6/QNNLQzSdA/AVSr1fYVz
+6ERA+5yzG5fffQQij6NMasYs4j2T697+KbYy4nseC+N3IiQTMfoHc1zzmX9g7frnR9XtFxsito7+
+MWSQk0nNmIVUGlBP4BiIDWmfczY6Uf/p0K5SOUk9AA6oZXHbVlSdfba2vbauZZfjvlZIx7yF6PjI
+Xcpo+TJGec8uKtnsCSv8WBg/gFaaSmj58Ge/yqO/f4au0TL+IQ8pS3nPLlQw8tx6qWaKdsxbWP/u
+v+O4lgqChmxfVgaK27Y2Z/lyGE3OBFSU9+ysLxNQa1ypRNsZZ5I5a15Udns0AjDVkk2xrh4mLb4I
+V6xvfqcMVPbujjyAE/iesTJ+ESFmNPv6szzz8lY629sIR/Pglur5f5W9u+saIKIqTBUmLb6IWFfP
+Uc9lqIeo5mOBzFnzaDvjzOqGsXqKlxDZRpOD283bCwDoWIz85pexx3EqzFG/SwQUTH/vB6KttaMw
+11MqauBp77qaeHdXQzpS9qXnotHuON8/VsZfQwCtNcl4bNQrFisAkegZ1fVFtaKzXUx719XVcxka
+3M2rsSEdizH9vR+IygjW4YlqrbGFEvnNL0f9uYG3esxrN+1KzkEQo7RnJ6U9OyGIDat6c2JEpcVK
+tM2dy9TLr64ertA4o1DGROcVnreIyZddjs3XV5k2auAyha2vHncDj4bxa60wWp/wS6mRfe7Q7zga
+tQGisPVVbKFc1wARbdIpMvmyy+k4r3oOXwNFU2mDzWWZevnVtM2diy3WMfo30C5GQlMrAmmtCXNZ
+ClteIT1rNmF55Ml10clCRaZdcTXFHX3sXfubqOpLnYFBZQLC3CDJqTM49SOfrH8e6RzE45S2v05p
+9/E1cKON3xhNGFpyhXK0O3BE3zJyBEjEApLxWJSpd7gtyjVD2L2T0u4dJKefAuUy1FVpJ+TUj3yS
+F7/2ZYo7t1WXjuvvH5X9e+i+8O1Mu+JqbK6+wUEAE9MUtryCLeQP7BZtEmNSFnxg03q6l7y9IcEO
+CS0zP/gn2GKBgY1PYtLtkat+og9RKZTSB4z/T24kaMvUfU6AACZuyD73NDafi6rHHOXeGm78WtM/
+kCOVTHD+2acytbuDUJo41ZTIhl/t28ULW3YAQns6edjjwbXWhNlBss89TfrU+gaIobMF2zKc+ic3
+suVfvxOJQLodGUnKbXXfSZjtp3Ph25j5wT+JqgDVSbR9GQY2rR+Tw0GaWxNQBJVIkn3hGYrbXycx
+ZVp00EIdVXfFWkwiyZzlN/P6PT9i1+oHQClMIgXIsUuFKY3SUTlqW4zc/lP/eDlBe3tDDgmJpitl
+9j+5FhWLH/W9o2H82YEc1139dj73sauYe9oM2hJmTE4c6M+WWLfxJT7/T6tY9/SLdHa0Yw8TVFSx
+OPufXEvPZZc36NkXSc8+gzM//Xm2/OBWBp5+Ep1MVWNHx9ibolS1bypsqQAiTH3nVZzy/uui4qJ1
+JqLVSuQXt79O9oVnUInkSX4ugAjaGMLsIP3rH2f6f74GVy7XNxxVRUCsZeYHridzzny23fsT8ls3
+o7RGxeJRXfhqQ1ZvJNIEZ3HlQlQItKuHU67+MJMveycS2oYYf1SbLsngsxvJb92MPkp1mtEw/r0D
+WT7/qQ/zNze+jzJQKMNgcSzMH+KJBO++cB5L3vxXfOyLt3H3g2vp6swctLIQFY2Nk9+6mdxLz5M5
+dz62UF871ETAJJPMWf4Zdv/21+x48F4q+/ZEB4LE4qBNtQsO7x9RdWlXKSPOkZ51GjOu/hAd8xdg
+8405OCaqbWnoX/84YXbwmN7haND8o8GqJb32r3+cKf/pvY1Zwqs2RJgrkHnTAtrmnE3/ht+x/6l1
+FF57hXBwABsOS7JQ0VzOpNtom30GHfMW0rV4CfHu7qHGbdTSotKK/eseQ2w4dAjJoTR+zg/7B3Jc
+995L6L3xffSXHFYiURirY8dEYG/e0pZM8O0v3MDzr77OS69tJxk/+HxAVV0O3L/uMTrmndeQayut
+hwaJKe94F50L3sK+dWsY2LSB4vat2Hwuig3UbkMpdBAjyHSQmn0ekxYspnPhW9GJZMNOsqrdly2U
+2L/+8ehkoiaP/gAqc8nypl9VVYOBp35kOT0XX0Y42ICjlqqIcyitMakE4qCyby+l3Tso9G3BFnLR
+kpDWpGaeSmLKdOI9U9BxgyuGuLCx5xSaRJziju288A9/Hf1Ppd7QyFprCsUSne1p7vl6tJ+/3mi/
+MbCvv0BoLdO62ymFgh4nu9XKoWVK2vCdux/hpi9+i66uDOHweMCwZ3TW//VFktOmYxtxgEwVcQ4d
+xNDJAFe2lPfsorRrO4W+LeAcIg6Taov6x+RpxLq6URpsoTTUtxpyH9YSZNLsefS3bPn+rU0P/tVo
+vgcAVdcnxq5f/x86z3tLQ9fyaw0U5gooBUF7B7GubjLnvOmgiJLYqBGkUhk6oKSxCUUKjGHng/di
+iwWCdNsbGlgpRaUS0t3Zzqqv3twQ4wcILUzqSKGAcsi4MX6AwGiKTrhwwVlMqmYWHhQDqhbZCPM5
+dj54L6f+6U00sk5W5A2EhNko9hTvmUJi6nQ6F5w/7B6qW/MrIa5YQCT6XMP6hwg6CAgHcuz69f9B
+N7kIyHDGZA9jlK6ZpNC3hV0P3Y9ONr60V7RlOGpsVywQ5gqE2Xz1VcAWCkilcmArZwONpDb3H3h6
+A/vWPfbGU4Fr9wiEYcj3vvwpLjnvdHZmQ+INqOSjAGuFipVxt01dAaEopvZ00JlJE1r3hiBw9PzS
+7Fv3GANPb8Ckko0dHYe1uVQq2EKBMDusf+QKkeHbsBokbqyZiAg6GWfXQ/dT6NuCjjc/+FdjzDYx
+i7OYtujwjUJf36iVb6Za3z9ScFN96dGrKVAdwVylwvb7VlYDTEe+jtaar3z3Ll7fl6MzHRzsDtdB
+lPSjxiTifyw0MJAtkC+WjxiTUEqBNmy/b+WBI7lHw0iqYnBo/0CNTv+olZsv9PVFh5a0tR/jDMvR
+ZUyrGNQMZeuqOxFnUfqNc+SJRrR9OMH2+1aR79tyVGGLdtvFeWjNH/jgZ75K/2CeVFzXnXarFZTK
+IeWKRSsZVyJgnSNl4OkXXmP3nv3EY4ff0DV0LkPfFrbftwqTbv6xWQ1HBKWj04a3rrrzgLCNIWN6
+dXEOk0ySfX4T2362iqCtwa5ek6kFdvate4JdD91/RNd/ONY5urs7WLP+Oa759C0M1CkCIkIsBtt3
+7+d7//ZrOmKK0NpxoavOCUYpKgK3rXoQbfRRN4bVpgK7HrqffeueIMikR+UQmGYRnX2QZNvPVpF9
+fhMmOfb9fczrGIlz0VTgofvZ/cjDE7aRo5NiUuS3bKFv5R3HTPoZTiW0dE/KsGZDY0TAWujMtPG3
+/3wPqx7awOSUQSkhtK76smPwcsQCxaSk5q+/8+/84re/J9OePq7fqGJx+lbeQX7LFkw6NWH7R5BJ
+s/uRh6PBYYyi/ocyJsuAb7yLKJlHGcPcP/t/aDt9DmGucUuDo00tgcWVCrz0ja9Q6HsNkzrxc95j
+gWHv/kGWLDyHu//xZjoyaQpld0L1/UWEWKDYO1Dgouv+O3v3D/Klv7yeT3zwHWQSwRidOQwO2LZn
+kN5v/Rt33vUftKWTx312YbReXiA1czZz//yv0IkUrty4pcHRJioblib36su89K2/Herr48EtGx8C
+wIF4gEkkOGP5ZyeMCIi16EQCVyzw8q23kN/8Ul3nFdYrAjUB2NOf59KPfJ5d+/opl0Pmnzmbixae
+xcxp3VhH0/LOBUEreO6VPh5+8nlee303HZn0CUe9lTHYfI70aXOZs/xmdDIV7cGfAP2jZvyv3Pr3
+2FLpwLL3OGDcCABURaBcxiSTnLH8s7TPnUNlYPyKgFiLSaWxhSwvf+cWcq++GCV01Omi1iMCwwXg
+kj/+f9k7MEgiFidXKFIuDS851axmrwqN1qSScRKJ2GE3Ah3XNxlDmMvSdvqZzLnxZkyqHVsY3/0j
+1pEm+1LV+IvF6BDRcWL8MM4EAIaLQIqZy/6U7rdeQJhtUO51A6nN6fJbNvPaD26n0Le5oScVj1QE
+DhWAPf2DxILI9VdaocZoEiAIzknd6901TyA18zRm//ENpE89raGZpA2h+huD9iR7f/c4fSv/BVss
+jDvjh3EoAFAVgTBEwgrTr7iGae95P+JsNO8b44YeSjVOJ9i3LmrcMJ+NIv4NDk6NRASOJABjlWgy
+Gihjor3z6XZmLvtTuhZfgM03NlV3pIi16HgcpQ07fnEP2x+4GxXE0EH9RUNHg3EZRRHnUMagE0m2
+3beKl2+7hXBwgKA9PfT35t+UgHOYVAqlFX0//SGb7/gGtlzCJEcnMt3o1YGTBbEWk0xhyyU23/EN
++n76Q5RWmFQqqgMxBmJX65NBe5pwcICXb7uFbfetQieS0RkF47TNxqUHMBylDbaQI8h0Mu3dV9Nz
+0VJULH5QjvZoUms4k0iA1gxsXM/2+35Kvm9zdJwzjHqHOxFPoBU8gCGqU0JbyJOeeRrTr/ogHfPP
+B+ewpVL0lib0D6VAJ1NIpcyex1az45f3Eg72Y1JtY5rldzyMewGAA1MCVyzQfua5TLvyGjJnz0cZ
+hS2Wo2WVaJLbmAtKNFdVWqMTiejE2a2vsfNX97Fv3WOgzeilLh+B4xWBlhKAKkrryOCdpWvxRUy9
+/CpSs2YjDlypOjVo5Pl94qLBxxhMMo5YYfD5jey4/26yLz4bFRwZpy7/oUwIAQCGqrPYUhFEyJzz
+ZroWX0TmTW8m1pFBLFHxhmGu+NBS15EaflhEfKhUgNbRMeaxqJBn7qVn2ff7NfQ/tQ5bLGBSbUTb
+xZr/2I5HBFpRAIBqGytsIYdJpuhcsJiutyyhbe65mFQcV3FIpTJklAcVADlG/xj+7JQx6Fg8KvM+
+MMjgM39g37rHGHzuD9VKVMljV6EaR0wcAaihNCDVKYCQmDKNSQveSsf880lOn0XQ1ga6up0ztJFa
+O1ct/XRwQytjImExwVAtelsoUtq9k+xzT7P/ycfJ921GwhCTSkdbScdY1Y8lAi0rAFVqbWQLeVQQ
+kJ55GpMWXUD7OeeRmDwVk0oCte3gYeTtvSF+Iwd2ASqNCkzU7RyEuRzF7VsZ2Lie/U/9jtKuHSil
+0MkUUX3w8T/qD2fiCUCV2tzOVSq4chEdTxDvmkxq5qm0zTmbxNQZxLsnoxNJgnQb6qA911FDhdlB
+XBhS3rOT8r7d5F5+nsJrr1LavRObz0WeQDxRLdw4fhr2aCLQ6gJQQ1WfhSuXkEoFk24jMXkqqdmn
+0zbnbOJdk4n3TEUHAUF7ZmhgiT4cbRMO8zlcqUh5725KO7dF/aNvC+V9u3HlEjqejPbyM0aB6QYw
+YQVgiOrUQESQsDJ0vpoyhqAtgzImqvqTTB2oFFw16NLObYi12FwkBFSP8NKx2FAHGq+u3JFEQCvl
+BWA4tf7hHK5SQcJKteRXgKn2j8TUGQdvN66e+lPeswuxljA3OFQAVMdiqCA21OfGa/84XsamIlAj
+kQPJJSqIEVQ34YiAKxcRgcpA/2FdMxXEog4SixPEE9XPRY063hX90CXCmgjkS47YmGX8j0OG9Q8d
+j6MSB9rZFvIgQmXfnjd+TmlUEEQR/kRqKEww1D8muOHXmPgCMJxDG0ZFc7cDVYEPeitDLt8EbdDD
+ikB7msrhDt7wvKGda0ll0Yh+6FtrfYOhqP/JyLhMBGocVRetOqIPf1E7HGKCt+yhItCfzZOKqRHn
+27cUtfYXd5j+UesbE7t/HIuTXABag4NF4O/pHyyQTiZaPmPQc2y8AJwk1ERg7frnueYz/0D/YI5k
+Inbce+49rcnEXwXwHERgDPsHsyw85wx27x9gz/4sscBMyBiHZ/Q5uYKAHkJr6Wxv45mXtxIYTcxo
+b/yeI+IF4CTEOkcyHrn/3vQ9R8PHAE5S/Nzfczx4AfB4WhgvAB5PC+MFwONpYbwAeDwtjBcAj6eF
+8QLg8bQwXgA8nhbGC4DH08J4AfB4WhgvAB5PC+MFwONpYbwAeDwtjBcAj6eF8QLg8bQwXgA8nhbG
+C4DH08J4AfB4WhgvAB5PC+MFwONpYbwAeDwtjBcAj6eF8QLg8bQwXgA8nhbGC4DH08J4AfB4Whgv
+AB5PC+MFwONpYbwAeDwtjBcAj6eF8QLg8bQwXgA8nhbGC4DH08J4AfB4WhgvAB5PC+MFwONpYbwA
+eDwtjBcAj6eF8QLg8bQwXgA8nhbGC4DH08J4AfB4WhgvAB5PC6NRaqzvwePxjAVKoUXccygDiIz1
+/Xg8nmYggjKIuOc0QrbqBXgB8HhaA0EpELIapfaM9d14PJ4xQKk9WqHXK6VBlPcAPJ5WQJQopVHo
+9Vop2Rx5/+KjgR5PSyAqmgXIZo2Tx8XZCsovB3g8LYFSSpyt4ORxrXKlF3FuL0orfCDQ4znZEZRW
+OLdX5Uov6v4Npw8ATykdgODG+u48Hs8oIjilA4Cn+jecPqBhhRN4BK3xuQAez8mOCFoj8AiscBpA
+KfcAtuJA+dRgj+ekRmlsxSnlHoBoL4DqtP0bxNodaKPxcQCP52RF0EaLtTs6bf8GQGmW9pqta1YW
+FPxCmUAQsWN9lx6PZxQQscoEouAXW9esLLC012h4qPo3twoRhd8h6PGcrGhElIhbFf3nQ2hWrw5B
+1KBkfuXC0suYmAa/GuDxnGQ4TEy7sPTyoGR+BaJYvTqMRvtlKzVrvlrQcKfSBsSvBng8JxUiorRB
+w52s+WqBZSujBYDqnxUgbRfeME0HwUtAuhoL9NmBHs/ER6qmnHdhODe39vYdVG1eD71h2TKTW3v7
+DhH3UxXEFSJ+GuDxnAyIOBXElYj7aW7t7TtYtsxQHeEPBPzmzasO+eZ/iq2UqnsD/FTA45nYCEop
+sZWSwvxPYMjW4VAXf9kyw8qVtv3iT9yhY+mPSqVgUco09349Hk/DELEqljKukr8z++h3P1az8dqf
+D53jaxBJL/3zadrajQo1CXHqMO/zeDzjH0FpEWS/M2Z+fvU3dhCV/xqa3h+65u9Y9iGdX/3N7Th3
+izIJ7RODPJ4JiohVJqFx7pb86m9uZ9mH3rDEf7iRXbFsmWbjPJPpen2NMvFFElYsCj8V8HgmCoJV
+QcyILT85uO+UJczfZFm50nFIXO9wWX/CvHnCphVlbcwNIlLxRUM9ngmFoBQiUtHG3MCmFeVq4O8N
+Nnz4tN8VKxxLe4P+33z7SWXLX1ZBwvipgMczQRCxKkgYZctf7v/Nt59kaW/AihWHXdY/enAvihi6
+zMXLH1BB/N0SlkKUCkblpj0eT/2IhCpIBBKWfzn46K1XsGyZHh71P5RjRfc1UYbgVB0LnkLpqdjQ
+oXzdAI9n3CHiMIFG3E5XCRfk1t6+k8jGj5jUdyxDdvT2qtza23eoMLwayKM1PkvQ4xlniLioqhd5
+FYZX59bevoPe3qMaPxzv+v7SpQGrV4eZS5Z/VJn4HWIrFpzGHyzo8YwDREA7ZWJGbPljg4/cemfN
+Zo/1yeNz5VevDlnaGww+cuudLiwuVyZmQDtfQ9DjGWsOGL8Li8sj4+89LuOHE83wW9obsHpF2H7x
+Jz6pg+StVU9A+VqCHs9YIA601Iw/++h3b6vZ6PF+w4m78IeKgKuAcz4w6PE0k2jOr5WOMVLjh5GU
+/1q9ImRpb5B99Lu3iS3dgDKDygQakRO6sMfjGSEioTKBRplBsaUbRmr8UM8mn+oFO5bccIEE8buV
+NjOqeQKmru/1eDxHQqpJPoE4u02F5WsG1tz++EiNH+o11GqkMX3Z8hlG1PeUSVwhYREEv3fA42kk
+VZtSQRKxpQesko/nf3vrtuON9h+J+kfqYfuLOy69qVfg80qbQMJyGImAXyr0eEaOSLSxJx6Is6GC
+Lw08/O0VAIfu7R8JDTLOXk0vsGKFy1y6/EKlzNfQsQvFlsFZPy3weE6c6IwObQJl4uAqa0XsXw4+
+fOtaens1KwAOn99/IjTWKGvuyOLFsfbk2/5KafUXSgdTJSyBiK2uFHgh8HiOjCDiUMqoIIG4cKc4
++Xq2+MRXWLeuUq/LfyiNN8beXl3beZRacuNMY9TfKMVHlInFI4/AWRQ+d8DjOQhxCILWRpk4Yitl
+Eb5vrXyhsOY7fcBBttUoRms0VixdampK1XbRTecpzc1K8UFlYh3iQrChA+VQor0YeFoTcYhyIBoT
+aKUDxFYGRPipOG7JPfbtp4GaZ20ZhZoco+yOi2LZh4a2I6aWfmJWzAY3gLoObc5FKcRWQKwgWFAK
+hZ8meE5WBCFKoVcYlFHKxKJsXmefBflRxYS3F1Z/dytQDfL9xIEatZT7Jhlar2bZJjUUsbzyLxLt
+ufKViLpGCZcrrWZjYuAc4sIow1Gk+sNFVe9S+RUFz8RAouo7UaH9ah9WGqVROgCtwVYQJ6+J4lco
+uTvbFr+f+79eAqqGP08aEeQ7Fk02qIM9AoAZi5ens0m9QMG7HXKpQhYA05WJRbcnrur3CDhflMgz
+AdDRopeC6uxWIk8XtgvqKY16WOCX7UX31LZ1t+aHPteEEf9QxmpEjQqPAoeuY3Ze+mddztlzlTEL
+RTgdsYtQuhtx7Sh1rt+A6BnXKAUiz6J0FnF7UeZJpXhVrN2gtXm2/+Fv7Tvo/dEpPRyuYGcz+P8B
+nq7b1vLASQgAAAAASUVORK5CYII=
+PNG
+
+# Seed a default config on first install only (never overwrite the user's).
+if [ ! -f "$PLG/buddynet.cfg" ]; then
+  cat > "$PLG/buddynet.cfg" <<'CFG'
+SERVICE="disable"
+SERVER=""
+SERVER_KEY=""
+TOKEN=""
+# Default to a token file on the array (real 0600) rather than the FAT flash.
+# Create it (see the Secret note on the page); the plain TOKEN field is a
+# testing fallback used only when this file is absent.
+TOKEN_FILE="/mnt/user/appdata/buddynet/token"
+PEER_KEY=""
+LISTEN="127.0.0.1:9000"
+FORWARD="127.0.0.1:873"
+CFG
+fi
+chmod 0600 "$PLG/buddynet.cfg"
+
+/etc/rc.d/rc.buddynet restart >/dev/null 2>&1 || true
+echo ""
+echo "BuddyNet installed. Configure it under Tools -> BuddyNet."
+]]>
+</INLINE>
+</FILE>
+
+<!-- remove: stop and clean up -->
+<FILE Run="/bin/bash" Method="remove">
+<INLINE>
+<![CDATA[
+/etc/rc.d/rc.buddynet stop >/dev/null 2>&1 || true
+rm -f /usr/local/bin/buddynet /etc/rc.d/rc.buddynet
+rm -rf /usr/local/emhttp/plugins/buddynet
+# Clean uninstall: remove the config + binary from flash...
+rm -rf /boot/config/plugins/buddynet
+# ...and the identity key + trust store + peer cache from the array (leave a
+# user-placed token file and the appdata dir itself alone). Array may be down here.
+rm -f /mnt/user/appdata/buddynet/id.key /mnt/user/appdata/buddynet/known_peers /mnt/user/appdata/buddynet/peers.json 2>/dev/null || true
+echo "BuddyNet removed. Config (flash) and identity/trust/cache (appdata) deleted."
+]]>
+</INLINE>
+</FILE>
+
+</PLUGIN>

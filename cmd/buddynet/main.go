@@ -27,6 +27,8 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -49,6 +51,7 @@ func main() {
 	roleFlag := flag.String("role", "", "node role: buddy | relay | handshake (required; never auto-detected)")
 	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
 	listen := flag.String("listen", "", "UDP address to listen on (handshake default [::]:51820, relay default [::]:51821)")
+	relayListenFlag := flag.String("relay-listen", "", "relay: UDP address for the relay when combined with another role on one node (default [::]:51821)")
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
@@ -102,58 +105,142 @@ func main() {
 	*knownPeers = orEnv(*knownPeers, "BUDDYNET_KNOWN_PEERS")
 	*code = orEnv(*code, "BUDDYNET_CODE")
 
+	// A node may run several roles at once, comma-separated (e.g. on a VPS:
+	// --role=handshake,relay). Each runs concurrently on its own port.
+	roles, rerr := parseRoles(*roleFlag)
+	if rerr != nil {
+		fmt.Fprintln(os.Stderr, "error:", rerr)
+		usage()
+		os.Exit(2)
+	}
+	hasBuddy, hasServer := false, false
+	for _, r := range roles {
+		if r == protocol.RoleBuddy {
+			hasBuddy = true
+		} else {
+			hasServer = true
+		}
+	}
+	// Server roles want timestamped UTC logs; a lone buddy keeps short local times.
+	if hasServer {
+		log.SetFlags(log.LstdFlags | log.LUTC)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	switch protocol.Role(*roleFlag) {
-	case protocol.RoleHandshake:
-		runHandshake(ctx, *listen, *keyPath, *authorized, *ttl, *debug, *relayEndpoint)
-	case protocol.RoleRelay:
-		runRelay(ctx, *listen, *ttl)
-	case protocol.RoleBuddy:
+	if hasBuddy {
 		if *join != "" {
 			*token = *join
 		}
 		if *invite {
 			*token = mintInviteToken()
 		}
-		runBuddy(ctx, buddyArgs{
-			server: *server, serverKey: *serverKey, token: *token, peerKey: *peerKey,
-			knownPeers: *knownPeers, insecure: *insecure, code: *code, keyPath: *keyPath,
-			peersPath: *peersPath, localListen: *localListen, forward: *forward,
-			punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
-		})
-	case "":
-		fmt.Fprintln(os.Stderr, "error: --role is required (buddy | relay | handshake)")
-		usage()
-		os.Exit(2)
-	default:
-		fmt.Fprintf(os.Stderr, "error: unknown --role %q (want buddy | relay | handshake)\n", *roleFlag)
-		os.Exit(2)
+	}
+	bArgs := buddyArgs{
+		server: *server, serverKey: *serverKey, token: *token, peerKey: *peerKey,
+		knownPeers: *knownPeers, insecure: *insecure, code: *code, keyPath: *keyPath,
+		peersPath: *peersPath, localListen: *localListen, forward: *forward,
+		punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
+	}
+
+	// --status is a one-shot probe that only makes sense for a lone buddy.
+	if *status {
+		if len(roles) != 1 || !hasBuddy {
+			fmt.Fprintln(os.Stderr, "error: --status is only valid with --role=buddy alone")
+			os.Exit(2)
+		}
+		runBuddy(ctx, bArgs) // exits with the probe's status code
+		return
+	}
+
+	// Fail fast on an incomplete buddy config before any role starts.
+	if hasBuddy {
+		bArgs.validate()
+	}
+
+	// Run every selected role concurrently; the first hard failure cancels the
+	// rest and is reported.
+	var wg sync.WaitGroup
+	var once sync.Once
+	var runErr error
+	fail := func(label string, err error) {
+		if err != nil {
+			once.Do(func() { runErr = fmt.Errorf("%s: %w", label, err); stop() })
+		}
+	}
+	for _, r := range roles {
+		wg.Add(1)
+		go func(r protocol.Role) {
+			defer wg.Done()
+			switch r {
+			case protocol.RoleHandshake:
+				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
+					Listen: orDefault(*listen, "[::]:51820"), KeyPath: *keyPath,
+					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
+				}))
+			case protocol.RoleRelay:
+				fail("relay", role.Relay(ctx, role.RelayConfig{
+					Listen: relayListen(*relayListenFlag, *listen, roles), TTL: *ttl,
+				}))
+			case protocol.RoleBuddy:
+				fail("buddy", role.Buddy(ctx, bArgs.config()))
+			}
+		}(r)
+	}
+	wg.Wait()
+	if runErr != nil {
+		log.Fatalf("%v", runErr)
 	}
 }
 
-func runHandshake(ctx context.Context, listen, keyPath, authorized string, ttl time.Duration, debug bool, relayEndpoint string) {
-	if listen == "" {
-		listen = "[::]:51820"
+// parseRoles splits a comma-separated --role into a deduplicated, validated set,
+// preserving order. An empty value or any unknown role is an error.
+func parseRoles(s string) ([]protocol.Role, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, fmt.Errorf("--role is required (buddy | relay | handshake; comma-separate to combine)")
 	}
-	log.SetFlags(log.LstdFlags | log.LUTC)
-	if err := role.Handshake(ctx, role.HandshakeConfig{
-		Listen: listen, KeyPath: keyPath, Authorized: authorized,
-		TTL: ttl, Debug: debug, RelayEndpoint: relayEndpoint,
-	}); err != nil {
-		log.Fatalf("handshake: %v", err)
+	seen := map[protocol.Role]bool{}
+	var out []protocol.Role
+	for _, part := range strings.Split(s, ",") {
+		r := protocol.Role(strings.TrimSpace(part))
+		switch r {
+		case protocol.RoleBuddy, protocol.RoleRelay, protocol.RoleHandshake:
+			if !seen[r] {
+				seen[r] = true
+				out = append(out, r)
+			}
+		case "":
+			continue
+		default:
+			return nil, fmt.Errorf("unknown --role %q (want buddy | relay | handshake)", string(r))
+		}
 	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("--role is required (buddy | relay | handshake)")
+	}
+	return out, nil
 }
 
-func runRelay(ctx context.Context, listen string, ttl time.Duration) {
-	if listen == "" {
-		listen = "[::]:51821"
+// relayListen resolves the relay's listen address. It prefers --relay-listen;
+// failing that it uses --listen only when relay is the sole role (so a lone
+// `--role=relay --listen ...` still works), and otherwise the default — which
+// keeps the relay off the handshake's port when both run on one node.
+func relayListen(relayFlag, listen string, roles []protocol.Role) string {
+	if relayFlag != "" {
+		return relayFlag
 	}
-	log.SetFlags(log.LstdFlags | log.LUTC)
-	if err := role.Relay(ctx, role.RelayConfig{Listen: listen, TTL: ttl}); err != nil {
-		log.Fatalf("relay: %v", err)
+	if listen != "" && len(roles) == 1 {
+		return listen
 	}
+	return "[::]:51821"
+}
+
+func orDefault(v, def string) string {
+	if v != "" {
+		return v
+	}
+	return def
 }
 
 type buddyArgs struct {
@@ -163,7 +250,21 @@ type buddyArgs struct {
 	punchDur, idleTimeout                                                   time.Duration
 }
 
-func runBuddy(ctx context.Context, a buddyArgs) {
+// config maps the parsed flags onto the role package's BuddyConfig.
+func (a buddyArgs) config() role.BuddyConfig {
+	return role.BuddyConfig{
+		Server: a.server, ServerKey: a.serverKey, Token: a.token,
+		PeerKey: a.peerKey, KnownPeers: a.knownPeers, Insecure: a.insecure,
+		Code: a.code, KeyPath: a.keyPath, PeersPath: a.peersPath,
+		LocalListen: a.localListen, Forward: a.forward,
+		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
+	}
+}
+
+// validate rejects an incomplete buddy configuration (exits 2). Run before any
+// role starts so the error is immediate, whether buddy runs alone or alongside
+// another role.
+func (a buddyArgs) validate() {
 	if a.server == "" || a.serverKey == "" || a.token == "" {
 		fmt.Fprintln(os.Stderr, "error: --role=buddy needs --server, --server-key and --token (or --invite/--join for the token)")
 		if a.token == "" {
@@ -175,22 +276,13 @@ func runBuddy(ctx context.Context, a buddyArgs) {
 		fmt.Fprintln(os.Stderr, "error: set at least one of -L or -forward (otherwise the tunnel carries nothing)")
 		os.Exit(2)
 	}
-	err := role.Buddy(ctx, role.BuddyConfig{
-		Server: a.server, ServerKey: a.serverKey, Token: a.token,
-		PeerKey: a.peerKey, KnownPeers: a.knownPeers, Insecure: a.insecure,
-		Code: a.code, KeyPath: a.keyPath, PeersPath: a.peersPath,
-		LocalListen: a.localListen, Forward: a.forward,
-		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
-	})
-	if a.status {
-		// A status probe maps its result to an exit code via the returned error.
-		if err != nil {
-			os.Exit(1)
-		}
-		return
-	}
-	if err != nil {
-		log.Fatalf("buddy: %v", err)
+}
+
+// runBuddy runs the one-shot --status probe and exits with its result code.
+func runBuddy(ctx context.Context, a buddyArgs) {
+	a.validate()
+	if err := role.Buddy(ctx, a.config()); err != nil {
+		os.Exit(1) // probe maps "offline / unreachable / untrusted" to non-zero
 	}
 }
 
@@ -308,6 +400,7 @@ USAGE
   %s --role=handshake [--listen [::]:51820] [--key PATH] [--authorized FILE]
   %s --role=relay     [--listen [::]:51821]
   %s --role=buddy --server H:P --server-key KEY --token TOK (-L addr | -forward addr)
+  %s --role=handshake,relay ...       # combine roles on one node (own ports)
 
   %s --role=buddy --invite ...        # mint a token and wait (BuddyPeer)
   %s --role=buddy --join=TOKEN ...     # join with that token
@@ -317,7 +410,7 @@ USAGE
   %s version
 
 FLAGS
-`, appName, version, appName, appName, appName, appName, appName, appName, appName, appName, appName)
+`, appName, version, appName, appName, appName, appName, appName, appName, appName, appName, appName, appName)
 	flag.PrintDefaults()
 	fmt.Fprintf(w, `
 EXAMPLE (BuddyPeer: rsync backup between two sites)
