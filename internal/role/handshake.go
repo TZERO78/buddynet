@@ -20,6 +20,7 @@ import (
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	"github.com/tzero78/buddynet/internal/ratelimit"
+	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -30,6 +31,7 @@ type HandshakeConfig struct {
 	Authorized string        // optional client allowlist (approval mode)
 	TTL        time.Duration // liveness window for a registration
 	Debug      bool          // verbose, security-sensitive logging
+	QUIC       bool          // run the control plane over QUIC instead of plain UDP
 	// RelayEndpoint, if set, is advertised to every paired buddy as a relay of
 	// last resort — use it when this VPS also runs --role=relay (commonly on a
 	// second port). Buddies fall back to it only after a direct punch fails.
@@ -43,6 +45,11 @@ const (
 	maxCandsPerPeer = 8
 	maxCodeEncLen   = 512
 )
+
+// controlIdleTimeout bounds an idle QUIC control connection. A buddy polls the
+// server ~1/s while waiting for its partner, so keepalive holds the connection
+// open well within this; it only fires if a client goes silent entirely.
+const controlIdleTimeout = 2 * time.Minute
 
 // regSkew is the clock-skew tolerance for a signed registration's timestamp
 // (approval mode): a registration is accepted only if its ts is within ±regSkew
@@ -265,8 +272,17 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	reg := newHSRegistry(cfg.TTL)
 	go reg.reap()
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
-
 	hsDebug = cfg.Debug
+
+	// Transport choice: QUIC validates the source address in its handshake
+	// (structural anti-reflection), plain UDP gets the same property from the
+	// address-validation cookie. Both reuse the same pairing core.
+	if cfg.QUIC {
+		log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
+		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl)
+	}
+	log.Print("handshake control plane: UDP (source address validated by cookie)")
+
 	buf := make([]byte, 1500)
 	for {
 		n, src, err := conn.ReadFromUDP(buf)
@@ -290,6 +306,53 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	}
 }
 
+// serveControlQUIC runs the handshake control plane over QUIC: each accepted
+// stream is one REGISTER, answered with a signed PEER_LIST (empty until paired,
+// so a polling buddy makes progress). QUIC's handshake already validated the
+// source address, so no cookie is needed; the rate limiter still bounds load.
+func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter) error {
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
+	if err != nil {
+		return err
+	}
+	defer cs.Close()
+	go func() { <-ctx.Done(); cs.Close() }()
+	for {
+		req, err := cs.Accept(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Print("shutting down")
+				return nil
+			}
+			return err
+		}
+		go handleControlReq(req, reg, priv, authz, relayEndpoint, rl)
+	}
+}
+
+// handleControlReq processes one QUIC control request and replies on its stream.
+func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter) {
+	src, _ := req.Remote.(*net.UDPAddr)
+	if src == nil || !rl.Allow(src.IP.String()) {
+		req.Reply(nil)
+		return
+	}
+	m, ok := parseRegister(req.Payload)
+	if !ok {
+		req.Reply(nil)
+		return
+	}
+	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
+	if !ok {
+		req.Reply(nil)
+		return
+	}
+	// Reply even when parked (empty peers) so the polling buddy retries.
+	if b, err := json.Marshal(signedPeerList(priv, m.Token, peers)); err == nil {
+		req.Reply(b)
+	}
+}
+
 var hsDebug bool
 
 func hsDebugf(format string, args ...any) {
@@ -298,41 +361,62 @@ func hsDebugf(format string, args ...any) {
 	}
 }
 
-// handleRegister parses one datagram. If it completes a pair, it replies to the
-// sender (only) with a signed PEER_LIST naming the partner.
+// handleRegister handles one UDP datagram. It enforces the address-validation
+// cookie (UDP-only — QUIC validates the address in its handshake), then pairs;
+// when a partner is found it replies to the sender (only) with a signed
+// PEER_LIST. A parked registration draws no reply, exactly as before.
 func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, src *net.UDPAddr, raw []byte) {
-	var m protocol.Message
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return
-	}
-	if m.Type != protocol.TypeRegister || !validField(m.Token) || !validField(m.ID) ||
-		len(m.PubKey) > protocol.MaxFieldLen || len(m.CodeEnc) > maxCodeEncLen {
+	m, ok := parseRegister(raw)
+	if !ok {
 		hsDebugf("drop invalid datagram from %s", src)
 		return
 	}
-	if m.Ver != protocol.Version {
-		hsDebugf("drop register with protocol v%d (we speak v%d) from %s", m.Ver, protocol.Version, src)
-		return
-	}
-
-	// Address validation: a REGISTER without a valid cookie gets only a (smaller)
-	// challenge and no further work. A spoofed source never receives the cookie,
-	// so it can never complete this step — closing the reflection vector before
-	// any expensive crypto or any PEER_LIST is produced.
+	// A REGISTER without a valid cookie gets only a (smaller) challenge and no
+	// further work. A spoofed source never receives the cookie, so it can never
+	// complete this step — closing reflection before any crypto or PEER_LIST.
 	if !validCookie(m.Cookie, src.IP) {
 		sendCookie(conn, src)
 		hsDebugf("challenged unvalidated register token=%s from %s", logTag(m.Token), src)
 		return
 	}
+	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
+	if !ok || len(peers) == 0 {
+		return // dropped, or parked (UDP sends nothing until paired)
+	}
+	if b, err := json.Marshal(signedPeerList(priv, m.Token, peers)); err == nil {
+		conn.WriteToUDP(b, src)
+	}
+}
 
+// parseRegister unmarshals and structurally validates a REGISTER datagram,
+// shared by the UDP and QUIC transports.
+func parseRegister(raw []byte) (protocol.Message, bool) {
+	var m protocol.Message
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return m, false
+	}
+	if m.Type != protocol.TypeRegister || !validField(m.Token) || !validField(m.ID) ||
+		len(m.PubKey) > protocol.MaxFieldLen || len(m.CodeEnc) > maxCodeEncLen {
+		return m, false
+	}
+	if m.Ver != protocol.Version {
+		return m, false
+	}
+	return m, true
+}
+
+// pairRegister runs the transport-independent core: approval-mode checks, then
+// pairing. It returns the partner roster to sign, or empty when parked, and
+// ok=false to drop (over-cap, or not allowed). The caller signs and sends.
+func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src *net.UDPAddr, m protocol.Message) (peers []protocol.Peer, ok bool) {
 	if authz != nil {
 		if !verifyRegistration(m, regSkew) {
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
-			return
+			return nil, false
 		}
 		if authz.replayed(m.RegSig) {
 			hsDebugf("drop replayed register token=%s from %s", logTag(m.Token), src)
-			return
+			return nil, false
 		}
 		if !authz.allowed(m.PubKey) {
 			if m.CodeEnc != "" {
@@ -340,35 +424,35 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 			} else {
 				authz.logPending(m.PubKey, shortHash(m.Token))
 			}
-			return
+			return nil, false
 		}
 	}
-
 	self, partner, ok := reg.upsert(m, src)
 	if !ok {
 		hsDebugf("reject over-cap register token=%s id=%s from %s", logTag(m.Token), m.ID, src)
-		return
+		return nil, false
 	}
 	if partner == nil {
 		hsDebugf("parked token=%s id=%s from %s, awaiting partner", logTag(m.Token), self.id, src)
-		return
+		return nil, true // ok, but no partner yet
 	}
-
 	log.Printf("paired token=%s: %s(%d cand) <-> %s(%d cand)",
 		logTag(m.Token), self.id, len(self.cands), partner.id, len(partner.cands))
+	return []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}, true
+}
 
-	peers := []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}
+// signedPeerList builds a server-signed PEER_LIST over (token, ts, peers). An
+// empty peers slice yields a signed "not paired yet" reply, which the QUIC
+// transport sends so a polling client retries (the UDP transport stays silent).
+func signedPeerList(priv ed25519.PrivateKey, token string, peers []protocol.Peer) protocol.Message {
 	ts := time.Now().Unix()
-	sig := ed25519.Sign(priv, protocol.PeerListPayload(m.Token, ts, peers))
-	reply := protocol.Message{
+	sig := ed25519.Sign(priv, protocol.PeerListPayload(token, ts, peers))
+	return protocol.Message{
 		Type:  protocol.TypePeerList,
 		Ver:   protocol.Version,
 		Peers: peers,
 		Ts:    ts,
 		Sig:   base64.StdEncoding.EncodeToString(sig),
-	}
-	if b, err := json.Marshal(reply); err == nil {
-		conn.WriteToUDP(b, src)
 	}
 }
 
