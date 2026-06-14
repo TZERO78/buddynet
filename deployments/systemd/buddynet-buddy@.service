@@ -1,0 +1,84 @@
+# Template unit: one instance per tunnel.
+#   /etc/buddynet/<name>.env   holds the config for instance <name>
+#   systemctl enable --now buddynet-buddy@<name>
+#
+# Example /etc/buddynet/backup.env (chmod 600 — it holds the secret token):
+#   BUDDYNET_SERVER=vps.example:51820
+#   BUDDYNET_SERVER_KEY=9MWkTpllyniJQi2x6ELl1jgbtiLDr1Apjc2+0XDMvOo=
+#   BUDDYNET_TOKEN=a-long-random-shared-secret
+#   BUDDYNET_PEER_KEY=<buddy's Ed25519 identity, base64>   # recommended: pin the buddy
+#   # else trust-on-first-use is used; keep its store on durable state:
+#   BUDDYNET_KNOWN_PEERS=/var/lib/buddynet/known_peers
+#   BUDDYNET_ARGS=-forward 127.0.0.1:873   # or: -forward unix:/run/app.sock, -L unix:/run/bn.sock
+#
+# The token is passed via the environment, NOT the command line, so it does not
+# show up in `ps`. server/server-key/args come from the same file.
+
+[Unit]
+Description=BuddyNet P2P tunnel (%i)
+Documentation=https://github.com/TZERO78/buddynet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/buddynet/%i.env
+ExecStart=/usr/local/bin/buddynet --role=buddy --key ${STATE_DIRECTORY}/%i.key ${BUDDYNET_ARGS}
+Restart=on-failure
+RestartSec=5
+
+# Persistent identity key per instance, survives restarts (DynamicUser-safe).
+StateDirectory=buddynet
+StateDirectoryMode=0700
+
+# --- Logging: isolate and cap so a reconnect storm cannot fill the disk -----
+LogNamespace=buddynet
+LogRateLimitIntervalSec=10s
+LogRateLimitBurst=200
+
+# --- Identity: ephemeral, unprivileged, no home -----------------------------
+DynamicUser=yes
+PrivateUsers=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+KeyringMode=private
+UMask=0077
+
+# --- Filesystem -------------------------------------------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateMounts=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# --- Kernel / host isolation ------------------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# --- Syscalls / address families --------------------------------------------
+# Needs the network (unlike a pure server). AF_UNIX is for hostname resolution
+# (NSS / systemd-resolved) and for -L/-forward unix: sockets.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# --- Resource ceilings ------------------------------------------------------
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

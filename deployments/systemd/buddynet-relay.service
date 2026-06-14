@@ -1,0 +1,69 @@
+[Unit]
+Description=BuddyNet relay (blind encrypted-packet forwarder)
+Documentation=https://github.com/TZERO78/buddynet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Listen address/port is configurable without editing this unit:
+#   sudo systemctl edit buddynet-relay
+Environment=BUDDYNET_RELAY_LISTEN=[::]:51821
+ExecStart=/usr/local/bin/buddynet --role=relay --listen ${BUDDYNET_RELAY_LISTEN}
+Restart=on-failure
+RestartSec=2
+
+# A relay holds no identity key and no persistent state — it forwards opaque
+# encrypted datagrams between session legs and never sees content.
+
+# --- Logging: isolate and cap so a flood cannot fill the disk ---------------
+LogNamespace=buddynet
+LogRateLimitIntervalSec=10s
+LogRateLimitBurst=200
+
+# --- Identity: ephemeral, unprivileged, no home, no shell -------------------
+# Port 51821 is > 1024, so NO capabilities are needed to bind it.
+DynamicUser=yes
+PrivateUsers=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+KeyringMode=private
+UMask=0077
+
+# --- Filesystem: the process needs nothing on disk --------------------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateMounts=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# --- Kernel / host isolation ------------------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# --- Syscall / address-family allowlist -------------------------------------
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# --- Resource ceilings (defense in depth vs. DoS) ---------------------------
+MemoryMax=128M
+TasksMax=64
+LimitNOFILE=4096
+
+[Install]
+WantedBy=multi-user.target

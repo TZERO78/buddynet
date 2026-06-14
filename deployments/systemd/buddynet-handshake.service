@@ -1,0 +1,75 @@
+[Unit]
+Description=BuddyNet handshake (NAT hole-punch matchmaker)
+Documentation=https://github.com/TZERO78/buddynet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# Listen address/port is configurable without editing this unit:
+#   sudo systemctl edit buddynet-handshake
+# and add, e.g.:  [Service]\nEnvironment=BUDDYNET_LISTEN=[::]:7000
+Environment=BUDDYNET_LISTEN=[::]:51820
+ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} --key ${STATE_DIRECTORY}/id.key
+Restart=on-failure
+RestartSec=2
+
+# Persistent state for the Ed25519 identity key. StateDirectory survives
+# restarts and is re-chowned to the DynamicUser, so the server keeps a stable
+# identity that clients can pin. Created as /var/lib/buddynet-handshake.
+StateDirectory=buddynet-handshake
+StateDirectoryMode=0700
+
+# --- Logging: isolate and cap so a flood/--debug cannot fill the disk -------
+# A private journal namespace keeps BuddyNet logs out of the system journal and
+# lets journald@buddynet.conf cap their size independently (see that file).
+LogNamespace=buddynet
+LogRateLimitIntervalSec=10s
+LogRateLimitBurst=200
+
+# --- Identity: ephemeral, unprivileged, no home, no shell -------------------
+# Port 51820 is > 1024, so NO capabilities are needed to bind it.
+DynamicUser=yes
+PrivateUsers=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+KeyringMode=private
+UMask=0077
+
+# --- Filesystem: the process needs nothing on disk but its state ------------
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateMounts=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# --- Kernel / host isolation ------------------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# --- Syscall / address-family allowlist -------------------------------------
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# --- Resource ceilings (defense in depth vs. DoS) ---------------------------
+MemoryMax=128M
+TasksMax=32
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target
