@@ -95,6 +95,29 @@ domain as the identity key**:
 - For the strongest setup, skip the store entirely and **pin with `--peer-key`**;
   then `known_peers` is not consulted at all.
 
+### Invite token vs. session secret
+
+The pairing secret is split so the value that actually travels is short-lived:
+
+- **`--invite` / `--join`** mint/use a **one-time invite token**, valid only until
+  the first pairing (`--invite-timeout`, default 15 min). On the first
+  SAS-confirmed (or `--peer-key`-pinned) pairing, both ends **derive a long-lived
+  session secret from the TLS channel binding** (`HKDF`-style over the exported
+  keying material + both keys) and store it next to the partner key. It is
+  **never transmitted** — both sides compute the same value, and a man in the
+  middle (different TLS session per side) derives a different one.
+- All later **reconnects use the stored session secret** as the rendezvous
+  token; the invite token is retired after first use. So a leaked invite is
+  worthless after 15 min or after the first connect, and the long-lived secret
+  never appears in a chat log or on the wire.
+- **`--token`** is the legacy mode: a single fixed token used for rendezvous on
+  every reconnect (no session secret). Fine for scripted/daemon setups,
+  especially together with `--peer-key`.
+
+This is hygiene, not a new confidentiality guarantee — impersonation is already
+caught by `--peer-key`/SAS. It shrinks the exposure of the one secret you hand to
+your buddy out of band.
+
 ## Detecting an attack
 
 When a SAS is **rejected** (explicit mismatch), the buddy logs a full record —

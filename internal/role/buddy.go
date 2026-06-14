@@ -48,6 +48,25 @@ type BuddyConfig struct {
 	// than learned blindly — pin it with --peer-key instead.
 	Interactive bool
 	SASTimeout  time.Duration // how long to wait for SAS confirmation (default 30s)
+
+	// Ephemeral marks an --invite/--join pairing: the Token is a short-lived,
+	// one-time invite. On the first SAS-confirmed pairing a long-lived session
+	// secret is derived from the channel binding and stored, and all later
+	// reconnects use THAT (never the invite again). Plain --token is the legacy
+	// fixed-token mode (Ephemeral=false): no session secret, token reused.
+	Ephemeral     bool
+	InviteTimeout time.Duration // give up first pairing after this long (default 15m)
+}
+
+// attempt is the per-connection plan: which rendezvous token to register with,
+// and how to treat the partner. It separates the value sent on the wire (the
+// invite token, or the derived session secret on reconnect) from how trust is
+// evaluated.
+type attempt struct {
+	rendezvous   string            // token registered at the server this attempt
+	inviteToken  string            // human token, for TOFU/session keying ("" on reconnect)
+	pin          ed25519.PublicKey // reconnect: partner key that MUST match (nil otherwise)
+	firstPairing bool              // ephemeral invite: derive & store a session on success
 }
 
 // Buddy runs the peer until ctx is cancelled, reconnecting whenever the tunnel
@@ -61,6 +80,9 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	}
 	if cfg.SASTimeout <= 0 {
 		cfg.SASTimeout = 30 * time.Second
+	}
+	if cfg.InviteTimeout <= 0 {
+		cfg.InviteTimeout = 15 * time.Minute
 	}
 
 	serverPub, err := bcrypto.DecodePubKey(cfg.ServerKey)
@@ -109,8 +131,21 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		return buddyProbe(ctx, cfg, serverPub, trust, myID, myPub, myVIP, priv)
 	}
 
+	inviteStart := time.Now()
 	for {
-		if err := buddyRun(ctx, cfg, serverPub, trust, reg, myID, myPub, myVIP, priv); err != nil && ctx.Err() == nil {
+		// Prefer a stored session (reconnect): use its secret as the rendezvous
+		// token and pin the partner key it recorded. Otherwise pair with the
+		// invite/legacy token; an ephemeral invite stores a session on success.
+		att, aerr := nextAttempt(cfg)
+		if aerr != nil {
+			return aerr
+		}
+		// A one-time invite is only valid for a limited window of first pairing.
+		if cfg.Ephemeral && att.firstPairing && time.Since(inviteStart) > cfg.InviteTimeout {
+			return fmt.Errorf("invite token expired after %s without pairing — run --invite again for a fresh one", cfg.InviteTimeout)
+		}
+
+		if err := buddyRun(ctx, cfg, att, serverPub, trust, reg, myID, myPub, myVIP, priv); err != nil && ctx.Err() == nil {
 			// An unconfirmed SAS (mismatch or timeout) is a deliberate "do not
 			// trust" — retrying would just re-prompt forever, so stop instead of
 			// reconnecting.
@@ -131,9 +166,25 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	}
 }
 
+// nextAttempt decides how to connect this round: reconnect via a stored session
+// secret (pinning the recorded partner key), or pair with the invite/legacy
+// token. A stored session always takes precedence, so once an ephemeral invite
+// has paired once, the invite token is never used again.
+func nextAttempt(cfg BuddyConfig) (attempt, error) {
+	if pin, secret, ok, err := loadSession(cfg.KnownPeers); err != nil {
+		return attempt{}, fmt.Errorf("session store %s: %w", cfg.KnownPeers, err)
+	} else if ok {
+		return attempt{rendezvous: secret, pin: pin}, nil
+	}
+	if cfg.Token != "" {
+		return attempt{rendezvous: cfg.Token, inviteToken: cfg.Token, firstPairing: cfg.Ephemeral}, nil
+	}
+	return attempt{}, errors.New("no saved session and no token — use --invite or --join (or --token for the legacy fixed-token mode)")
+}
+
 // buddyRun does one full attempt: register, walk the fallback chain to a
 // session, then forward until the tunnel drops.
-func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey, trust *trustPolicy, reg *peer.Registry, myID, myPub, myVIP string, priv ed25519.PrivateKey) error {
+func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed25519.PublicKey, trust *trustPolicy, reg *peer.Registry, myID, myPub, myVIP string, priv ed25519.PrivateKey) error {
 	// One dual-stack UDP socket does everything (register, punch, relay-bind,
 	// QUIC); reusing it preserves the NAT mapping the server observed.
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
@@ -149,7 +200,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 	serverAddrs, serr := resolveAll(cfg.Server)
 	var partner protocol.Peer
 	if serr == nil {
-		partner, err = buddyRegister(conn, serverAddrs, cfg, myID, myPub, myVIP, priv, serverPub, 30*time.Second)
+		partner, err = buddyRegister(conn, serverAddrs, cfg, att.rendezvous, myID, myPub, myVIP, priv, serverPub, 30*time.Second)
 		if err != nil {
 			return err
 		}
@@ -166,7 +217,11 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 		if partner.PubKey == myPub {
 			return errors.New("partner has the SAME identity as us — both peers use the same --key; give each its own identity")
 		}
-		if needSAS, err = trust.decide(cfg.Token, partnerPub); err != nil {
+		if att.pin != nil {
+			if !partnerPub.Equal(att.pin) {
+				return errors.New("partner key does not match the stored session pin — refusing (someone else answered on the session secret?)")
+			}
+		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
 			return err
 		}
 		// The virtual IP is a pure function of the key; reject a roster that
@@ -198,7 +253,11 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 		if derr != nil {
 			return derr
 		}
-		if needSAS, err = trust.decide(cfg.Token, partnerPub); err != nil {
+		if att.pin != nil {
+			if !partnerPub.Equal(att.pin) {
+				return errors.New("cached partner key does not match the stored session pin — refusing")
+			}
+		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
 			return err
 		}
 		log.Printf("trying cached partner %s vip=%s (server offline)", partner.ID, partner.VirtualIP)
@@ -217,7 +276,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 	tr := tunnel.NewQUIC(conn, priv, partnerPub, cfg.IdleTimeout)
 	defer tr.Close()
 	listening := myPub < partner.PubKey
-	session := sessionToken(cfg.Token, myPub, partner.PubKey)
+	session := sessionToken(att.rendezvous, myPub, partner.PubKey)
 
 	sess, used, err := dialChain(ctx, tr, conn, myID, chain, listening, session, cfg.PunchDur)
 	if err != nil {
@@ -239,12 +298,26 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 		myEdPub := priv.Public().(ed25519.PublicKey)
 		sas := ComputeSAS(myEdPub, partnerPub, ekm)
 		if err := PromptSAS(sas, cfg.SASTimeout); err != nil {
-			logSASFailure(err, sess, used, partner, cfg.Token)
+			logSASFailure(err, sess, used, partner, att.inviteToken)
 			return err // Buddy stops the reconnect loop, key NOT stored
 		}
-		if err := trust.confirm(cfg.Token, partnerPub); err != nil {
+		if err := trust.confirm(att.inviteToken, partnerPub); err != nil {
 			return err
 		}
+	}
+
+	// Ephemeral invite/join: now that the partner is verified, derive a long-lived
+	// rendezvous secret from the channel binding and store it. From here on
+	// reconnects use that secret — the one-time invite token is retired.
+	if att.firstPairing {
+		secret, derr := deriveSessionSecret(sess, priv.Public().(ed25519.PublicKey), partnerPub)
+		if derr != nil {
+			return fmt.Errorf("derive session secret: %w", derr)
+		}
+		if err := saveSession(cfg.KnownPeers, att.inviteToken, partner.PubKey, secret); err != nil {
+			return fmt.Errorf("persist session: %w", err)
+		}
+		log.Printf("session established — invite token retired; reconnects now use the stored session secret in %s", cfg.KnownPeers)
 	}
 
 	return forward(ctx, sess, cfg.LocalListen, cfg.Forward)
@@ -377,7 +450,7 @@ func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKe
 		return err
 	}
 	log.Print("status: checking whether the buddy is online...")
-	partner, err := buddyRegister(conn, serverAddrs, cfg, myID, myPub, myVIP, priv, serverPub, 10*time.Second)
+	partner, err := buddyRegister(conn, serverAddrs, cfg, cfg.Token, myID, myPub, myVIP, priv, serverPub, 10*time.Second)
 	if err != nil {
 		fmt.Println("buddy is OFFLINE (no peer registered with this token)")
 		return &ProbeError{Code: ProbeOffline, Msg: "offline"}
@@ -404,19 +477,19 @@ func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKe
 // buddyRegister sends REGISTER to every server address ~1/s until a signed
 // PEER_LIST arrives and verifies against the pinned server key, then returns the
 // (single, in 2-peer mode) partner.
-func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, myID, myPub, myVIP string, priv ed25519.PrivateKey, serverPub ed25519.PublicKey, timeout time.Duration) (protocol.Peer, error) {
+func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, rendezvous, myID, myPub, myVIP string, priv ed25519.PrivateKey, serverPub ed25519.PublicKey, timeout time.Duration) (protocol.Peer, error) {
 	ts := time.Now().Unix()
 	m := protocol.Message{
 		Type:      protocol.TypeRegister,
 		Ver:       protocol.Version,
-		Token:     cfg.Token,
+		Token:     rendezvous,
 		Role:      protocol.RoleBuddy,
 		ID:        myID,
 		PubKey:    myPub,
 		VirtualIP: myVIP,
 		Ts:        ts,
 	}
-	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(cfg.Token, myID, myPub, ts)))
+	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
 	if cfg.Code != "" {
 		if enc, err := bcrypto.SealCode(cfg.Code, serverPub); err == nil {
 			m.CodeEnc = enc
@@ -453,7 +526,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		}
 		peers := canonicalPeers(r.Peers)
 		sig, err := base64.StdEncoding.DecodeString(r.Sig)
-		if err != nil || !ed25519.Verify(serverPub, protocol.PeerListPayload(cfg.Token, r.Ts, peers), sig) {
+		if err != nil || !ed25519.Verify(serverPub, protocol.PeerListPayload(rendezvous, r.Ts, peers), sig) {
 			return protocol.Peer{}, errors.New("server signature did not verify (wrong --server-key, or MITM)")
 		}
 		if d := time.Since(time.Unix(r.Ts, 0)); d > 60*time.Second || d < -60*time.Second {
