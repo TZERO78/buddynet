@@ -70,15 +70,37 @@ func TestUpsertRejectsThirdPeer(t *testing.T) {
 	}
 }
 
-func TestUpsertRejectsOverMaxTokens(t *testing.T) {
+func TestUpsertEvictsStalestOverMaxTokens(t *testing.T) {
 	r := newHSRegistry(time.Minute)
 	for i := 0; i < maxTokens; i++ {
 		if _, _, ok := r.upsert(regMsg(fmt.Sprintf("tok-%d", i), "A", ""), v4(1000+i)); !ok {
 			t.Fatalf("token %d unexpectedly rejected", i)
 		}
 	}
-	if _, _, ok := r.upsert(regMsg("one-too-many", "A", ""), v4(9999)); ok {
-		t.Fatal("token beyond maxTokens must be rejected")
+	// Make tok-0 clearly the stalest and tok-1 clearly fresh, so eviction is
+	// deterministic: a source-spoofed one-shot token ages, a refreshed pair stays.
+	for _, p := range r.waiting["tok-0"] {
+		p.seen = time.Now().Add(-time.Hour)
+	}
+	for _, p := range r.waiting["tok-1"] {
+		p.seen = time.Now()
+	}
+
+	// A new token must NOT be hard-rejected at the cap; it evicts the stalest.
+	if _, _, ok := r.upsert(regMsg("fresh", "A", ""), v4(9999)); !ok {
+		t.Fatal("new token rejected; eviction should have made room")
+	}
+	if len(r.waiting) != maxTokens {
+		t.Fatalf("table size = %d, want %d (one in, one out)", len(r.waiting), maxTokens)
+	}
+	if _, ok := r.waiting["tok-0"]; ok {
+		t.Fatal("stalest token (tok-0) should have been evicted")
+	}
+	if _, ok := r.waiting["fresh"]; !ok {
+		t.Fatal("new token not inserted after eviction")
+	}
+	if _, ok := r.waiting["tok-1"]; !ok {
+		t.Fatal("fresh token tok-1 wrongly evicted instead of the stalest")
 	}
 }
 

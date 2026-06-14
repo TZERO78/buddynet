@@ -19,6 +19,17 @@ import (
 // pendingTTL bounds how long an un-approved enrollment lingers in the pending DB.
 const pendingTTL = 30 * time.Minute
 
+// These caps bound the two attacker-growable maps in approval mode. An outsider
+// can mint unlimited valid-signed keys (logged) and seal unlimited valid codes
+// to our public key (pend), so both must be capped and pruned — otherwise a
+// flood grows them without limit (and rewrites the pending file each time),
+// exhausting memory/disk on the very mode that is meant to be the hardened one.
+const (
+	logDedupWindow = 30 * time.Second // suppress repeat "pending" logs per key
+	maxLoggedKeys  = 1024             // distinct keys tracked for log dedup
+	maxPending     = 1024             // distinct enrollment codes held pending
+)
+
 // authorizer is the optional client allowlist (approval mode) for the handshake
 // server. It holds approved client public keys, loaded from an
 // SSH-authorized_keys-style file (one base64 Ed25519 key per line, optional
@@ -112,14 +123,34 @@ func (a *authorizer) count() int {
 func (a *authorizer) logPending(pubkey, tokenHash string) {
 	a.mu.Lock()
 	last, seen := a.logged[pubkey]
-	if seen && time.Since(last) < 30*time.Second {
+	if seen && time.Since(last) < logDedupWindow {
 		a.mu.Unlock()
 		return
+	}
+	// Bound the dedup map: an outsider can sign valid registrations with unlimited
+	// fresh keys. Prune entries past the dedup window first; if the map is still
+	// full of recent keys (an active flood), drop silently — this caps both memory
+	// and the log volume the flood would otherwise produce.
+	if len(a.logged) >= maxLoggedKeys {
+		a.pruneLoggedLocked()
+		if len(a.logged) >= maxLoggedKeys {
+			a.mu.Unlock()
+			return
+		}
 	}
 	a.logged[pubkey] = time.Now()
 	a.mu.Unlock()
 	log.Printf("pending: client %s requests access (token=%s) — approve with: buddynet --role=handshake --authorized %s approve %s",
 		pubkey, tokenHash, a.path, pubkey)
+}
+
+// pruneLoggedLocked drops dedup entries older than the dedup window. Caller holds a.mu.
+func (a *authorizer) pruneLoggedLocked() {
+	for k, t := range a.logged {
+		if time.Since(t) >= logDedupWindow {
+			delete(a.logged, k)
+		}
+	}
 }
 
 func (a *authorizer) recordPending(codeEnc, key string) {
@@ -140,6 +171,19 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 		}
 	}
 	isNew := !ok || existing.Key != key
+	if isNew && !ok {
+		// A brand-new code grows the set (and triggers a file rewrite). An outsider
+		// can seal unlimited valid codes to our public key, so prune expired entries
+		// before inserting and refuse once full — bounding both the map and the
+		// O(n) rewrite that each new code would otherwise cost.
+		if len(a.pend) >= maxPending {
+			a.prunePendingLocked()
+			if len(a.pend) >= maxPending {
+				a.mu.Unlock()
+				return
+			}
+		}
+	}
 	a.pend[h] = pendingEntry{Key: key, Seen: time.Now()}
 	snapshot := clonePending(a.pend)
 	a.mu.Unlock()
@@ -149,6 +193,16 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 		}
 		log.Printf("pending: a client requests access with code %q — approve it with: buddynet --role=handshake --authorized %s allowclient %s",
 			code, a.path, code)
+	}
+}
+
+// prunePendingLocked drops enrollment entries past pendingTTL, so the pruned set
+// is what gets persisted next. Caller holds a.mu.
+func (a *authorizer) prunePendingLocked() {
+	for k, e := range a.pend {
+		if time.Since(e.Seen) > pendingTTL {
+			delete(a.pend, k)
+		}
 	}
 }
 

@@ -99,7 +99,14 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 	bucket := r.waiting[m.Token]
 	if bucket == nil {
 		if len(r.waiting) >= maxTokens {
-			return nil, nil, false
+			// Table full. Hard-rejecting every new token lets a source-spoofed
+			// flood of one-shot tokens lock out all legitimate pairings until the
+			// reaper catches up. Instead evict the stalest bucket: a real pair
+			// re-registers ~1/s and stays fresh, while a spoofed fire-and-forget
+			// token has nobody refreshing it and ages into the eviction target.
+			if !r.evictStalestLocked() {
+				return nil, nil, false
+			}
 		}
 		bucket = map[string]*hsPeer{}
 		r.waiting[m.Token] = bucket
@@ -135,6 +142,38 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 		break
 	}
 	return self, partner, true
+}
+
+// evictStalestLocked frees one slot by removing the token bucket whose most
+// recent activity is oldest. Caller holds r.mu; returns false only if the table
+// is empty (nothing to evict).
+func (r *hsRegistry) evictStalestLocked() bool {
+	var victim string
+	var oldest time.Time
+	found := false
+	for token, bucket := range r.waiting {
+		seen := bucketSeen(bucket)
+		if !found || seen.Before(oldest) {
+			victim, oldest, found = token, seen, true
+		}
+	}
+	if !found {
+		return false
+	}
+	delete(r.waiting, victim)
+	return true
+}
+
+// bucketSeen is the freshest sighting across a bucket's peers — how recently the
+// token saw any activity, used to pick the stalest bucket to evict.
+func bucketSeen(bucket map[string]*hsPeer) time.Time {
+	var newest time.Time
+	for _, p := range bucket {
+		if p.seen.After(newest) {
+			newest = p.seen
+		}
+	}
+	return newest
 }
 
 func (r *hsRegistry) reap() {

@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,46 @@ func TestEnrollByCodeFlow(t *testing.T) {
 	// Wrong code approves nobody.
 	if err := AllowClient(path, "nope12"); err == nil {
 		t.Fatal("allowClient with unknown code should error")
+	}
+}
+
+func TestLogPendingMapIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authorized")
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	a, err := newAuthorizer(path, srvPriv)
+	if err != nil {
+		t.Fatalf("newAuthorizer: %v", err)
+	}
+	// An outsider can sign valid registrations with unlimited fresh keys. The
+	// dedup map must not grow without bound.
+	for i := 0; i < maxLoggedKeys*3; i++ {
+		pub, _, _ := ed25519.GenerateKey(rand.Reader)
+		a.logPending(base64.StdEncoding.EncodeToString(pub), "th")
+	}
+	if got := len(a.logged); got > maxLoggedKeys {
+		t.Fatalf("logged map = %d entries, exceeds cap %d", got, maxLoggedKeys)
+	}
+}
+
+func TestRecordPendingMapIsBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authorized")
+	srvPub, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	a, err := newAuthorizer(path, srvPriv)
+	if err != nil {
+		t.Fatalf("newAuthorizer: %v", err)
+	}
+	// An outsider can seal unlimited valid codes to our public key. The pending
+	// set (and the file it rewrites) must stay bounded.
+	for i := 0; i < maxPending+64; i++ {
+		clientPub, _, _ := ed25519.GenerateKey(rand.Reader)
+		enc, err := bcrypto.SealCode(fmt.Sprintf("code-%d", i), srvPub)
+		if err != nil {
+			t.Fatalf("seal: %v", err)
+		}
+		a.recordPending(enc, base64.StdEncoding.EncodeToString(clientPub))
+	}
+	if got := len(a.pend); got > maxPending {
+		t.Fatalf("pending map = %d entries, exceeds cap %d", got, maxPending)
 	}
 }
 
