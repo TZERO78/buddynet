@@ -1,0 +1,61 @@
+name: release
+
+# Cross-compile the single buddynet binary for every target and attach the
+# stripped artifacts to the GitHub release. Triggered by pushing a v* tag.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write   # create the release and upload assets
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - { goos: linux,   goarch: amd64 }
+          - { goos: linux,   goarch: arm64 }   # Raspberry Pi, Unraid
+          - { goos: darwin,  goarch: amd64 }
+          - { goos: darwin,  goarch: arm64 }   # Apple Silicon
+          - { goos: windows, goarch: amd64 }
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - name: build
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          version="${GITHUB_REF_NAME}"
+          ext=""; [ "$GOOS" = windows ] && ext=".exe"
+          out="buddynet-${GOOS}-${GOARCH}${ext}"
+          # -s -w strips symbol/debug info to keep the binary small; -trimpath
+          # makes the build reproducible.
+          go build -trimpath -ldflags="-s -w -X main.version=${version}" \
+            -o "dist/${out}" ./cmd/buddynet
+          ( cd dist && sha256sum "${out}" > "${out}.sha256" )
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: buddynet-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

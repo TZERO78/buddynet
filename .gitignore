@@ -1,0 +1,14 @@
+# Build output
+/buddynet
+/dist/
+*.exe
+
+# Local runtime state
+*.key
+peers.json
+known_peers
+*.pending
+
+# Editor / OS
+.DS_Store
+*.swp
