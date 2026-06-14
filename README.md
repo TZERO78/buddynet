@@ -45,7 +45,9 @@ rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
 That's it — an end-to-end-encrypted, NAT-traversed tunnel carrying plain rsync.
-Check the link any time with `--status`.
+Check the link any time with `--status` — it exits `0` reachable, `3`
+unreachable, `4` offline, `5` untrusted, `1` local error (see
+[docs/BUDDYPEER.md](docs/BUDDYPEER.md#checking-the-link)).
 
 ## How it works
 

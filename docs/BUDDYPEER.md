@@ -67,8 +67,18 @@ buddynet --role=handshake --authorized clients.txt allowclient <code>
 
 ```bash
 buddynet --role=buddy --server ... --server-key ... --token ... --status
-# exit 0 = online & directly reachable; non-zero = offline / not reachable / untrusted
 ```
+
+It prints one human-readable line and exits with a distinct code, so a script
+can branch on the outcome without parsing the text:
+
+| Exit | Meaning | stdout |
+|---|---|---|
+| `0` | online and directly reachable | `buddy is ONLINE and REACHABLE …` |
+| `3` | online but not directly reachable (a relay would be used) | `buddy is ONLINE but NOT directly reachable …` |
+| `4` | offline — no buddy registered with this token | `buddy is OFFLINE …` |
+| `5` | registered but identity not trusted (possible hijack) | `… identity is NOT trusted …` |
+| `1` | local error (cannot open socket / resolve the server) | logged to stderr |
 
 ## How it differs from "real" BuddyNet (v2+)
 

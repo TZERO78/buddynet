@@ -22,6 +22,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -69,7 +70,7 @@ func main() {
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
 	punchDur := flag.Duration("punch", 2*time.Second, "buddy: how long to hole-punch before bringing up QUIC")
 	idleTimeout := flag.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all")
-	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit")
+	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)")
 	invite := flag.Bool("invite", false, "buddy: mint a fresh pairing token, print it, and wait for your buddy to join")
 	join := flag.String("join", "", "buddy: join using the pairing token your buddy gave you (alias for --token)")
 
@@ -278,12 +279,19 @@ func (a buddyArgs) validate() {
 	}
 }
 
-// runBuddy runs the one-shot --status probe and exits with its result code.
+// runBuddy runs the one-shot --status probe and exits with its result code:
+// 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error.
 func runBuddy(ctx context.Context, a buddyArgs) {
 	a.validate()
-	if err := role.Buddy(ctx, a.config()); err != nil {
-		os.Exit(1) // probe maps "offline / unreachable / untrusted" to non-zero
+	err := role.Buddy(ctx, a.config())
+	if err == nil {
+		return // online and directly reachable
 	}
+	var pe *role.ProbeError
+	if errors.As(err, &pe) {
+		os.Exit(pe.Code) // offline / unreachable / untrusted, by distinct code
+	}
+	os.Exit(1) // local failure (socket / DNS)
 }
 
 // mintInviteToken mints a fresh pairing token, shows it (reveal-and-hide on a

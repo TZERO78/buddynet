@@ -264,8 +264,34 @@ func primePath(conn *net.UDPConn, myID string, p relay.Path, session string, pun
 	}
 }
 
-// buddyProbe answers "is my buddy online and reachable?" without forwarding.
-// Exit is signalled by the returned error being nil (online+reachable) or not.
+// Probe exit codes for --status, returned through ProbeError so a script can
+// distinguish the outcomes by exit code (not just by parsing stdout). The
+// contract matches BuddyPeer's:
+//
+//	0  online and directly reachable          (nil error)
+//	1  local error (socket / DNS)             (any non-ProbeError)
+//	3  online but not directly reachable      (a relay would be used)
+//	4  offline (no buddy registered)
+//	5  registered but identity not trusted    (possible hijack)
+const (
+	ProbeUnreachable = 3
+	ProbeOffline     = 4
+	ProbeUntrusted   = 5
+)
+
+// ProbeError carries a --status outcome as a process exit code. main maps it to
+// os.Exit; the human-readable line is printed to stdout by buddyProbe.
+type ProbeError struct {
+	Code int
+	Msg  string
+}
+
+func (e *ProbeError) Error() string { return e.Msg }
+
+// buddyProbe answers "is my buddy online and reachable?" without forwarding. It
+// returns nil when online and directly reachable, a *ProbeError carrying a
+// distinct exit code for the offline/unreachable/untrusted cases, or a plain
+// error for a local failure (which main maps to exit 1).
 func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey, trust *trustPolicy, myID, myPub, myVIP string, priv ed25519.PrivateKey) error {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {
@@ -280,16 +306,16 @@ func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKe
 	partner, err := buddyRegister(conn, serverAddrs, cfg, myID, myPub, myVIP, priv, serverPub, 10*time.Second)
 	if err != nil {
 		fmt.Println("buddy is OFFLINE (no peer registered with this token)")
-		return errors.New("offline")
+		return &ProbeError{Code: ProbeOffline, Msg: "offline"}
 	}
 	partnerPub, derr := bcrypto.DecodePubKey(partner.PubKey)
 	if derr != nil || trust.check(cfg.Token, partnerPub) != nil {
 		fmt.Println("a peer registered under this token but its identity is NOT trusted (possible hijack)")
-		return errors.New("untrusted")
+		return &ProbeError{Code: ProbeUntrusted, Msg: "untrusted"}
 	}
 	if _, err := tunnel.Punch(conn, myID, partner.Candidates, cfg.PunchDur); err != nil {
 		fmt.Println("buddy is ONLINE but NOT directly reachable (a relay would be used)")
-		return errors.New("not directly reachable")
+		return &ProbeError{Code: ProbeUnreachable, Msg: "not directly reachable"}
 	}
 	fmt.Printf("buddy is ONLINE and REACHABLE — direct path available (vip=%s)\n", partner.VirtualIP)
 	return nil
