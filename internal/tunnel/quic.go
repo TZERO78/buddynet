@@ -124,6 +124,14 @@ func (s *quicSession) AcceptStream(ctx context.Context) (Stream, error) {
 func (s *quicSession) RemoteAddr() net.Addr  { return s.conn.RemoteAddr() }
 func (s *quicSession) Done() <-chan struct{} { return s.conn.Context().Done() }
 
+// ExportKeyingMaterial derives channel-binding bytes from the live TLS 1.3
+// session (RFC 5705). Both peers of this QUIC connection produce identical
+// output for the same label/context/length.
+func (s *quicSession) ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error) {
+	tlsState := s.conn.ConnectionState().TLS
+	return tlsState.ExportKeyingMaterial(label, context, length)
+}
+
 func (s *quicSession) Close() error {
 	return s.conn.CloseWithError(0, "bye")
 }

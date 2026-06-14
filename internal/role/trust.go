@@ -27,33 +27,50 @@ type trustPolicy struct {
 	storePath string
 }
 
-func (t *trustPolicy) check(token string, partnerPub ed25519.PublicKey) error {
+// decide evaluates whether to trust the partner identity, WITHOUT learning a new
+// one. needSAS is true only in the trust-on-first-use case where the key is not
+// yet known: the caller must then bring up the tunnel, have the human verify the
+// SAS, and call confirm to persist it. For a pinned key, --insecure, or an
+// already-known matching key it returns needSAS=false. A known key that CHANGED
+// is refused with an error (possible MITM).
+func (t *trustPolicy) decide(token string, partnerPub ed25519.PublicKey) (needSAS bool, err error) {
 	partnerB64 := base64.StdEncoding.EncodeToString(partnerPub)
 	switch {
 	case t.pinned != nil:
 		if !partnerPub.Equal(t.pinned) {
-			return errors.New("partner identity MISMATCH: not the pinned --peer-key — refusing (possible hijack/MITM)")
+			return false, errors.New("partner identity MISMATCH: not the pinned --peer-key — refusing (possible hijack/MITM)")
 		}
-		return nil
+		return false, nil
 	case t.insecure:
-		return nil
+		return false, nil
 	default:
 		known, err := loadKnownPeer(t.storePath, token)
 		if err != nil {
-			return fmt.Errorf("trust store %s: %w", t.storePath, err)
+			return false, fmt.Errorf("trust store %s: %w", t.storePath, err)
 		}
 		if known == "" {
-			if err := learnPeer(t.storePath, token, partnerB64); err != nil {
-				return fmt.Errorf("trust store %s: %w", t.storePath, err)
-			}
-			log.Printf("trust-on-first-use: recorded buddy identity %s for this token in %s — pin it with --peer-key to be safe", partnerB64, t.storePath)
-			return nil
+			return true, nil // first contact: verify via SAS, then confirm
 		}
 		if known != partnerB64 {
-			return fmt.Errorf("buddy key CHANGED for this token (known %s, got %s) — refusing (possible MITM). If legitimate, remove the entry from %s", known, partnerB64, t.storePath)
+			return false, fmt.Errorf("buddy key CHANGED for this token (known %s, got %s) — refusing (possible MITM). If legitimate, remove the entry from %s", known, partnerB64, t.storePath)
 		}
+		return false, nil
+	}
+}
+
+// confirm persists a partner key to the trust store after the SAS has been
+// verified, so subsequent connects match it silently. It is a no-op for a pinned
+// or insecure policy (nothing to learn).
+func (t *trustPolicy) confirm(token string, partnerPub ed25519.PublicKey) error {
+	if t.pinned != nil || t.insecure || t.storePath == "" {
 		return nil
 	}
+	partnerB64 := base64.StdEncoding.EncodeToString(partnerPub)
+	if err := learnPeer(t.storePath, token, partnerB64); err != nil {
+		return fmt.Errorf("trust store %s: %w", t.storePath, err)
+	}
+	log.Printf("trust-on-first-use: recorded buddy identity %s for this token in %s — pin it with --peer-key to skip this next time", partnerB64, t.storePath)
+	return nil
 }
 
 // tokenKey hashes the token for use as the trust-store lookup key, so the store
