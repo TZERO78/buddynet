@@ -5,13 +5,32 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/tzero78/buddynet/internal/ratelimit"
 )
+
+// The relay is intentionally UNAUTHENTICATED: anyone who can reach it may pair
+// two legs under a shared session token (that is what makes it a drop-in
+// fallback for any buddy). It can never be turned into a reflector — forward
+// only ever writes to an address a bind was already heard from — but it is open
+// bandwidth, so the caps below are abuse ceilings, not access control. Operators
+// who want a private relay should firewall it or run it only for known buddies.
 
 // Hard caps bound memory even under spoofed source addresses (the only defense
 // that works against address spoofing, since the source itself is forgeable).
 const (
 	maxSessions   = 4096 // concurrent relayed sessions
 	maxLegsPerSes = 2    // exactly two buddies per session; reject a third
+	maxLegsPerIP  = 64   // legs one source address may hold (bounds session hoarding)
+)
+
+// Rate-limit ceilings for bind CONTROL packets only — data forwarding is the
+// relay's whole job and must not be throttled. A buddy sends binds ~5x/sec while
+// pairing and then stops, so these are generous.
+const (
+	rlGlobalRate = 1000
+	rlSrcRate    = 50
+	rlMaxSources = 8192
 )
 
 // leg is one bound end of a session: the source address a buddy's datagrams
@@ -32,19 +51,23 @@ type session struct {
 // session and never inspects, decrypts, or stores payload — it sees only
 // encrypted QUIC packets between two NAT-bound addresses.
 type Server struct {
-	ttl time.Duration
+	ttl    time.Duration
+	bindRL *ratelimit.Limiter
 
-	mu       sync.Mutex
-	sessions map[string]*session // token -> session
-	byAddr   map[string]*session // src addr string -> its session (fast forward)
+	mu        sync.Mutex
+	sessions  map[string]*session // token -> session
+	byAddr    map[string]*session // src addr string -> its session (fast forward)
+	legsPerIP map[string]int      // source IP -> legs it holds (abuse ceiling)
 }
 
 // NewServer returns a relay whose bindings expire after ttl with no traffic.
 func NewServer(ttl time.Duration) *Server {
 	return &Server{
-		ttl:      ttl,
-		sessions: map[string]*session{},
-		byAddr:   map[string]*session{},
+		ttl:       ttl,
+		bindRL:    ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),
+		sessions:  map[string]*session{},
+		byAddr:    map[string]*session{},
+		legsPerIP: map[string]int{},
 	}
 }
 
@@ -70,6 +93,11 @@ func (s *Server) Run(conn *net.UDPConn) {
 // bind claims src as a leg of token's session and acks. The third distinct leg
 // for a token is rejected (cap), so a stranger cannot hijack a pairing.
 func (s *Server) bind(conn *net.UDPConn, token string, src *net.UDPAddr) {
+	// Throttle bind control packets per source so a flood cannot churn sessions;
+	// data forwarding (the hot path) is never rate-limited.
+	if !s.bindRL.Allow(src.IP.String()) {
+		return
+	}
 	s.mu.Lock()
 	ses := s.sessions[token]
 	if ses == nil {
@@ -89,13 +117,19 @@ func (s *Server) bind(conn *net.UDPConn, token string, src *net.UDPAddr) {
 		}
 	}
 	if found == nil {
+		ip := src.IP.String()
 		if len(ses.legs) >= maxLegsPerSes {
 			s.mu.Unlock()
 			return // a third party tried to join this session
 		}
+		if s.legsPerIP[ip] >= maxLegsPerIP {
+			s.mu.Unlock()
+			return // one source is hoarding sessions: refuse further legs
+		}
 		found = &leg{addr: src}
 		ses.legs = append(ses.legs, found)
 		s.byAddr[key] = ses
+		s.legsPerIP[ip]++
 		if len(ses.legs) == 2 {
 			log.Printf("relay: session paired (%s <-> %s)", ses.legs[0].addr, ses.legs[1].addr)
 		}
@@ -132,6 +166,16 @@ func (s *Server) forward(conn *net.UDPConn, src *net.UDPAddr, pkt []byte) {
 	}
 }
 
+// releaseIPLocked decrements the per-IP leg count for a reaped leg, dropping the
+// entry at zero so the map mirrors live legs. Caller holds s.mu.
+func (s *Server) releaseIPLocked(ip string) {
+	if s.legsPerIP[ip] <= 1 {
+		delete(s.legsPerIP, ip)
+		return
+	}
+	s.legsPerIP[ip]--
+}
+
 // reap drops sessions whose legs have gone quiet past the TTL, so the maps can
 // never grow unbounded.
 func (s *Server) reap() {
@@ -142,6 +186,7 @@ func (s *Server) reap() {
 			for _, l := range ses.legs {
 				if time.Since(l.seen) > s.ttl {
 					delete(s.byAddr, l.addr.String())
+					s.releaseIPLocked(l.addr.IP.String())
 					continue
 				}
 				kept = append(kept, l)

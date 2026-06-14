@@ -28,6 +28,12 @@ const (
 	logDedupWindow = 30 * time.Second // suppress repeat "pending" logs per key
 	maxLoggedKeys  = 1024             // distinct keys tracked for log dedup
 	maxPending     = 1024             // distinct enrollment codes held pending
+	maxReplaySigs  = 4096             // recently-seen registration signatures kept
+
+	// A registration signature is accepted while its timestamp is within ±regSkew
+	// of now, so a captured one is replayable over a 2*regSkew span; the replay
+	// cache must outlive that window to catch it.
+	regReplayWindow = 2 * regSkew
 )
 
 // authorizer is the optional client allowlist (approval mode) for the handshake
@@ -39,11 +45,12 @@ type authorizer struct {
 	pendDB   string
 	selfPriv ed25519.PrivateKey
 
-	mu     sync.RWMutex
-	keys   map[string]string
-	mtime  time.Time
-	logged map[string]time.Time
-	pend   map[string]pendingEntry
+	mu         sync.RWMutex
+	keys       map[string]string
+	mtime      time.Time
+	logged     map[string]time.Time
+	pend       map[string]pendingEntry
+	recentSigs map[string]time.Time // reg signature -> first seen (replay defense)
 }
 
 type pendingEntry struct {
@@ -53,12 +60,13 @@ type pendingEntry struct {
 
 func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error) {
 	a := &authorizer{
-		path:     path,
-		pendDB:   path + ".pending",
-		selfPriv: selfPriv,
-		keys:     map[string]string{},
-		logged:   map[string]time.Time{},
-		pend:     map[string]pendingEntry{},
+		path:       path,
+		pendDB:     path + ".pending",
+		selfPriv:   selfPriv,
+		keys:       map[string]string{},
+		logged:     map[string]time.Time{},
+		pend:       map[string]pendingEntry{},
+		recentSigs: map[string]time.Time{},
 	}
 	if err := a.reload(); err != nil {
 		return nil, err
@@ -149,6 +157,41 @@ func (a *authorizer) pruneLoggedLocked() {
 	for k, t := range a.logged {
 		if time.Since(t) >= logDedupWindow {
 			delete(a.logged, k)
+		}
+	}
+}
+
+// replayed reports whether this exact registration signature was seen recently,
+// recording fresh ones. Callers invoke it only AFTER verifyRegistration passes,
+// so the cache holds valid signatures and an attacker cannot pollute it with
+// garbage. The map is bounded; if it fills with still-fresh entries we fail open
+// (admit, don't record) — the rate limiter already bounds volume, and the sig is
+// validly signed regardless.
+func (a *authorizer) replayed(sig string) bool {
+	if sig == "" {
+		return false
+	}
+	now := time.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if seen, ok := a.recentSigs[sig]; ok && now.Sub(seen) < regReplayWindow {
+		return true
+	}
+	if len(a.recentSigs) >= maxReplaySigs {
+		a.pruneSigsLocked(now)
+		if len(a.recentSigs) >= maxReplaySigs {
+			return false
+		}
+	}
+	a.recentSigs[sig] = now
+	return false
+}
+
+// pruneSigsLocked drops replay-cache entries past the replay window. Caller holds a.mu.
+func (a *authorizer) pruneSigsLocked(now time.Time) {
+	for s, t := range a.recentSigs {
+		if now.Sub(t) >= regReplayWindow {
+			delete(a.recentSigs, s)
 		}
 	}
 }

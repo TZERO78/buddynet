@@ -137,6 +137,33 @@ func TestRecordPendingMapIsBounded(t *testing.T) {
 	}
 }
 
+func TestReplayedDetectsRepeatAndStaysBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "authorized")
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	a, err := newAuthorizer(path, srvPriv)
+	if err != nil {
+		t.Fatalf("newAuthorizer: %v", err)
+	}
+	// First sighting is fresh; an exact repeat within the window is a replay.
+	if a.replayed("sig-A") {
+		t.Fatal("first sighting wrongly flagged as replay")
+	}
+	if !a.replayed("sig-A") {
+		t.Fatal("repeat of the same signature not detected as replay")
+	}
+	// An empty signature (default mode) is never treated as a replay.
+	if a.replayed("") {
+		t.Fatal("empty signature wrongly flagged as replay")
+	}
+	// A flood of distinct signatures must not grow the cache without bound.
+	for i := 0; i < maxReplaySigs*3; i++ {
+		a.replayed(fmt.Sprintf("flood-%d", i))
+	}
+	if got := len(a.recentSigs); got > maxReplaySigs {
+		t.Fatalf("replay cache = %d entries, exceeds cap %d", got, maxReplaySigs)
+	}
+}
+
 func TestApproveRejectsBadKey(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "authorized")
 	if err := ApproveKey(path, "not-a-valid-key", ""); err == nil {

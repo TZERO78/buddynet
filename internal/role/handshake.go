@@ -8,13 +8,17 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"sort"
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/hkdf"
+
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -37,6 +41,22 @@ const (
 	maxIDsPerToken  = 2
 	maxCandsPerPeer = 8
 	maxCodeEncLen   = 512
+)
+
+// regSkew is the clock-skew tolerance for a signed registration's timestamp
+// (approval mode): a registration is accepted only if its ts is within ±regSkew
+// of the server's clock, bounding how long a captured one stays replayable.
+const regSkew = 60 * time.Second
+
+// Rate-limit ceilings for the public UDP listener. The global rate bounds total
+// per-packet crypto (signature verify + sealed-code open in approval mode) so a
+// flood cannot saturate the single read loop; the per-source rate keeps one
+// address from consuming the whole budget. A legitimate buddy re-registers only
+// ~1/s, so the per-source allowance is generous.
+const (
+	rlGlobalRate = 1000 // admitted packets/sec across all sources
+	rlSrcRate    = 50   // admitted packets/sec per source address
+	rlMaxSources = 8192 // bound on the tracked-source map
 )
 
 // hsPeer accumulates what the server knows about one (token,id) across its v4
@@ -205,7 +225,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	if err != nil {
 		return err
 	}
-	tokenLogKey = priv.Seed()
+	tokenLogKey = deriveLogKey(priv.Seed())
 	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
 	switch {
 	case cfg.KeyPath == "":
@@ -242,6 +262,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 
 	reg := newHSRegistry(cfg.TTL)
 	go reg.reap()
+	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
 
 	hsDebug = cfg.Debug
 	buf := make([]byte, 1500)
@@ -253,6 +274,12 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 				return nil
 			}
 			log.Printf("read: %v", err)
+			continue
+		}
+		// Gate before any parsing or crypto so a flood is dropped cheaply and the
+		// expensive per-packet work stays bounded (DoS / reflection defense).
+		if !rl.Allow(src.IP.String()) {
+			hsDebugf("rate-limited %s", src)
 			continue
 		}
 		raw := make([]byte, n)
@@ -287,8 +314,12 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 	}
 
 	if authz != nil {
-		if !verifyRegistration(m, 60*time.Second) {
+		if !verifyRegistration(m, regSkew) {
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
+			return
+		}
+		if authz.replayed(m.RegSig) {
+			hsDebugf("drop replayed register token=%s from %s", logTag(m.Token), src)
 			return
 		}
 		if !authz.allowed(m.PubKey) {
@@ -358,6 +389,17 @@ func shortHash(token string) string {
 // tokenLogKey keys the HMAC used by logTag; derived from the server identity
 // seed so only this server can reproduce a tag (no offline guessing oracle).
 var tokenLogKey []byte
+
+// deriveLogKey derives the logTag HMAC key from the identity seed via HKDF
+// rather than using the raw seed: key separation, so the same secret never both
+// signs (Ed25519) and MACs (logTag). HKDF cannot fail for these fixed sizes.
+func deriveLogKey(seed []byte) []byte {
+	out := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, nil, []byte("buddynet-logtag-v1")), out); err != nil {
+		panic(err) // only on a broken hash, which cannot happen for sha256
+	}
+	return out
+}
 
 // logTag returns a server-keyed 10-hex tag for a secret token, safe to log.
 func logTag(token string) string {
