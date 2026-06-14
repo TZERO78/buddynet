@@ -43,6 +43,11 @@ const (
 	maxCodeEncLen   = 512
 )
 
+// regSkew is the clock-skew tolerance for a signed registration's timestamp
+// (approval mode): a registration is accepted only if its ts is within ±regSkew
+// of the server's clock, bounding how long a captured one stays replayable.
+const regSkew = 60 * time.Second
+
 // Rate-limit ceilings for the public UDP listener. The global rate bounds total
 // per-packet crypto (signature verify + sealed-code open in approval mode) so a
 // flood cannot saturate the single read loop; the per-source rate keeps one
@@ -309,8 +314,12 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 	}
 
 	if authz != nil {
-		if !verifyRegistration(m, 60*time.Second) {
+		if !verifyRegistration(m, regSkew) {
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
+			return
+		}
+		if authz.replayed(m.RegSig) {
+			hsDebugf("drop replayed register token=%s from %s", logTag(m.Token), src)
 			return
 		}
 		if !authz.allowed(m.PubKey) {
