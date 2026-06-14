@@ -8,11 +8,14 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log"
 	"net"
 	"sort"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/hkdf"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	"github.com/tzero78/buddynet/pkg/protocol"
@@ -205,7 +208,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	if err != nil {
 		return err
 	}
-	tokenLogKey = priv.Seed()
+	tokenLogKey = deriveLogKey(priv.Seed())
 	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
 	switch {
 	case cfg.KeyPath == "":
@@ -358,6 +361,17 @@ func shortHash(token string) string {
 // tokenLogKey keys the HMAC used by logTag; derived from the server identity
 // seed so only this server can reproduce a tag (no offline guessing oracle).
 var tokenLogKey []byte
+
+// deriveLogKey derives the logTag HMAC key from the identity seed via HKDF
+// rather than using the raw seed: key separation, so the same secret never both
+// signs (Ed25519) and MACs (logTag). HKDF cannot fail for these fixed sizes.
+func deriveLogKey(seed []byte) []byte {
+	out := make([]byte, 32)
+	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, nil, []byte("buddynet-logtag-v1")), out); err != nil {
+		panic(err) // only on a broken hash, which cannot happen for sha256
+	}
+	return out
+}
 
 // logTag returns a server-keyed 10-hex tag for a secret token, safe to log.
 func logTag(token string) string {
