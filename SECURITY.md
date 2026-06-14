@@ -153,6 +153,25 @@ A timeout (no answer) is logged separately as caution, not as an attack.
   mode `0600`) as a safer alternative to TCP loopback in shared/container hosts.
 - **Forward secrecy.** Provided by TLS 1.3 by default.
 
+## Handshake server transport — design trade-off
+
+The handshake server currently speaks plain UDP. Moving it to QUIC would
+structurally eliminate the spoofed-source reflection vector, because QUIC's
+Initial packet includes a server-chosen token that the source must echo —
+IP-spoofed senders cannot receive it.
+
+The cost is a TLS certificate. In the default deployment the server generates a
+self-signed cert at startup and exposes its fingerprint (`--server-key`), which
+every buddy pins. This is the same TOFU model already used for peer identity —
+no CA, no domain required.
+
+**Decision:** UDP is kept for zero-dependency bootstrapping. The reflection
+vector is *mitigated* (per-source and global rate limits, never a useful
+amplifier) but not *eliminated*. The structural fix would mean running the
+handshake control plane over QUIC on its port; the `quic-go` dependency is
+already vendored, so it is a contained change rather than a new dependency — but
+it is **not a built-in option today**.
+
 ## Deliberately out of scope
 
 - **Token revocation / blacklist.** A rejected SAS drops the connection and the
