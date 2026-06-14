@@ -518,7 +518,20 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 			continue
 		}
 		var r protocol.Message
-		if json.Unmarshal(buf[:n], &r) != nil || r.Type != protocol.TypePeerList {
+		if json.Unmarshal(buf[:n], &r) != nil {
+			continue
+		}
+		// Address-validation challenge: adopt the cookie and re-register at once
+		// (proving return-routability) instead of waiting for the next tick.
+		if r.Type == protocol.TypeCookie {
+			if r.Cookie != "" && r.Cookie != m.Cookie {
+				m.Cookie = r.Cookie
+				reg, _ = json.Marshal(m)
+				next = time.Now()
+			}
+			continue
+		}
+		if r.Type != protocol.TypePeerList {
 			continue
 		}
 		if r.Ver != protocol.Version {

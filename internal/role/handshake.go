@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -225,7 +226,8 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	if err != nil {
 		return err
 	}
-	tokenLogKey = deriveLogKey(priv.Seed())
+	tokenLogKey = deriveSubkey(priv.Seed(), "buddynet-logtag-v1")
+	cookieKey = deriveSubkey(priv.Seed(), "buddynet-cookie-v1")
 	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
 	switch {
 	case cfg.KeyPath == "":
@@ -313,6 +315,16 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 		return
 	}
 
+	// Address validation: a REGISTER without a valid cookie gets only a (smaller)
+	// challenge and no further work. A spoofed source never receives the cookie,
+	// so it can never complete this step — closing the reflection vector before
+	// any expensive crypto or any PEER_LIST is produced.
+	if !validCookie(m.Cookie, src.IP) {
+		sendCookie(conn, src)
+		hsDebugf("challenged unvalidated register token=%s from %s", logTag(m.Token), src)
+		return
+	}
+
 	if authz != nil {
 		if !verifyRegistration(m, regSkew) {
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
@@ -390,12 +402,59 @@ func shortHash(token string) string {
 // seed so only this server can reproduce a tag (no offline guessing oracle).
 var tokenLogKey []byte
 
-// deriveLogKey derives the logTag HMAC key from the identity seed via HKDF
-// rather than using the raw seed: key separation, so the same secret never both
-// signs (Ed25519) and MACs (logTag). HKDF cannot fail for these fixed sizes.
-func deriveLogKey(seed []byte) []byte {
+// cookieEpoch is the validity granularity of an address-validation cookie. A
+// cookie is accepted for the current and the previous epoch, so it lives
+// 30..60s — long enough to survive a registration's first round-trip, short
+// enough to bound replay of a captured cookie to its source address.
+const cookieEpoch = 30 * time.Second
+
+// cookieKey keys the address-validation HMAC; HKDF-derived from the identity so
+// only this server can mint/verify cookies and they need no per-source state.
+var cookieKey []byte
+
+// computeCookie is HMAC(cookieKey, epoch || canonical-ip), truncated. Binding to
+// the source IP is what makes it prove return-routability: only a host that
+// actually received the challenge at that address can echo a matching value.
+func computeCookie(ip net.IP, epoch int64) string {
+	mac := hmac.New(sha256.New, cookieKey)
+	var e [8]byte
+	binary.BigEndian.PutUint64(e[:], uint64(epoch))
+	mac.Write(e[:])
+	mac.Write(ip.To16())
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// freshCookie mints a cookie for the current epoch and source IP.
+func freshCookie(ip net.IP) string {
+	return computeCookie(ip, time.Now().UnixNano()/int64(cookieEpoch))
+}
+
+// validCookie accepts a cookie matching the current or previous epoch for ip,
+// compared in constant time.
+func validCookie(c string, ip net.IP) bool {
+	if c == "" {
+		return false
+	}
+	now := time.Now().UnixNano() / int64(cookieEpoch)
+	return hmac.Equal([]byte(c), []byte(computeCookie(ip, now))) ||
+		hmac.Equal([]byte(c), []byte(computeCookie(ip, now-1)))
+}
+
+// sendCookie replies with an address-validation challenge. The reply is smaller
+// than the REGISTER that triggered it, so it is never a useful amplifier.
+func sendCookie(conn *net.UDPConn, src *net.UDPAddr) {
+	reply := protocol.Message{Type: protocol.TypeCookie, Ver: protocol.Version, Cookie: freshCookie(src.IP)}
+	if b, err := json.Marshal(reply); err == nil {
+		conn.WriteToUDP(b, src)
+	}
+}
+
+// deriveSubkey derives a purpose-specific 32-byte key from the identity seed via
+// HKDF: key separation, so the same secret never serves two primitives. HKDF
+// cannot fail for these fixed sizes.
+func deriveSubkey(seed []byte, label string) []byte {
 	out := make([]byte, 32)
-	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, nil, []byte("buddynet-logtag-v1")), out); err != nil {
+	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, nil, []byte(label)), out); err != nil {
 		panic(err) // only on a broken hash, which cannot happen for sha256
 	}
 	return out
