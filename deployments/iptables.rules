@@ -1,0 +1,32 @@
+# BuddyNet VPS firewall (iptables), the iptables-restore equivalent of
+# nftables.conf: default-drop input, with only SSH and the two BuddyNet UDP
+# ports open. The UDP ports are rate-limited to blunt floods.
+#
+# Edit the two BuddyNet dports below to match your --listen settings, then:
+#   sudo iptables-restore < deployments/iptables.rules
+#   # persist with iptables-persistent / netfilter-persistent
+#
+# For IPv6 use the same file with ip6tables-restore (adjust the ICMP line to
+# icmpv6 as noted). WARNING: input policy is DROP; SSH (22) is allowed below so
+# you are not locked out — change it if your SSH runs elsewhere.
+*filter
+:INPUT DROP [0:0]
+:FORWARD DROP [0:0]
+:OUTPUT ACCEPT [0:0]
+
+# Always allow loopback and already-established flows.
+-A INPUT -i lo -j ACCEPT
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+-A INPUT -m conntrack --ctstate INVALID -j DROP
+
+# ICMP (use -p icmpv6 with ip6tables-restore).
+-A INPUT -p icmp -j ACCEPT
+
+# Management.
+-A INPUT -p tcp --dport 22 -j ACCEPT
+
+# BuddyNet control + relay, rate-limited against UDP floods.
+-A INPUT -p udp --dport 51820 -m limit --limit 100/second --limit-burst 50 -j ACCEPT
+-A INPUT -p udp --dport 51821 -m limit --limit 100/second --limit-burst 50 -j ACCEPT
+
+COMMIT
