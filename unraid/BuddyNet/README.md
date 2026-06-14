@@ -42,8 +42,10 @@ The install verifies the downloaded `buddynet` binary against a pinned SHA256.
 
 ## Security
 
-Pin your buddy with the **Buddy key** field (each node logs its own identity at
-startup). Without a pin, trust-on-first-use records the buddy key on first
-connect and refuses later changes. The token is a bearer secret — keep it in the
-`0600` token file, not the flash config. See the project
-[README](../../README.md) and [docs/PROTOCOL.md](../../docs/PROTOCOL.md).
+Unraid runs the buddy **headless**, so there is no terminal to compare the
+first-contact safety check (SAS). You must therefore **pin your buddy** with the
+**Buddy key** field (each node logs its own identity at startup); the service
+runs `--no-interactive`, so an unknown key is refused rather than trusted blind.
+The token is a bearer secret — keep it in the `0600` token file, not the flash
+config. See the project [README](../../README.md) and
+[SECURITY.md](../../SECURITY.md).

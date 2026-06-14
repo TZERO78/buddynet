@@ -111,7 +111,14 @@ handshake.
   `(token, ts, peers)`; buddies pin the server key and verify, so a man in the
   middle on the control path cannot inject or alter peers.
 - **Pinned peers.** A buddy pins its partner with `--peer-key`, or learns it
-  trust-on-first-use (SSH-style) and refuses later changes.
+  trust-on-first-use (SSH-style) and refuses later changes. On first contact (no
+  pin) both ends show a **Short Authentication String** bound to the live TLS
+  session; the humans compare it out of band, so a man in the middle is caught
+  before the key is trusted.
+- **Ephemeral pairing secret.** `--invite`/`--join` use a one-time invite token;
+  after first pairing both ends derive a long-lived rendezvous **session secret**
+  from the channel binding (never transmitted) and reconnect with that. See
+  [SECURITY.md](../SECURITY.md) for the full threat model.
 - **Bounded server memory.** Hard caps (`maxTokens`, two ids per token,
   capped candidates) bound memory even under spoofed source addresses.
 - **No reflection.** The relay and handshake server only ever reply to an

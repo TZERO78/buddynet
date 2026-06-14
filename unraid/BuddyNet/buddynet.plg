@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.06.14">
+<!ENTITY version   "2026.06.14.1">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -24,6 +24,16 @@ a small handshake server, hole-punches through NAT (no port forwarding), and
 falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. BuddyPeer (two buddies) is the v1 milestone.
+
+###2026.06.14.1
+- Aligned with the buddy SAS / session model:
+  - Runs `--no-interactive` (headless has no terminal to compare a first-contact
+    SAS), so an unknown buddy key is refused, never learned blind.
+  - The Buddy key (pin) is now effectively required — the page and service warn
+    when it is missing, since the connection is refused without it.
+  - Uses the legacy fixed-token mode (token + pinned buddy key), the right
+    pattern for an unattended node; identity key, trust store and peer cache stay
+    on the array.
 
 ###2026.06.14
 - Initial BuddyNet Unraid client plugin, ported from the hardware-tested
@@ -124,7 +134,7 @@ Token (shared secret — for testing; prefer the Token file below):
 Token file (on the array — overrides the field above, recommended):
 : <input type="text" name="TOKEN_FILE" value="<?=v($cfg,'TOKEN_FILE')?>" placeholder="/mnt/user/appdata/buddynet/token (chmod 0600)">
 
-Buddy key (public pin — your buddy's identity, recommended):
+Buddy key (public pin — your buddy's identity, **required headless**):
 : <input type="text" name="PEER_KEY" value="<?=v($cfg,'PEER_KEY')?>" placeholder="buddy Ed25519 identity, base64">
 
 Expose local port (-L) — to push backups TO your buddy:
@@ -143,9 +153,13 @@ rsync to your buddy (`rsync://localhost:9000/...`), -forward lets your buddy
 reach your local rsync daemon on :873. At least one is required.
 
 This node runs the **buddy** role. Its identity key, trust store and peer cache
-live on the array under `/mnt/user/appdata/buddynet/`. After first connect the
-buddy's key is recorded (trust-on-first-use); pin your buddy with the Buddy key
-for full MITM protection. See the project README and docs/PROTOCOL.md.
+live on the array under `/mnt/user/appdata/buddynet/`. Because Unraid runs the
+buddy headless, there is no terminal to compare the first-contact **safety check
+(SAS)** — so you **must pin your buddy** by entering its identity in the Buddy
+key field above (the buddy prints its identity at startup, or run
+`buddynet --role=handshake --key … identity` on the server for the server key).
+Without a pin the connection is refused, never trusted blindly. See the project
+README and SECURITY.md.
 
 **Secret note:** the USB flash is FAT, so file permissions are not enforced there
 — a Token typed above is effectively readable. For real protection put the token
@@ -244,10 +258,17 @@ start() {
   is_running && { echo "running"; return 0; }
   [ -x "$BIN" ] || { echo "binary missing"; return 1; }
   mkdir -p "$STATE" 2>/dev/null || { echo "appdata unavailable (is the array started?)"; return 1; }
+  # Headless: there is no terminal to compare a first-contact SAS, so run
+  # --no-interactive (an unknown buddy key is refused, never learned blind) and
+  # pin the buddy with --peer-key. Without a pin the buddy will refuse to connect.
   args=(--role=buddy --server "$SERVER" --server-key "$SERVER_KEY"
         --key "$STATE/id.key" --known-peers "$STATE/known_peers"
-        --peers "$STATE/peers.json")
-  [ -n "$PEER_KEY" ] && args+=(--peer-key "$PEER_KEY")
+        --peers "$STATE/peers.json" --no-interactive)
+  if [ -n "$PEER_KEY" ]; then
+    args+=(--peer-key "$PEER_KEY")
+  else
+    echo "WARNING: no Buddy key set — headless has no SAS prompt, so the connection will be refused. Set the Buddy key (your buddy's identity) to pin it." >>"$LOG"
+  fi
   [ -n "$LISTEN" ]  && args+=(-L "$LISTEN")
   [ -n "$FORWARD" ] && args+=(-forward "$FORWARD")
   # Prefer the token from a file on the array (real 0600 perms) over the flash
