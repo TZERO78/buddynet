@@ -138,6 +138,8 @@ leg to the other. QUIC's first byte is never the bind prefix, so data and
 control are unambiguous. The relay:
 
 - caps sessions and **exactly two legs** per token (a third is rejected),
+- rate-limits bind control packets per source and caps **legs per source IP**
+  (data forwarding is never throttled),
 - never originates traffic to an address it has not heard a bind from
   (anti-reflector), and
 - reaps a leg after its TTL with no traffic.
@@ -154,6 +156,8 @@ endpoint — the relay forwards ciphertext and never sees content.
 | MITM at first contact (TOFU) | SAS compared out of band over the TLS channel binding before the key is trusted |
 | Leaked pairing token | invite token is one-time/short-lived; the long-lived session secret is derived from the channel binding and never sent |
 | Replaying an old roster | `ts` freshness window binds each roster in time |
-| Spoofed-source memory blowup | hard caps on tokens / ids / candidates |
+| Replaying a signed registration (approval mode) | bounded cache rejects a repeated `reg_sig` within the freshness window |
+| Spoofed-source memory blowup | hard caps on tokens / ids / candidates; capped+pruned approval-mode maps |
+| Flooding the listener (CPU) | global + per-source rate limit before any crypto |
 | Turning a server into a reflector | reply only to a just-heard source |
 | Reading an enrollment code on the wire | sealed box to the server identity |

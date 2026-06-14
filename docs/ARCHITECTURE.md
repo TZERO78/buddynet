@@ -120,6 +120,13 @@ handshake.
   from the channel binding (never transmitted) and reconnect with that. See
   [SECURITY.md](../SECURITY.md) for the full threat model.
 - **Bounded server memory.** Hard caps (`maxTokens`, two ids per token,
-  capped candidates) bound memory even under spoofed source addresses.
+  capped candidates) bound memory even under spoofed source addresses; the
+  attacker-growable approval-mode maps are capped and pruned.
+- **Rate-limited listeners.** A global + per-source token bucket gates each
+  datagram before any parsing or crypto, so a flood is dropped cheaply and the
+  per-packet work stays bounded. The relay rate-limits binds per source and caps
+  legs per source IP.
 - **No reflection.** The relay and handshake server only ever reply to an
   address they have just heard a valid datagram from.
+- **Replay-resistant registrations.** In approval mode a bounded cache drops
+  repeated registration signatures seen within the freshness window.

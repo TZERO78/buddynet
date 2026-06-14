@@ -23,7 +23,15 @@ overclaiming.
   a relay (if used) forwards **encrypted** QUIC datagrams blindly. Neither ever
   sees plaintext — only virtual IPs and ciphertext.
 - **Hardened server.** In-memory registry with hard caps against spoofed-source
-  memory exhaustion, never a useful UDP reflector, tokens logged only as a hash.
+  memory exhaustion, never a useful UDP reflector, tokens logged only as a hash
+  (the log-tag HMAC key is HKDF-derived from the identity, never the raw seed).
+  On top of the caps, the public UDP listener is **rate-limited** — a global
+  ceiling bounds total per-packet crypto so a flood cannot saturate the read
+  loop, and a bounded per-source bucket keeps one address from consuming the
+  budget. In **approval mode**, a bounded cache rejects **replayed**
+  registration signatures within the freshness window. The relay carries the same
+  per-source bind rate-limit plus a legs-per-source ceiling (it stays
+  unauthenticated by design — the caps are abuse ceilings, not access control).
   Ships as a distroless/non-root image and a locked-down systemd sandbox with a
   size-capped log namespace, plus default-drop firewall rules. See
   [`deployments/`](deployments/).
