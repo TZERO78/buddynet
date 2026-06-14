@@ -25,6 +25,11 @@ buddynet --role=relay --listen '[::]:51821'
 # then start handshake with:  --relay-endpoint vps.example:51821
 ```
 
+The bootstrap exchange uses plain UDP by default, with a source-address cookie so
+the server is never a reflector. To run it over QUIC instead, add
+`--quic-handshake` here **and** on every buddy (or set `BUDDYNET_QUIC=1`); the
+two must match.
+
 ## Pairing two buddies
 
 **Inviter** (e.g. the machine being backed up *to*, running an rsync daemon):

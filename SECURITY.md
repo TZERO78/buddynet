@@ -149,6 +149,7 @@ A timeout (no answer) is logged separately as caution, not as an attack.
 | Malicious/compromised **handshake server** | Cannot impersonate a buddy: a substituted key fails the SAS (or is refused by `--peer-key`). Can deny service. **Mitigated.** |
 | A **relay** in the data path | Sees only ciphertext; cannot read or inject (QUIC auth). **Safe.** |
 | Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. **Mitigated.** |
+| Spoofed-source flood / reflection on a server | Source address validated first (UDP cookie or QUIC) before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier. **Mitigated.** |
 | Local process on the same host | Reads the `0600` key / `known_peers`, or a TCP-loopback `-L`. Use a `unix:/path` socket and the systemd sandbox. **Mitigated.** |
 
 ## Other properties
