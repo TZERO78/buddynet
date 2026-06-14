@@ -18,3 +18,14 @@ const Version = 1
 // MaxFieldLen bounds untrusted string fields (token, id, pubkey, virtual IP)
 // before they are used as map keys on a server that takes raw internet input.
 const MaxFieldLen = 128
+
+// Default listen addresses for the server roles. These are the ONE definition of
+// the well-known ports: the CLI defaults, the usage/help text, and the shipped
+// deployment artifacts (Dockerfile, compose, firewall rules) all derive from
+// these. The operator always overrides them with --listen / --relay-listen (or
+// the BUDDYNET_HANDSHAKE_PORT / BUDDYNET_RELAY_PORT env in compose); these are
+// only the fallback when nothing is set. Dual-stack [::] also accepts IPv4.
+const (
+	DefaultHandshakeAddr = "[::]:51820"
+	DefaultRelayAddr     = "[::]:51821"
+)
