@@ -33,6 +33,15 @@ const (
 	// NAT mappings and registrations fresh.
 	TypePing Type = "PING"
 	TypePong Type = "PONG"
+
+	// TypeCookie is the handshake server's address-validation challenge on the
+	// UDP transport: when a REGISTER arrives without a valid Cookie, the server
+	// replies with one (smaller than the request, so never an amplifier) and does
+	// no further work. The client echoes it in Cookie on its next REGISTER. A
+	// spoofed source never receives the challenge, so it can never be answered —
+	// this is QUIC's Retry-token idea at the application layer, and it structurally
+	// removes the reflection vector on the plain-UDP transport.
+	TypeCookie Type = "COOKIE"
 )
 
 // Role is the explicit role a node runs as. BuddyNet never auto-detects a role;
@@ -87,6 +96,12 @@ type Message struct {
 	// Optional enrollment code, sealed to the server's identity key, so an
 	// operator can approve by a short code instead of the long public key.
 	CodeEnc string `json:"code_enc,omitempty"`
+
+	// Cookie is the server's address-validation token (UDP transport). The server
+	// sends it in a TypeCookie reply; the client echoes it on its next REGISTER.
+	// It binds to the source address and a short epoch, so it proves return-
+	// routability without the server holding per-source state.
+	Cookie string `json:"cookie,omitempty"`
 
 	// PEER_LIST payload (server -> peer). Peers is the roster; Sig is the
 	// server's signature over PeerListPayload(token, ts, peers).
