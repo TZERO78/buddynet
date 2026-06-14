@@ -14,8 +14,8 @@ wire or is signed lives there and nowhere else.
 
 ```jsonc
 {
-  "type": "REGISTER|PEER_LIST|RELAY_OFFER|CONNECT|PING|PONG",
-  "ver":  1,
+  "type": "REGISTER|PEER_LIST|COOKIE|RELAY_OFFER|CONNECT|PING|PONG",
+  "ver":  2,
   // ...type-specific fields, all omitempty...
 }
 ```
@@ -35,10 +35,26 @@ candidate and the same NAT mapping is reused for the tunnel.
 | `virtual_ip` | the sender's `10.66.0.X` |
 | `ts`, `reg_sig` | key-ownership proof for an allowlist server (sign `RegistrationPayload(token,id,pubkey,ts)`) |
 | `code_enc` | optional enrollment code, sealed to the server identity |
+| `cookie` | address-validation token echoed from a prior `COOKIE` reply (UDP transport) |
 
 The server observes the **source address** of the datagram as a candidate
 endpoint (over IPv6 this is directly reachable; over IPv4 it is the punched NAT
 mapping).
+
+**Address validation.** On the plain-UDP transport a `REGISTER` without a valid
+`cookie` is answered only with a `COOKIE` message — `HMAC(subkey, epoch‖src-IP)`,
+smaller than the request, never a useful amplifier — and the server does no
+further work. The buddy echoes it in `cookie` on its next `REGISTER`; a spoofed
+source can never receive the challenge, so it can never be answered. With
+`--quic-handshake` the exchange instead rides QUIC, whose handshake validates the
+source address before any work and makes the cookie unnecessary. Either way the
+server never emits a `PEER_LIST` to an unvalidated address.
+
+```
+REGISTER (no cookie) ─▶ server
+       ◀── COOKIE = HMAC(subkey, epoch‖src-IP)   (smaller than the request)
+REGISTER + cookie ─▶ server ──validate──▶ pair, then PEER_LIST
+```
 
 ## PEER_LIST  (handshake → peer)
 
@@ -159,5 +175,5 @@ endpoint — the relay forwards ciphertext and never sees content.
 | Replaying a signed registration (approval mode) | bounded cache rejects a repeated `reg_sig` within the freshness window |
 | Spoofed-source memory blowup | hard caps on tokens / ids / candidates; capped+pruned approval-mode maps |
 | Flooding the listener (CPU) | global + per-source rate limit before any crypto |
-| Turning a server into a reflector | reply only to a just-heard source |
+| Turning a server into a reflector | source address validated first — a UDP cookie (`HMAC(subkey, epoch‖src-IP)`, reply smaller than request) or QUIC's handshake — before any `PEER_LIST`; relay replies only to a just-heard source |
 | Reading an enrollment code on the wire | sealed box to the server identity |
