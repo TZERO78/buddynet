@@ -60,7 +60,7 @@ func main() {
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
 	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]")
-	token := flag.String("token", "", "buddy: shared pairing token agreed with your buddy")
+	token := flag.String("token", "", "buddy: legacy fixed pairing token, reused on every reconnect (--invite/--join instead use a one-time token + a stored session secret)")
 	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest)")
 	knownPeers := flag.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)")
 	insecure := flag.Bool("insecure", false, "buddy: do NOT verify the buddy's identity (unsafe; testing only)")
@@ -72,9 +72,10 @@ func main() {
 	idleTimeout := flag.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all")
 	noInteractive := flag.Bool("no-interactive", false, "buddy: never prompt for first-contact SAS confirmation; refuse to learn a NEW buddy key (pin it with --peer-key instead). For daemons/Unraid.")
 	sasTimeout := flag.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)")
+	inviteTimeout := flag.Duration("invite-timeout", 15*time.Minute, "buddy: give up the first pairing (--invite/--join) after this long; the invite token is one-time")
 	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)")
-	invite := flag.Bool("invite", false, "buddy: mint a fresh pairing token, print it, and wait for your buddy to join")
-	join := flag.String("join", "", "buddy: join using the pairing token your buddy gave you (alias for --token)")
+	invite := flag.Bool("invite", false, "buddy: mint a ONE-TIME invite token (valid until first pairing, see --invite-timeout), print it, and wait; afterwards reconnects use a stored session secret")
+	join := flag.String("join", "", "buddy: join with the one-time invite token your buddy gave you; on success a session secret is stored for reconnects")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
@@ -132,12 +133,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	ephemeral := false
 	if hasBuddy {
 		if *join != "" {
 			*token = *join
+			ephemeral = true
 		}
 		if *invite {
 			*token = mintInviteToken()
+			ephemeral = true
 		}
 	}
 	bArgs := buddyArgs{
@@ -148,6 +152,7 @@ func main() {
 		// Interactive only when not explicitly disabled AND a human is at the
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
+		ephemeral: ephemeral, inviteTimeout: *inviteTimeout,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -252,8 +257,8 @@ func orDefault(v, def string) string {
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	localListen, forward                                                    string
-	insecure, status, interactive                                           bool
-	punchDur, idleTimeout, sasTimeout                                       time.Duration
+	insecure, status, interactive, ephemeral                                bool
+	punchDur, idleTimeout, sasTimeout, inviteTimeout                        time.Duration
 }
 
 // config maps the parsed flags onto the role package's BuddyConfig.
@@ -265,6 +270,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		LocalListen: a.localListen, Forward: a.forward,
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
+		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout,
 	}
 }
 
@@ -272,11 +278,14 @@ func (a buddyArgs) config() role.BuddyConfig {
 // role starts so the error is immediate, whether buddy runs alone or alongside
 // another role.
 func (a buddyArgs) validate() {
-	if a.server == "" || a.serverKey == "" || a.token == "" {
-		fmt.Fprintln(os.Stderr, "error: --role=buddy needs --server, --server-key and --token (or --invite/--join for the token)")
-		if a.token == "" {
-			fmt.Fprintf(os.Stderr, "no token yet? mint one (both buddies use the same value):\n  %s gen-token\n", appName)
-		}
+	if a.server == "" || a.serverKey == "" {
+		fmt.Fprintln(os.Stderr, "error: --role=buddy needs --server and --server-key")
+		os.Exit(2)
+	}
+	// A token is needed for a first pairing (--invite/--join/--token) and for a
+	// --status probe; once paired, a stored session lets you reconnect with none.
+	if a.status && a.token == "" {
+		fmt.Fprintln(os.Stderr, "error: --status needs --token (the pairing token)")
 		os.Exit(2)
 	}
 	if !a.status && a.localListen == "" && a.forward == "" {

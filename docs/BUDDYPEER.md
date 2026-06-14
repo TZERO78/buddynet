@@ -43,8 +43,24 @@ buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
-`--invite` mints the token; `--join` consumes it. Both are thin sugar over
-`--token` (both buddies use the same value).
+`--invite` mints a **one-time** token; `--join` consumes it. It is valid only
+until the first pairing (`--invite-timeout`, default 15 min) — a stolen invite is
+worthless afterwards.
+
+### Reconnecting
+
+On the first successful pairing both buddies derive a long-lived **session
+secret** from the TLS channel binding (never sent over the wire) and store it
+next to the partner key. From then on just rerun **without a token** — each side
+reconnects via the stored session secret:
+
+```bash
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+    -L 127.0.0.1:9000        # no --join/--token: reconnects via the stored session
+```
+
+For scripted/daemon setups that prefer one fixed reusable token, use the legacy
+`--token` instead (ideally with `--peer-key`).
 
 ## First contact: the safety check (SAS)
 
