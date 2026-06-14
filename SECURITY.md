@@ -75,6 +75,26 @@ For daemons/Unraid there is no human to compare a SAS: run with
 `--no-interactive` and **pin with `--peer-key`**. An unknown key is then refused
 rather than learned blind.
 
+### The trust store (`known_peers`)
+
+The SAS protects the **first** connect (on the wire). After that the partner key
+is read from `known_peers` and trusted on every subsequent connect without a
+prompt. That file is therefore a trust anchor and must live in the **same trust
+domain as the identity key**:
+
+- Keep it `0600` next to `id.key` (the systemd sandbox already enforces a `0700`
+  directory). **Do not** put `--known-peers` on a synced/shared location
+  (Dropbox, Syncthing, NFS/SMB) or in a world-writable path: anyone who can
+  rewrite the file there can swap in a different key, and a later connect would
+  trust it silently (the SAS already happened).
+- A local attacker running **as the same user** can rewrite `known_peers` — but
+  that attacker also owns `id.key`, so they are already inside the node's trust
+  domain; this is out of scope at the application layer (rely on file
+  permissions, a dedicated user, and the systemd sandbox). Application-level
+  signing of the store would not help here, since the same key signs it.
+- For the strongest setup, skip the store entirely and **pin with `--peer-key`**;
+  then `known_peers` is not consulted at all.
+
 ## Detecting an attack
 
 When a SAS is **rejected** (explicit mismatch), the buddy logs a full record —
