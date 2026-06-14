@@ -56,6 +56,10 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
 - **Signed matchmaking.** The handshake server learns peers' public endpoints,
   pairs two that share a token, and hands back a **signed** `PEER_LIST`. No
   tunnel data ever flows through it.
+- **Spoof-proof bootstrap.** The server validates a source address *before* it
+  answers — a small UDP cookie by default, or QUIC's own address validation with
+  `--quic-handshake` — so it is never a reflector and never does work for a forged
+  sender.
 - **Fallback chain.** Direct P2P → known relay → handshake-as-relay → cached
   peer (works even if the server is offline).
 - **Blind relay.** Buddies run their own QUIC/TLS end to end; a relay only
@@ -82,6 +86,10 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   file or `BUDDYNET_TOKEN`).
 - Optional allowlist (approval mode) on the handshake server, with sealed
   enrollment codes so a code can't be read off the wire.
+- The bootstrap server is hardened against abuse: source-address validation
+  (cookie or QUIC), global + per-source rate limits, bounded in-memory state, and
+  replay rejection in approval mode. Pick the transport with `--quic-handshake`
+  (set it the same on the server and every buddy).
 
 The full threat model — what BuddyNet protects against, the trust hierarchy, and
 its honest limits — is in **[SECURITY.md](SECURITY.md)**.

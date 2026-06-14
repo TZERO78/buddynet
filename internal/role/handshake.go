@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"io"
@@ -19,6 +20,7 @@ import (
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	"github.com/tzero78/buddynet/internal/ratelimit"
+	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -29,6 +31,7 @@ type HandshakeConfig struct {
 	Authorized string        // optional client allowlist (approval mode)
 	TTL        time.Duration // liveness window for a registration
 	Debug      bool          // verbose, security-sensitive logging
+	QUIC       bool          // run the control plane over QUIC instead of plain UDP
 	// RelayEndpoint, if set, is advertised to every paired buddy as a relay of
 	// last resort — use it when this VPS also runs --role=relay (commonly on a
 	// second port). Buddies fall back to it only after a direct punch fails.
@@ -42,6 +45,11 @@ const (
 	maxCandsPerPeer = 8
 	maxCodeEncLen   = 512
 )
+
+// controlIdleTimeout bounds an idle QUIC control connection. A buddy polls the
+// server ~1/s while waiting for its partner, so keepalive holds the connection
+// open well within this; it only fires if a client goes silent entirely.
+const controlIdleTimeout = 2 * time.Minute
 
 // regSkew is the clock-skew tolerance for a signed registration's timestamp
 // (approval mode): a registration is accepted only if its ts is within ±regSkew
@@ -225,7 +233,8 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	if err != nil {
 		return err
 	}
-	tokenLogKey = deriveLogKey(priv.Seed())
+	tokenLogKey = deriveSubkey(priv.Seed(), "buddynet-logtag-v1")
+	cookieKey = deriveSubkey(priv.Seed(), "buddynet-cookie-v1")
 	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
 	switch {
 	case cfg.KeyPath == "":
@@ -263,8 +272,17 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	reg := newHSRegistry(cfg.TTL)
 	go reg.reap()
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
-
 	hsDebug = cfg.Debug
+
+	// Transport choice: QUIC validates the source address in its handshake
+	// (structural anti-reflection), plain UDP gets the same property from the
+	// address-validation cookie. Both reuse the same pairing core.
+	if cfg.QUIC {
+		log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
+		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl)
+	}
+	log.Print("handshake control plane: UDP (source address validated by cookie)")
+
 	buf := make([]byte, 1500)
 	for {
 		n, src, err := conn.ReadFromUDP(buf)
@@ -288,6 +306,53 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	}
 }
 
+// serveControlQUIC runs the handshake control plane over QUIC: each accepted
+// stream is one REGISTER, answered with a signed PEER_LIST (empty until paired,
+// so a polling buddy makes progress). QUIC's handshake already validated the
+// source address, so no cookie is needed; the rate limiter still bounds load.
+func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter) error {
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
+	if err != nil {
+		return err
+	}
+	defer cs.Close()
+	go func() { <-ctx.Done(); cs.Close() }()
+	for {
+		req, err := cs.Accept(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				log.Print("shutting down")
+				return nil
+			}
+			return err
+		}
+		go handleControlReq(req, reg, priv, authz, relayEndpoint, rl)
+	}
+}
+
+// handleControlReq processes one QUIC control request and replies on its stream.
+func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter) {
+	src, _ := req.Remote.(*net.UDPAddr)
+	if src == nil || !rl.Allow(src.IP.String()) {
+		req.Reply(nil)
+		return
+	}
+	m, ok := parseRegister(req.Payload)
+	if !ok {
+		req.Reply(nil)
+		return
+	}
+	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
+	if !ok {
+		req.Reply(nil)
+		return
+	}
+	// Reply even when parked (empty peers) so the polling buddy retries.
+	if b, err := json.Marshal(signedPeerList(priv, m.Token, peers)); err == nil {
+		req.Reply(b)
+	}
+}
+
 var hsDebug bool
 
 func hsDebugf(format string, args ...any) {
@@ -296,31 +361,62 @@ func hsDebugf(format string, args ...any) {
 	}
 }
 
-// handleRegister parses one datagram. If it completes a pair, it replies to the
-// sender (only) with a signed PEER_LIST naming the partner.
+// handleRegister handles one UDP datagram. It enforces the address-validation
+// cookie (UDP-only — QUIC validates the address in its handshake), then pairs;
+// when a partner is found it replies to the sender (only) with a signed
+// PEER_LIST. A parked registration draws no reply, exactly as before.
 func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, src *net.UDPAddr, raw []byte) {
-	var m protocol.Message
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return
-	}
-	if m.Type != protocol.TypeRegister || !validField(m.Token) || !validField(m.ID) ||
-		len(m.PubKey) > protocol.MaxFieldLen || len(m.CodeEnc) > maxCodeEncLen {
+	m, ok := parseRegister(raw)
+	if !ok {
 		hsDebugf("drop invalid datagram from %s", src)
 		return
 	}
-	if m.Ver != protocol.Version {
-		hsDebugf("drop register with protocol v%d (we speak v%d) from %s", m.Ver, protocol.Version, src)
+	// A REGISTER without a valid cookie gets only a (smaller) challenge and no
+	// further work. A spoofed source never receives the cookie, so it can never
+	// complete this step — closing reflection before any crypto or PEER_LIST.
+	if !validCookie(m.Cookie, src.IP) {
+		sendCookie(conn, src)
+		hsDebugf("challenged unvalidated register token=%s from %s", logTag(m.Token), src)
 		return
 	}
+	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
+	if !ok || len(peers) == 0 {
+		return // dropped, or parked (UDP sends nothing until paired)
+	}
+	if b, err := json.Marshal(signedPeerList(priv, m.Token, peers)); err == nil {
+		conn.WriteToUDP(b, src)
+	}
+}
 
+// parseRegister unmarshals and structurally validates a REGISTER datagram,
+// shared by the UDP and QUIC transports.
+func parseRegister(raw []byte) (protocol.Message, bool) {
+	var m protocol.Message
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return m, false
+	}
+	if m.Type != protocol.TypeRegister || !validField(m.Token) || !validField(m.ID) ||
+		len(m.PubKey) > protocol.MaxFieldLen || len(m.CodeEnc) > maxCodeEncLen {
+		return m, false
+	}
+	if m.Ver != protocol.Version {
+		return m, false
+	}
+	return m, true
+}
+
+// pairRegister runs the transport-independent core: approval-mode checks, then
+// pairing. It returns the partner roster to sign, or empty when parked, and
+// ok=false to drop (over-cap, or not allowed). The caller signs and sends.
+func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src *net.UDPAddr, m protocol.Message) (peers []protocol.Peer, ok bool) {
 	if authz != nil {
 		if !verifyRegistration(m, regSkew) {
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
-			return
+			return nil, false
 		}
 		if authz.replayed(m.RegSig) {
 			hsDebugf("drop replayed register token=%s from %s", logTag(m.Token), src)
-			return
+			return nil, false
 		}
 		if !authz.allowed(m.PubKey) {
 			if m.CodeEnc != "" {
@@ -328,35 +424,35 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 			} else {
 				authz.logPending(m.PubKey, shortHash(m.Token))
 			}
-			return
+			return nil, false
 		}
 	}
-
 	self, partner, ok := reg.upsert(m, src)
 	if !ok {
 		hsDebugf("reject over-cap register token=%s id=%s from %s", logTag(m.Token), m.ID, src)
-		return
+		return nil, false
 	}
 	if partner == nil {
 		hsDebugf("parked token=%s id=%s from %s, awaiting partner", logTag(m.Token), self.id, src)
-		return
+		return nil, true // ok, but no partner yet
 	}
-
 	log.Printf("paired token=%s: %s(%d cand) <-> %s(%d cand)",
 		logTag(m.Token), self.id, len(self.cands), partner.id, len(partner.cands))
+	return []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}, true
+}
 
-	peers := []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}
+// signedPeerList builds a server-signed PEER_LIST over (token, ts, peers). An
+// empty peers slice yields a signed "not paired yet" reply, which the QUIC
+// transport sends so a polling client retries (the UDP transport stays silent).
+func signedPeerList(priv ed25519.PrivateKey, token string, peers []protocol.Peer) protocol.Message {
 	ts := time.Now().Unix()
-	sig := ed25519.Sign(priv, protocol.PeerListPayload(m.Token, ts, peers))
-	reply := protocol.Message{
+	sig := ed25519.Sign(priv, protocol.PeerListPayload(token, ts, peers))
+	return protocol.Message{
 		Type:  protocol.TypePeerList,
 		Ver:   protocol.Version,
 		Peers: peers,
 		Ts:    ts,
 		Sig:   base64.StdEncoding.EncodeToString(sig),
-	}
-	if b, err := json.Marshal(reply); err == nil {
-		conn.WriteToUDP(b, src)
 	}
 }
 
@@ -390,12 +486,59 @@ func shortHash(token string) string {
 // seed so only this server can reproduce a tag (no offline guessing oracle).
 var tokenLogKey []byte
 
-// deriveLogKey derives the logTag HMAC key from the identity seed via HKDF
-// rather than using the raw seed: key separation, so the same secret never both
-// signs (Ed25519) and MACs (logTag). HKDF cannot fail for these fixed sizes.
-func deriveLogKey(seed []byte) []byte {
+// cookieEpoch is the validity granularity of an address-validation cookie. A
+// cookie is accepted for the current and the previous epoch, so it lives
+// 30..60s — long enough to survive a registration's first round-trip, short
+// enough to bound replay of a captured cookie to its source address.
+const cookieEpoch = 30 * time.Second
+
+// cookieKey keys the address-validation HMAC; HKDF-derived from the identity so
+// only this server can mint/verify cookies and they need no per-source state.
+var cookieKey []byte
+
+// computeCookie is HMAC(cookieKey, epoch || canonical-ip), truncated. Binding to
+// the source IP is what makes it prove return-routability: only a host that
+// actually received the challenge at that address can echo a matching value.
+func computeCookie(ip net.IP, epoch int64) string {
+	mac := hmac.New(sha256.New, cookieKey)
+	var e [8]byte
+	binary.BigEndian.PutUint64(e[:], uint64(epoch))
+	mac.Write(e[:])
+	mac.Write(ip.To16())
+	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
+}
+
+// freshCookie mints a cookie for the current epoch and source IP.
+func freshCookie(ip net.IP) string {
+	return computeCookie(ip, time.Now().UnixNano()/int64(cookieEpoch))
+}
+
+// validCookie accepts a cookie matching the current or previous epoch for ip,
+// compared in constant time.
+func validCookie(c string, ip net.IP) bool {
+	if c == "" {
+		return false
+	}
+	now := time.Now().UnixNano() / int64(cookieEpoch)
+	return hmac.Equal([]byte(c), []byte(computeCookie(ip, now))) ||
+		hmac.Equal([]byte(c), []byte(computeCookie(ip, now-1)))
+}
+
+// sendCookie replies with an address-validation challenge. The reply is smaller
+// than the REGISTER that triggered it, so it is never a useful amplifier.
+func sendCookie(conn *net.UDPConn, src *net.UDPAddr) {
+	reply := protocol.Message{Type: protocol.TypeCookie, Ver: protocol.Version, Cookie: freshCookie(src.IP)}
+	if b, err := json.Marshal(reply); err == nil {
+		conn.WriteToUDP(b, src)
+	}
+}
+
+// deriveSubkey derives a purpose-specific 32-byte key from the identity seed via
+// HKDF: key separation, so the same secret never serves two primitives. HKDF
+// cannot fail for these fixed sizes.
+func deriveSubkey(seed []byte, label string) []byte {
 	out := make([]byte, 32)
-	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, nil, []byte("buddynet-logtag-v1")), out); err != nil {
+	if _, err := io.ReadFull(hkdf.New(sha256.New, seed, nil, []byte(label)), out); err != nil {
 		panic(err) // only on a broken hash, which cannot happen for sha256
 	}
 	return out

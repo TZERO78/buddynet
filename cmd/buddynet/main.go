@@ -57,6 +57,7 @@ func main() {
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
 	debug := flag.Bool("debug", false, "handshake: verbose logging of parked/dropped packets (not for production)")
+	quicHandshake := flag.Bool("quic-handshake", false, "use QUIC (not plain UDP) for the handshake control plane; set the SAME on the server and every buddy")
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
 	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]")
@@ -108,6 +109,11 @@ func main() {
 	*peerKey = orEnv(*peerKey, "BUDDYNET_PEER_KEY")
 	*knownPeers = orEnv(*knownPeers, "BUDDYNET_KNOWN_PEERS")
 	*code = orEnv(*code, "BUDDYNET_CODE")
+	if !*quicHandshake {
+		if v := os.Getenv("BUDDYNET_QUIC"); v == "1" || v == "true" {
+			*quicHandshake = true
+		}
+	}
 
 	// A node may run several roles at once, comma-separated (e.g. on a VPS:
 	// --role=handshake,relay). Each runs concurrently on its own port.
@@ -152,7 +158,7 @@ func main() {
 		// Interactive only when not explicitly disabled AND a human is at the
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
-		ephemeral: ephemeral, inviteTimeout: *inviteTimeout,
+		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -189,6 +195,7 @@ func main() {
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
 					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
+					QUIC: *quicHandshake,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
@@ -257,7 +264,7 @@ func orDefault(v, def string) string {
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	localListen, forward                                                    string
-	insecure, status, interactive, ephemeral                                bool
+	insecure, status, interactive, ephemeral, quic                          bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout                        time.Duration
 }
 
@@ -270,7 +277,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		LocalListen: a.localListen, Forward: a.forward,
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
-		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout,
+		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
 	}
 }
 
@@ -417,41 +424,50 @@ func orEnv(v, key string) string {
 
 func usage() {
 	w := flag.CommandLine.Output()
-	fmt.Fprintf(w, `%s %s — one binary, three roles (BuddyNet)
+	fmt.Fprintf(w, `%[1]s %[2]s — a tiny end-to-end-encrypted P2P tunnel between two
+machines behind NAT.
 
-USAGE
-  %s --role=handshake [--listen [::]:51820] [--key PATH] [--authorized FILE]
-  %s --role=relay     [--listen [::]:51821]
-  %s --role=buddy --server H:P --server-key KEY --token TOK (-L addr | -forward addr)
-  %s --role=handshake,relay ...       # combine roles on one node (own ports)
+One binary, three roles (always chosen explicitly with --role):
 
-  %s --role=buddy --invite ...        # mint a token and wait (BuddyPeer)
-  %s --role=buddy --join=TOKEN ...     # join with that token
-  %s --role=buddy ... --status         # is my buddy online and reachable?
-  %s gen-token                         # mint a strong shared token
-  %s --role=handshake --key PATH identity   # print the server public key to pin
-  %s version
+  buddy      an ordinary peer (NAT is fine) — run this to get a tunnel
+  relay      a public-IP node that blindly forwards encrypted sessions (fallback)
+  handshake  the bootstrap/matchmaking server on a VPS (pairs two buddies)
+
+QUICK START — connect two machines (BuddyPeer)
+
+  1) On a VPS with a public IP, run the bootstrap server and print its key:
+       %[1]s --role=handshake --key /var/lib/%[1]s/id.key
+       %[1]s --role=handshake --key /var/lib/%[1]s/id.key identity   # -> SERVER_KEY
+
+  2) On machine A, expose a local service (e.g. an rsync daemon on :873):
+       %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
+            --invite -forward 127.0.0.1:873
+     It prints a ONE-TIME invite token — hand it to B over a trusted channel.
+
+  3) On machine B, reach A's service locally (here on :9000):
+       %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
+            --join=TOKEN -L 127.0.0.1:9000
+
+COMMANDS
+  %[1]s gen-token                            mint a strong shared token
+  %[1]s --role=handshake --key PATH identity   print the server's public key
+  %[1]s --role=buddy ... --status            is my buddy online and reachable?
+  %[1]s version
+
+SECURITY — please read
+  • Pin your buddy with --peer-key (each buddy prints its identity at startup).
+    Without a pin, first contact is verified by a Short Authentication String
+    you compare out of band, then remembered in --known-peers.
+  • Keep the token off the command line: prefer BUDDYNET_TOKEN or a 0600 file.
+
+TRANSPORT
+  The handshake control plane uses plain UDP by default (source addresses are
+  validated by a cookie, so the server is never a reflector). Pass
+  --quic-handshake on the server AND every buddy to use QUIC instead — same
+  protection via QUIC's built-in address validation, at the cost of a TLS cert.
 
 FLAGS
-`, appName, version, appName, appName, appName, appName, appName, appName, appName, appName, appName, appName)
+`, appName, version)
 	flag.PrintDefaults()
-	fmt.Fprintf(w, `
-EXAMPLE (BuddyPeer: rsync backup between two sites)
-  # On the VPS (public IP): the bootstrap server.
-  %s --role=handshake --key /var/lib/%s/id.key
-  %s --role=handshake --key /var/lib/%s/id.key identity   # prints KEY to pin
-
-  # Inviter (machine being backed up TO; runs rsync daemon on :873):
-  %s --role=buddy --server vps:51820 --server-key KEY --invite \
-      -forward 127.0.0.1:873
-
-  # Joiner (machine doing the backup):
-  %s --role=buddy --server vps:51820 --server-key KEY --join=TOKEN \
-      -L 127.0.0.1:9000 &
-  rsync -a /data/ rsync://localhost:9000/backup/
-
-SECURITY: pin your buddy with --peer-key (each buddy prints its identity at
-startup). Without it, trust-on-first-use records the buddy key in --known-peers
-and refuses later changes. See docs/ARCHITECTURE.md and docs/PROTOCOL.md.
-`, appName, appName, appName, appName, appName, appName)
+	fmt.Fprintf(w, "\nMore: docs/ARCHITECTURE.md, docs/PROTOCOL.md, SECURITY.md\n")
 }

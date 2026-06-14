@@ -23,7 +23,15 @@ overclaiming.
   a relay (if used) forwards **encrypted** QUIC datagrams blindly. Neither ever
   sees plaintext — only virtual IPs and ciphertext.
 - **Hardened server.** In-memory registry with hard caps against spoofed-source
-  memory exhaustion, never a useful UDP reflector, tokens logged only as a hash.
+  memory exhaustion, never a useful UDP reflector, tokens logged only as a hash
+  (the log-tag HMAC key is HKDF-derived from the identity, never the raw seed).
+  On top of the caps, the public UDP listener is **rate-limited** — a global
+  ceiling bounds total per-packet crypto so a flood cannot saturate the read
+  loop, and a bounded per-source bucket keeps one address from consuming the
+  budget. In **approval mode**, a bounded cache rejects **replayed**
+  registration signatures within the freshness window. The relay carries the same
+  per-source bind rate-limit plus a legs-per-source ceiling (it stays
+  unauthenticated by design — the caps are abuse ceilings, not access control).
   Ships as a distroless/non-root image and a locked-down systemd sandbox with a
   size-capped log namespace, plus default-drop firewall rules. See
   [`deployments/`](deployments/).
@@ -141,6 +149,7 @@ A timeout (no answer) is logged separately as caution, not as an attack.
 | Malicious/compromised **handshake server** | Cannot impersonate a buddy: a substituted key fails the SAS (or is refused by `--peer-key`). Can deny service. **Mitigated.** |
 | A **relay** in the data path | Sees only ciphertext; cannot read or inject (QUIC auth). **Safe.** |
 | Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. **Mitigated.** |
+| Spoofed-source flood / reflection on a server | Source address validated first (UDP cookie or QUIC) before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier. **Mitigated.** |
 | Local process on the same host | Reads the `0600` key / `known_peers`, or a TCP-loopback `-L`. Use a `unix:/path` socket and the systemd sandbox. **Mitigated.** |
 
 ## Other properties
@@ -153,24 +162,33 @@ A timeout (no answer) is logged separately as caution, not as an attack.
   mode `0600`) as a safer alternative to TCP loopback in shared/container hosts.
 - **Forward secrecy.** Provided by TLS 1.3 by default.
 
-## Handshake server transport — design trade-off
+## Handshake server transport — two ways, both spoof-proof
 
-The handshake server currently speaks plain UDP. Moving it to QUIC would
-structurally eliminate the spoofed-source reflection vector, because QUIC's
-Initial packet includes a server-chosen token that the source must echo —
-IP-spoofed senders cannot receive it.
+The handshake control plane (the `REGISTER` → `PEER_LIST` exchange) can run over
+either transport. **Both structurally close the spoofed-source reflection
+vector** — the server never produces a `PEER_LIST` for an address that has not
+proven it can receive packets. They differ only in how that proof is obtained.
 
-The cost is a TLS certificate. In the default deployment the server generates a
-self-signed cert at startup and exposes its fingerprint (`--server-key`), which
-every buddy pins. This is the same TOFU model already used for peer identity —
-no CA, no domain required.
+- **Plain UDP + address-validation cookie (default).** A `REGISTER` without a
+  valid cookie is answered only with a small `COOKIE` challenge — *smaller* than
+  the request, so never a useful amplifier — and no further work. The cookie is
+  `HMAC(subkey, epoch ‖ source-IP)` (the subkey HKDF-derived from the server
+  identity), so a spoofed source can never receive and echo it. The buddy echoes
+  it on its next `REGISTER`. This is QUIC's Retry-token idea at the application
+  layer: zero extra dependencies, no TLS certificate, and the buddy's single
+  socket is untouched (so hole punching and the peer tunnel are unaffected).
 
-**Decision:** UDP is kept for zero-dependency bootstrapping. The reflection
-vector is *mitigated* (per-source and global rate limits, never a useful
-amplifier) but not *eliminated*. The structural fix would mean running the
-handshake control plane over QUIC on its port; the `quic-go` dependency is
-already vendored, so it is a contained change rather than a new dependency — but
-it is **not a built-in option today**.
+- **QUIC (`--quic-handshake`).** The control plane runs over QUIC, which
+  validates the source address in its own handshake before the server does any
+  work. The cost is a TLS certificate: the server presents its self-signed
+  identity cert and the buddy pins it by `--server-key` — the same TOFU model
+  already used for peer identity, no CA or domain. The buddy runs the QUIC
+  control connection on its **shared** UDP socket and tears it down before
+  punching, so the same NAT mapping still carries the peer tunnel.
+
+Set the **same** transport on the server and every buddy (`--quic-handshake`, or
+`BUDDYNET_QUIC=1`); a mismatch simply fails to connect. On both transports the
+global + per-source rate limits and the bounded registry caps still apply.
 
 ## Deliberately out of scope
 

@@ -1,6 +1,7 @@
 package role
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -12,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -200,6 +203,86 @@ func TestCandidatesAreCanonical(t *testing.T) {
 
 // --- end-to-end over a real UDP socket ---------------------------------
 
+func TestIntegrationPairingOverQUIC(t *testing.T) {
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("server listen: %v", err)
+	}
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	srvPub := srvPriv.Public().(ed25519.PublicKey)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); srvConn.Close() })
+	reg := newHSRegistry(time.Minute)
+	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
+	go serveControlQUIC(ctx, srvConn, reg, srvPriv, nil, "", rl)
+
+	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
+	type result struct {
+		peer protocol.Peer
+		err  error
+	}
+
+	// Two buddies register over QUIC under the same token; each must learn the
+	// other. A parks until B arrives, exercising the polling path.
+	run := func(out chan<- result) {
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		pub := priv.Public().(ed25519.PublicKey)
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			out <- result{err: err}
+			return
+		}
+		defer c.Close()
+		cfg := BuddyConfig{QUIC: true}
+		p, err := buddyRegisterQUIC(c, []*net.UDPAddr{srvAddr}, cfg, "tok",
+			randomID(), bcrypto.PubKeyB64(pub), bcrypto.VirtualIPString(pub), priv, srvPub, 15*time.Second)
+		out <- result{peer: p, err: err}
+	}
+
+	ach, bch := make(chan result, 1), make(chan result, 1)
+	go run(ach)
+	go run(bch)
+
+	for i, ch := range []chan result{ach, bch} {
+		select {
+		case r := <-ch:
+			if r.err != nil {
+				t.Fatalf("buddy %d register over QUIC: %v", i, r.err)
+			}
+			if r.peer.PubKey == "" || r.peer.VirtualIP == "" {
+				t.Fatalf("buddy %d got an empty partner: %+v", i, r.peer)
+			}
+		case <-time.After(20 * time.Second):
+			t.Fatalf("buddy %d timed out pairing over QUIC", i)
+		}
+	}
+}
+
+func TestCookieValidatesSourceAndEpoch(t *testing.T) {
+	cookieKey = deriveSubkey(bytes.Repeat([]byte{7}, ed25519.SeedSize), "buddynet-cookie-v1")
+	ip := net.IPv4(203, 0, 113, 5)
+
+	c := freshCookie(ip)
+	if !validCookie(c, ip) {
+		t.Fatal("a fresh cookie must validate for its own source IP")
+	}
+	if validCookie(c, net.IPv4(203, 0, 113, 6)) {
+		t.Fatal("a cookie must not validate for a different source IP")
+	}
+	if validCookie("", ip) {
+		t.Fatal("an empty cookie must never validate")
+	}
+	if validCookie("not-a-real-cookie", ip) {
+		t.Fatal("a forged cookie must not validate")
+	}
+	// A cookie from two epochs ago is outside the accepted (now, now-1) window.
+	old := computeCookie(ip, time.Now().UnixNano()/int64(cookieEpoch)-2)
+	if validCookie(old, ip) {
+		t.Fatal("a cookie older than the previous epoch must not validate")
+	}
+}
+
 func TestIntegrationPairingOverUDP(t *testing.T) {
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
 	if err != nil {
@@ -238,12 +321,6 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 		}
 		return c
 	}
-	register := func(c *net.UDPConn, token, id, pk string) {
-		b, _ := json.Marshal(regMsg(token, id, pk))
-		if _, err := c.Write(b); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
 	readReply := func(c *net.UDPConn) (protocol.Message, error) {
 		c.SetReadDeadline(time.Now().Add(2 * time.Second))
 		buf := make([]byte, 1500)
@@ -253,6 +330,25 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 		}
 		var m protocol.Message
 		return m, json.Unmarshal(buf[:n], &m)
+	}
+	// register performs the address-validation cookie round-trip transparently:
+	// the first REGISTER is answered with a COOKIE challenge, which the second
+	// REGISTER echoes. Callers then read the validated reply (parked or PEER_LIST).
+	register := func(c *net.UDPConn, token, id, pk string) {
+		b, _ := json.Marshal(regMsg(token, id, pk))
+		if _, err := c.Write(b); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+		r, err := readReply(c)
+		if err != nil || r.Type != protocol.TypeCookie || r.Cookie == "" {
+			t.Fatalf("expected cookie challenge, got %+v (err %v)", r, err)
+		}
+		m := regMsg(token, id, pk)
+		m.Cookie = r.Cookie
+		b, _ = json.Marshal(m)
+		if _, err := c.Write(b); err != nil {
+			t.Fatalf("write: %v", err)
+		}
 	}
 
 	a, b := dial(), dial()

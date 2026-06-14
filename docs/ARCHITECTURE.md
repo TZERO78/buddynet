@@ -105,6 +105,27 @@ by a session token; it never terminates the TLS and so never sees plaintext —
 only virtual IPs and ciphertext. See [PROTOCOL.md](PROTOCOL.md) for the bind
 handshake.
 
+## Handshake transport (UDP or QUIC)
+
+The matchmaking control plane (`REGISTER` → `PEER_LIST`) runs over one of two
+transports, chosen with `--quic-handshake` and set the **same** on the server and
+every buddy. Both validate the source address before the server does any work, so
+neither can be turned into a reflector; they differ only in how:
+
+- **Plain UDP + cookie (default).** A `REGISTER` without a valid cookie is
+  answered only with a small `COOKIE` challenge (`HMAC(subkey, epoch‖src-IP)`,
+  smaller than the request); the buddy echoes it on its next `REGISTER`. A
+  spoofed source never receives the challenge, so it can never be answered. No
+  TLS certificate, and the buddy's single UDP socket is untouched — so hole
+  punching and the peer tunnel are unaffected.
+- **QUIC (`--quic-handshake`).** The exchange rides QUIC, whose handshake
+  validates the address itself (no cookie needed). The server presents its
+  identity cert; the buddy pins it by `--server-key`. The buddy runs the QUIC
+  control connection on its **shared** socket and closes it before punching, so
+  the same NAT mapping still carries the tunnel.
+
+See the `REGISTER` section of [PROTOCOL.md](PROTOCOL.md) for the wire details.
+
 ## Security posture
 
 - **Signed rosters.** The handshake server signs every `PEER_LIST` over
@@ -120,6 +141,14 @@ handshake.
   from the channel binding (never transmitted) and reconnect with that. See
   [SECURITY.md](../SECURITY.md) for the full threat model.
 - **Bounded server memory.** Hard caps (`maxTokens`, two ids per token,
-  capped candidates) bound memory even under spoofed source addresses.
-- **No reflection.** The relay and handshake server only ever reply to an
-  address they have just heard a valid datagram from.
+  capped candidates) bound memory even under spoofed source addresses; the
+  attacker-growable approval-mode maps are capped and pruned.
+- **Rate-limited listeners.** A global + per-source token bucket gates each
+  datagram before any parsing or crypto, so a flood is dropped cheaply and the
+  per-packet work stays bounded. The relay rate-limits binds per source and caps
+  legs per source IP.
+- **No reflection.** The handshake server validates the source address (UDP
+  cookie or QUIC) before emitting a `PEER_LIST`; the relay only ever replies to an
+  address it has just heard a valid bind from. Neither is a usable amplifier.
+- **Replay-resistant registrations.** In approval mode a bounded cache drops
+  repeated registration signatures seen within the freshness window.

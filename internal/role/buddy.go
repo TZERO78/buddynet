@@ -56,6 +56,13 @@ type BuddyConfig struct {
 	// fixed-token mode (Ephemeral=false): no session secret, token reused.
 	Ephemeral     bool
 	InviteTimeout time.Duration // give up first pairing after this long (default 15m)
+
+	// QUIC selects the QUIC control transport for registration instead of plain
+	// UDP. It must match the handshake server's transport. QUIC validates the
+	// source address in its handshake (structural anti-reflection); UDP achieves
+	// the same with the address-validation cookie. Either way the SAME socket is
+	// then reused to hole-punch and run the peer tunnel.
+	QUIC bool
 }
 
 // attempt is the per-connection plan: which rendezvous token to register with,
@@ -478,6 +485,9 @@ func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKe
 // PEER_LIST arrives and verifies against the pinned server key, then returns the
 // (single, in 2-peer mode) partner.
 func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, rendezvous, myID, myPub, myVIP string, priv ed25519.PrivateKey, serverPub ed25519.PublicKey, timeout time.Duration) (protocol.Peer, error) {
+	if cfg.QUIC {
+		return buddyRegisterQUIC(conn, serverAddrs, cfg, rendezvous, myID, myPub, myVIP, priv, serverPub, timeout)
+	}
 	ts := time.Now().Unix()
 	m := protocol.Message{
 		Type:      protocol.TypeRegister,
@@ -518,7 +528,20 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 			continue
 		}
 		var r protocol.Message
-		if json.Unmarshal(buf[:n], &r) != nil || r.Type != protocol.TypePeerList {
+		if json.Unmarshal(buf[:n], &r) != nil {
+			continue
+		}
+		// Address-validation challenge: adopt the cookie and re-register at once
+		// (proving return-routability) instead of waiting for the next tick.
+		if r.Type == protocol.TypeCookie {
+			if r.Cookie != "" && r.Cookie != m.Cookie {
+				m.Cookie = r.Cookie
+				reg, _ = json.Marshal(m)
+				next = time.Now()
+			}
+			continue
+		}
+		if r.Type != protocol.TypePeerList {
 			continue
 		}
 		if r.Ver != protocol.Version {
@@ -537,6 +560,82 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		}
 		conn.SetReadDeadline(time.Time{})
 		return peers[0], nil
+	}
+	return protocol.Peer{}, errors.New("timed out waiting for partner to register with the same token")
+}
+
+// buddyRegisterQUIC registers over the QUIC control transport: it dials the
+// server on the shared socket, then polls (a stream per attempt) until a signed
+// PEER_LIST names the partner. QUIC validates the source address, so no cookie
+// is needed. Closing the control client leaves the socket open, so the caller
+// then hole-punches and runs the peer tunnel on the very same mapping.
+func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, rendezvous, myID, myPub, myVIP string, priv ed25519.PrivateKey, serverPub ed25519.PublicKey, timeout time.Duration) (protocol.Peer, error) {
+	ts := time.Now().Unix()
+	m := protocol.Message{
+		Type:      protocol.TypeRegister,
+		Ver:       protocol.Version,
+		Token:     rendezvous,
+		Role:      protocol.RoleBuddy,
+		ID:        myID,
+		PubKey:    myPub,
+		VirtualIP: myVIP,
+		Ts:        ts,
+	}
+	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
+	if cfg.Code != "" {
+		if enc, err := bcrypto.SealCode(cfg.Code, serverPub); err == nil {
+			m.CodeEnc = enc
+		}
+	}
+	reg, _ := json.Marshal(m)
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	var cli *tunnel.ControlClient
+	var derr error
+	for _, a := range serverAddrs {
+		dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
+		cli, derr = tunnel.DialControl(dctx, conn, a, serverPub, controlIdleTimeout)
+		dcancel()
+		if derr == nil {
+			break
+		}
+	}
+	if cli == nil {
+		return protocol.Peer{}, fmt.Errorf("QUIC control dial failed (is the server on --quic? wrong --server-key?): %w", derr)
+	}
+	defer cli.Close() // leaves the UDP socket open for hole punching
+
+	var lastLog time.Time
+	for ctx.Err() == nil {
+		rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
+		resp, err := cli.Roundtrip(rctx, reg)
+		rcancel()
+		if err == nil {
+			var r protocol.Message
+			if json.Unmarshal(resp, &r) == nil && r.Type == protocol.TypePeerList {
+				if r.Ver != protocol.Version {
+					return protocol.Peer{}, fmt.Errorf("incompatible protocol: server speaks v%d, we speak v%d — update buddynet", r.Ver, protocol.Version)
+				}
+				peers := canonicalPeers(r.Peers)
+				sig, derr := base64.StdEncoding.DecodeString(r.Sig)
+				if derr != nil || !ed25519.Verify(serverPub, protocol.PeerListPayload(rendezvous, r.Ts, peers), sig) {
+					return protocol.Peer{}, errors.New("server signature did not verify (wrong --server-key, or MITM)")
+				}
+				if d := time.Since(time.Unix(r.Ts, 0)); d <= 60*time.Second && d >= -60*time.Second && len(peers) > 0 {
+					return peers[0], nil
+				}
+			}
+		}
+		if time.Since(lastLog) >= 5*time.Second {
+			log.Print("waiting for buddy to come online (no peer with this token yet)...")
+			lastLog = time.Now()
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
 	}
 	return protocol.Peer{}, errors.New("timed out waiting for partner to register with the same token")
 }
