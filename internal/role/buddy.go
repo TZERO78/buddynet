@@ -42,6 +42,12 @@ type BuddyConfig struct {
 	PunchDur    time.Duration
 	IdleTimeout time.Duration
 	Status      bool // probe whether the buddy is online, print, exit
+
+	// Interactive enables the first-contact SAS prompt (trust-on-first-use only).
+	// When false (a daemon, or no TTY) an unknown partner key is refused rather
+	// than learned blindly — pin it with --peer-key instead.
+	Interactive bool
+	SASTimeout  time.Duration // how long to wait for SAS confirmation (default 30s)
 }
 
 // Buddy runs the peer until ctx is cancelled, reconnecting whenever the tunnel
@@ -52,6 +58,9 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	}
 	if cfg.IdleTimeout < 10*time.Second {
 		cfg.IdleTimeout = 60 * time.Second
+	}
+	if cfg.SASTimeout <= 0 {
+		cfg.SASTimeout = 30 * time.Second
 	}
 
 	serverPub, err := bcrypto.DecodePubKey(cfg.ServerKey)
@@ -96,6 +105,11 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 
 	for {
 		if err := buddyRun(ctx, cfg, serverPub, trust, reg, myID, myPub, myVIP, priv); err != nil && ctx.Err() == nil {
+			// A rejected SAS is a deliberate "do not trust" — retrying would just
+			// re-prompt forever, so stop instead of reconnecting.
+			if errors.Is(err, ErrSASRejected) {
+				return fmt.Errorf("aborted: %w", err)
+			}
 			log.Printf("tunnel error: %v", err)
 		}
 		if ctx.Err() != nil {
@@ -121,6 +135,10 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 	}
 	defer conn.Close()
 
+	// needSAS is set when the partner key is unknown (trust-on-first-use) and must
+	// be verified by the human via the SAS once the tunnel is up.
+	var needSAS bool
+
 	serverAddrs, serr := resolveAll(cfg.Server)
 	var partner protocol.Peer
 	if serr == nil {
@@ -141,7 +159,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 		if partner.PubKey == myPub {
 			return errors.New("partner has the SAME identity as us — both peers use the same --key; give each its own identity")
 		}
-		if err := trust.check(cfg.Token, partnerPub); err != nil {
+		if needSAS, err = trust.decide(cfg.Token, partnerPub); err != nil {
 			return err
 		}
 		// The virtual IP is a pure function of the key; reject a roster that
@@ -173,7 +191,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 		if derr != nil {
 			return derr
 		}
-		if err := trust.check(cfg.Token, partnerPub); err != nil {
+		if needSAS, err = trust.decide(cfg.Token, partnerPub); err != nil {
 			return err
 		}
 		log.Printf("trying cached partner %s vip=%s (server offline)", partner.ID, partner.VirtualIP)
@@ -199,6 +217,27 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey,
 		return err
 	}
 	log.Printf("✓ ONLINE: encrypted tunnel up via %s — buddy at %s", used.Desc, sess.RemoteAddr())
+
+	// First contact (trust-on-first-use): verify the partner identity with a SAS
+	// over the now-established, channel-bound session BEFORE trusting/persisting
+	// it. Only reached when not pinned and not --insecure.
+	if needSAS {
+		if !cfg.Interactive {
+			return fmt.Errorf("first contact with an unknown buddy key (%s) but no way to verify it: running non-interactively. Pin it with --peer-key, or run once interactively to confirm the SAS", partner.PubKey)
+		}
+		ekm, eerr := sess.ExportKeyingMaterial(sasLabel, nil, 32)
+		if eerr != nil {
+			return fmt.Errorf("SAS channel binding: %w", eerr)
+		}
+		myEdPub := priv.Public().(ed25519.PublicKey)
+		sas := ComputeSAS(myEdPub, partnerPub, ekm)
+		if err := PromptSAS(sas, cfg.SASTimeout); err != nil {
+			return err // ErrSASRejected — Buddy stops the reconnect loop, key not stored
+		}
+		if err := trust.confirm(cfg.Token, partnerPub); err != nil {
+			return err
+		}
+	}
 
 	return forward(ctx, sess, cfg.LocalListen, cfg.Forward)
 }
@@ -309,7 +348,13 @@ func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKe
 		return &ProbeError{Code: ProbeOffline, Msg: "offline"}
 	}
 	partnerPub, derr := bcrypto.DecodePubKey(partner.PubKey)
-	if derr != nil || trust.check(cfg.Token, partnerPub) != nil {
+	if derr != nil {
+		fmt.Println("a peer registered under this token but its key is malformed")
+		return &ProbeError{Code: ProbeUntrusted, Msg: "untrusted"}
+	}
+	// A probe never learns a key; a CHANGED known key is a hijack signal, while a
+	// brand-new key (needSAS) just means first contact not yet confirmed.
+	if _, terr := trust.decide(cfg.Token, partnerPub); terr != nil {
 		fmt.Println("a peer registered under this token but its identity is NOT trusted (possible hijack)")
 		return &ProbeError{Code: ProbeUntrusted, Msg: "untrusted"}
 	}

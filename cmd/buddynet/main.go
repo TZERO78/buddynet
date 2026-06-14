@@ -70,6 +70,8 @@ func main() {
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
 	punchDur := flag.Duration("punch", 2*time.Second, "buddy: how long to hole-punch before bringing up QUIC")
 	idleTimeout := flag.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all")
+	noInteractive := flag.Bool("no-interactive", false, "buddy: never prompt for first-contact SAS confirmation; refuse to learn a NEW buddy key (pin it with --peer-key instead). For daemons/Unraid.")
+	sasTimeout := flag.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)")
 	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)")
 	invite := flag.Bool("invite", false, "buddy: mint a fresh pairing token, print it, and wait for your buddy to join")
 	join := flag.String("join", "", "buddy: join using the pairing token your buddy gave you (alias for --token)")
@@ -143,6 +145,9 @@ func main() {
 		knownPeers: *knownPeers, insecure: *insecure, code: *code, keyPath: *keyPath,
 		peersPath: *peersPath, localListen: *localListen, forward: *forward,
 		punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
+		// Interactive only when not explicitly disabled AND a human is at the
+		// terminal; otherwise an unknown buddy key is refused, never learned blind.
+		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -247,8 +252,8 @@ func orDefault(v, def string) string {
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	localListen, forward                                                    string
-	insecure, status                                                        bool
-	punchDur, idleTimeout                                                   time.Duration
+	insecure, status, interactive                                           bool
+	punchDur, idleTimeout, sasTimeout                                       time.Duration
 }
 
 // config maps the parsed flags onto the role package's BuddyConfig.
@@ -259,6 +264,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		Code: a.code, KeyPath: a.keyPath, PeersPath: a.peersPath,
 		LocalListen: a.localListen, Forward: a.forward,
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
+		Interactive: a.interactive, SASTimeout: a.sasTimeout,
 	}
 }
 

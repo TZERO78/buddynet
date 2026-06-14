@@ -17,8 +17,12 @@ func TestTrustStoreDoesNotStorePlaintextToken(t *testing.T) {
 	const token = "super-secret-token-value-xyz"
 
 	tofu := &trustPolicy{storePath: store}
-	if err := tofu.check(token, buddyPub); err != nil {
-		t.Fatalf("first connect should learn: %v", err)
+	needSAS, err := tofu.decide(token, buddyPub)
+	if err != nil || !needSAS {
+		t.Fatalf("first contact should need SAS: needSAS=%v err=%v", needSAS, err)
+	}
+	if err := tofu.confirm(token, buddyPub); err != nil {
+		t.Fatalf("confirm: %v", err)
 	}
 
 	data, err := os.ReadFile(store)
@@ -32,56 +36,79 @@ func TestTrustStoreDoesNotStorePlaintextToken(t *testing.T) {
 		t.Fatalf("trust store should index by the token hash; got:\n%s", data)
 	}
 
-	// Sanity: lookups still work via the hash, and re-learning is idempotent.
-	if err := tofu.check(token, buddyPub); err != nil {
-		t.Fatalf("same key should still match after hashing: %v", err)
+	// After confirm, the same key is known and needs no further SAS.
+	needSAS, err = tofu.decide(token, buddyPub)
+	if err != nil || needSAS {
+		t.Fatalf("known key should match silently: needSAS=%v err=%v", needSAS, err)
 	}
 }
 
-// A pinned --peer-key must reject any other identity, and TOFU must refuse a
+// A pinned --peer-key must accept only itself (no SAS), and TOFU must refuse a
 // changed key for a known token (SSH-style).
 func TestTrustPinAndChangeRejected(t *testing.T) {
 	pinned, _, _ := ed25519.GenerateKey(rand.Reader)
 	other, _, _ := ed25519.GenerateKey(rand.Reader)
 
 	pin := &trustPolicy{pinned: pinned}
-	if err := pin.check("tok", pinned); err != nil {
-		t.Fatalf("pinned key should be accepted: %v", err)
+	if needSAS, err := pin.decide("tok", pinned); err != nil || needSAS {
+		t.Fatalf("pinned key should be accepted without SAS: needSAS=%v err=%v", needSAS, err)
 	}
-	if err := pin.check("tok", other); err == nil {
+	if _, err := pin.decide("tok", other); err == nil {
 		t.Fatal("a non-pinned key must be rejected")
 	}
 
 	store := filepath.Join(t.TempDir(), "known_peers")
 	tofu := &trustPolicy{storePath: store}
-	if err := tofu.check("tok", pinned); err != nil {
-		t.Fatalf("first connect should learn: %v", err)
+	if _, err := tofu.decide("tok", pinned); err != nil {
+		t.Fatalf("first contact should not error: %v", err)
 	}
-	if err := tofu.check("tok", other); err == nil {
+	if err := tofu.confirm("tok", pinned); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if _, err := tofu.decide("tok", other); err == nil {
 		t.Fatal("a changed key for a known token must be refused")
 	}
 }
 
-// --insecure accepts anything, and TOFU keys are tracked per token (a different
-// token learns independently rather than clashing).
+// --insecure accepts anything without SAS, and TOFU keys are tracked per token
+// (a different token learns independently rather than clashing).
 func TestTrustInsecureAndIndependentToken(t *testing.T) {
 	a, _, _ := ed25519.GenerateKey(rand.Reader)
 	b, _, _ := ed25519.GenerateKey(rand.Reader)
 
-	if err := (&trustPolicy{insecure: true}).check("tok", a); err != nil {
-		t.Fatalf("insecure should accept anything: %v", err)
+	if needSAS, err := (&trustPolicy{insecure: true}).decide("tok", a); err != nil || needSAS {
+		t.Fatalf("insecure should accept anything without SAS: needSAS=%v err=%v", needSAS, err)
 	}
 
 	store := filepath.Join(t.TempDir(), "known_peers")
 	tofu := &trustPolicy{storePath: store}
-	if err := tofu.check("tok", a); err != nil {
-		t.Fatalf("TOFU first connect should learn: %v", err)
+	if _, err := tofu.decide("tok", a); err != nil {
+		t.Fatalf("first contact should not error: %v", err)
 	}
-	if err := tofu.check("tok", b); err == nil {
+	if err := tofu.confirm("tok", a); err != nil {
+		t.Fatalf("confirm: %v", err)
+	}
+	if _, err := tofu.decide("tok", b); err == nil {
 		t.Fatal("TOFU must refuse a changed key for a known token")
 	}
-	// A different token is independent and learns separately.
-	if err := tofu.check("tok2", b); err != nil {
-		t.Fatalf("TOFU new token should learn: %v", err)
+	// A different token is independent and needs its own first-contact SAS.
+	if needSAS, err := tofu.decide("tok2", b); err != nil || !needSAS {
+		t.Fatalf("new token should need SAS: needSAS=%v err=%v", needSAS, err)
+	}
+}
+
+// confirm must NOT persist for a pinned or insecure policy (nothing to learn).
+func TestConfirmNoopForPinnedAndInsecure(t *testing.T) {
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	store := filepath.Join(t.TempDir(), "known_peers")
+
+	if err := (&trustPolicy{pinned: pub, storePath: store}).confirm("tok", pub); err != nil {
+		t.Fatalf("confirm (pinned): %v", err)
+	}
+	if err := (&trustPolicy{insecure: true, storePath: store}).confirm("tok", pub); err != nil {
+		t.Fatalf("confirm (insecure): %v", err)
+	}
+	if _, err := os.Stat(store); !os.IsNotExist(err) {
+		t.Fatal("pinned/insecure confirm should not create a trust store")
 	}
 }

@@ -46,10 +46,33 @@ rsync -a /data/ rsync://localhost:9000/backup/
 `--invite` mints the token; `--join` consumes it. Both are thin sugar over
 `--token` (both buddies use the same value).
 
+## First contact: the safety check (SAS)
+
+Without `--peer-key`, the very first connect uses trust-on-first-use — but it is
+not blind. Once the tunnel is up, both buddies print a **Short Authentication
+String** before the key is trusted:
+
+```
+🔑 Safety check — first contact with this buddy.
+        K7QX2M
+Do they match? [y/N]
+```
+
+The code is derived from both identities and the live TLS session. Read it to
+your buddy over a trusted channel (phone, Signal) and confirm only if **both
+sides show the same** code. A man in the middle terminates a different TLS
+session to each side, so the two codes differ — that is how you catch it. On a
+mismatch (or no answer within `--sas-timeout`, default 30s) the connection is
+dropped and nothing is trusted. Later connects check the pinned key silently.
+
+For unattended buddies (daemons, Unraid), there is no human to confirm: set
+`--no-interactive` and pin the key with `--peer-key` up front. An unknown key is
+then refused rather than learned blind.
+
 ## Hardening (recommended)
 
-Each buddy prints its own identity at startup. Pin your buddy explicitly instead
-of trusting on first use:
+Each buddy prints its own identity at startup. Pin your buddy explicitly to skip
+the safety check entirely:
 
 ```bash
 buddynet --role=buddy ... --peer-key <buddy-identity>

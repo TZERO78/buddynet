@@ -46,6 +46,12 @@ type Session interface {
 	AcceptStream(ctx context.Context) (Stream, error)
 	// RemoteAddr is the peer's transport address.
 	RemoteAddr() net.Addr
+	// ExportKeyingMaterial returns RFC 5705 exported keying material from the
+	// underlying TLS session (channel binding). Both ends of the same session
+	// derive identical bytes, so it ties a value (e.g. the SAS) cryptographically
+	// to THIS connection — a man in the middle, who terminates a different TLS
+	// session to each side, cannot make the two ends agree on it.
+	ExportKeyingMaterial(label string, context []byte, length int) ([]byte, error)
 	// Done is closed when the session ends; Close tears it down.
 	Done() <-chan struct{}
 	Close() error
