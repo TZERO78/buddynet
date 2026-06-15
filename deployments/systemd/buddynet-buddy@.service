@@ -17,8 +17,10 @@
 [Unit]
 Description=BuddyNet P2P tunnel (%i)
 Documentation=https://github.com/TZERO78/buddynet
-After=network-online.target
-Wants=network-online.target
+# time-sync.target: pairing relies on clocks within ~60s of the server, so wait
+# for NTP/time-sync before connecting.
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 EnvironmentFile=/etc/buddynet/%i.env
@@ -79,6 +81,8 @@ SystemCallErrorNumber=EPERM
 # --- Resource ceilings ------------------------------------------------------
 MemoryMax=256M
 TasksMax=64
+# No core dumps: the per-instance Ed25519 identity key lives in process memory.
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target

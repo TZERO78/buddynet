@@ -1,8 +1,10 @@
 [Unit]
 Description=BuddyNet relay (blind encrypted-packet forwarder)
 Documentation=https://github.com/TZERO78/buddynet
-After=network-online.target
-Wants=network-online.target
+# time-sync.target: the relay's bind cookie is bound to a time epoch, so wait
+# for NTP/time-sync before serving.
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 # Listen address/port is configurable without editing this unit:
@@ -64,6 +66,8 @@ SystemCallErrorNumber=EPERM
 MemoryMax=128M
 TasksMax=64
 LimitNOFILE=4096
+# No core dumps (defense in depth; the relay holds no key but forwards traffic).
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target

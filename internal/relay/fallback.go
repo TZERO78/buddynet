@@ -22,14 +22,15 @@ func (k Kind) String() string {
 }
 
 // Path is one hop to try in the fallback chain. For Direct, Candidates are the
-// punch targets. For Relayed, RelayEndpoint is the relay to bind through and
-// RelayPubKey pins it.
+// punch targets. For Relayed, RelayEndpoint is the relay to bind through. The
+// relay is NOT pinned or authenticated — it only ever forwards the end-to-end
+// QUIC ciphertext, whose partner key the buddy pins itself — so there is no
+// relay key here on purpose (a key field would imply a guarantee we do not make).
 type Path struct {
 	Kind          Kind
 	Desc          string // short label for logs
 	Candidates    []protocol.Candidate
 	RelayEndpoint string
-	RelayPubKey   string
 }
 
 // Chain builds the ordered fallback chain a buddy walks to reach partner. The
@@ -64,7 +65,6 @@ func Chain(partner protocol.Peer, offers []protocol.Message, serverRelay string,
 			Kind:          Relayed,
 			Desc:          "known relay " + o.RelayEndpoint,
 			RelayEndpoint: o.RelayEndpoint,
-			RelayPubKey:   o.RelayPubKey,
 		})
 	}
 

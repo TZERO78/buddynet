@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 )
 
 // VirtualSubnet is the BuddyNet overlay range. Addresses are assigned
@@ -83,7 +84,10 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 	data, rerr := os.ReadFile(path)
 	switch {
 	case rerr == nil:
-		seed, derr := base64.StdEncoding.DecodeString(string(data))
+		// Tolerate a trailing newline/whitespace so a key written with `echo` or an
+		// editor still loads (StdEncoding would otherwise reject the newline and the
+		// node could silently regenerate a fresh identity, changing its address).
+		seed, derr := base64.StdEncoding.DecodeString(strings.TrimSpace(string(data)))
 		if derr != nil {
 			return nil, false, fmt.Errorf("decode key %s: %w", path, derr)
 		}

@@ -1,8 +1,10 @@
 [Unit]
 Description=BuddyNet handshake (NAT hole-punch matchmaker)
 Documentation=https://github.com/TZERO78/buddynet
-After=network-online.target
-Wants=network-online.target
+# time-sync.target: pairing relies on clocks within ~60s (signed REGISTER ts and
+# PEER_LIST freshness), so wait for NTP/time-sync before serving.
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
 
 [Service]
 # Listen address/port is configurable without editing this unit:
@@ -70,6 +72,9 @@ SystemCallErrorNumber=EPERM
 MemoryMax=128M
 TasksMax=32
 LimitNOFILE=1024
+# No core dumps: the Ed25519 identity key lives in process memory; a core file
+# would leak it to disk.
+LimitCORE=0
 
 [Install]
 WantedBy=multi-user.target

@@ -20,7 +20,9 @@ const (
 
 	// TypeRelayOffer advertises a relay a buddy can fall back to when a direct
 	// hole punch fails. From/To are virtual IPs; RelayEndpoint is the relay's
-	// public address and RelayPubKey lets the buddy pin it.
+	// public address. (RelayPubKey is a reserved wire field, NOT currently
+	// verified: the relay is a blind forwarder of end-to-end QUIC, so there is
+	// nothing to authenticate at the relay hop — the partner key is pinned E2E.)
 	TypeRelayOffer Type = "RELAY_OFFER"
 
 	// TypeConnect is the first frame a buddy sends to a relay (or directly to a
@@ -112,7 +114,7 @@ type Message struct {
 	From          string `json:"from,omitempty"`           // virtual IP
 	To            string `json:"to,omitempty"`             // virtual IP
 	RelayEndpoint string `json:"relay_endpoint,omitempty"` // host:port
-	RelayPubKey   string `json:"relay_pubkey,omitempty"`   // pin the relay
+	RelayPubKey   string `json:"relay_pubkey,omitempty"`   // reserved; not verified (relay is blind, partner pinned E2E)
 
 	// CONNECT payload (buddy -> relay/peer).
 	FromPubKey   string `json:"from_pubkey,omitempty"`

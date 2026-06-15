@@ -115,6 +115,11 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	myVIP := bcrypto.VirtualIPString(priv.Public().(ed25519.PublicKey))
 	myID := randomID()
 	log.Printf("buddynet buddy — identity %s vip=%s id=%s", myPub, myVIP, myID)
+	if cfg.ReauthInterval == 0 {
+		log.Print("NOTE: --reauth-interval is 0 (off): once a DIRECT tunnel is up the handshake server " +
+			"is no longer in the path, so a server-side revocation or token rotation will NOT tear it down. " +
+			"Set --reauth-interval (e.g. 1h) if revocation must take effect on long-lived sessions.")
+	}
 
 	trust := &trustPolicy{insecure: cfg.Insecure, storePath: cfg.KnownPeers}
 	switch {
@@ -566,6 +571,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 	deadline := time.Now().Add(timeout)
 	next := time.Now()
 	var lastLog time.Time
+	var skewNoted bool
 	buf := make([]byte, 1500)
 	for time.Now().Before(deadline) {
 		if !time.Now().Before(next) {
@@ -609,7 +615,8 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 			return protocol.Peer{}, errors.New("server signature did not verify (wrong --server-key, or MITM)")
 		}
 		if d := time.Since(time.Unix(r.Ts, 0)); d > 60*time.Second || d < -60*time.Second {
-			continue // stale roster (replay/skew) — wait for a fresh one
+			noteSkew(d, &skewNoted) // signed but stale: almost always a clock-skew problem
+			continue                // wait for a fresh one
 		}
 		if len(peers) == 0 {
 			continue
@@ -664,6 +671,7 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 	defer cli.Close() // leaves the UDP socket open for hole punching
 
 	var lastLog time.Time
+	var skewNoted bool
 	for ctx.Err() == nil {
 		rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
 		resp, err := cli.Roundtrip(rctx, reg)
@@ -681,6 +689,8 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 				}
 				if d := time.Since(time.Unix(r.Ts, 0)); d <= 60*time.Second && d >= -60*time.Second && len(peers) > 0 {
 					return peers[0], nil
+				} else if d > 60*time.Second || d < -60*time.Second {
+					noteSkew(d, &skewNoted)
 				}
 			}
 		}
@@ -694,6 +704,20 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 		}
 	}
 	return protocol.Peer{}, errors.New("timed out waiting for partner to register with the same token")
+}
+
+// noteSkew logs a one-time diagnostic when the server's signature verified but
+// its PEER_LIST timestamp is outside the ±60s freshness window: the signature
+// proves it is not forged, so a large delta is a CLOCK problem (this node or the
+// server is not time-synced), not an attack. Without this the buddy would just
+// loop silently and "never pair" with no hint why. noted is flipped so the line
+// appears at most once per registration attempt.
+func noteSkew(d time.Duration, noted *bool) {
+	if *noted {
+		return
+	}
+	*noted = true
+	log.Printf("NOTE: server roster is signed but %s out of date — check the clock on this host and the server (NTP/time-sync); pairing needs them within ~60s", d.Round(time.Second))
 }
 
 // canonicalPeers returns the roster in the same ID-sorted order the server

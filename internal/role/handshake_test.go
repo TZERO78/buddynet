@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -47,6 +49,83 @@ func TestUpsertPairsTwoDistinctPeers(t *testing.T) {
 	}
 	if partner.pubkey != "pkA" {
 		t.Fatalf("partner pubkey = %q, want pkA", partner.pubkey)
+	}
+}
+
+// F4: in open mode (no allowlist) a buddy always signs its REGISTER, so when a
+// signature is present we verify it — a registration claiming a public key it
+// does not own (forged/mismatched signature) must be dropped, while a valid one
+// (and a legacy unsigned one) is accepted.
+func TestOpenModeProofOfPossession(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pkB64 := base64.StdEncoding.EncodeToString(pub)
+	ts := time.Now().Unix()
+	good := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts}
+	good.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("tok", "A", pkB64, ts)))
+
+	// Valid proof: accepted (parks awaiting a partner).
+	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), good); !ok {
+		t.Fatal("valid open-mode registration must be accepted")
+	}
+	// Forged proof: a present-but-invalid signature is dropped.
+	forged := good
+	forged.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("OTHER", "A", pkB64, ts)))
+	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), forged); ok {
+		t.Fatal("open-mode registration with an invalid key-ownership proof must be dropped")
+	}
+	// Legacy unsigned registration: still accepted (token-gated, backward compatible).
+	legacy := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64}
+	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), legacy); !ok {
+		t.Fatal("legacy unsigned open-mode registration must still be accepted")
+	}
+}
+
+// TestTokenSquatResidualAndApprovalModeBlock pins the live pentest result: a
+// party that learned the token and registers with ITS OWN key passes the F4
+// proof-of-possession check (it really owns that key), so in OPEN mode it pairs
+// and receives buddy-a's signed PEER_LIST — the documented, inherent residual of
+// a bearer-token rendezvous (the impersonation is still stopped downstream by
+// --peer-key/TOFU+SAS; only --insecure turns it into a MITM). APPROVAL mode
+// closes the squat entirely: the attacker key is not allowlisted, so there is no
+// pairing and no roster/endpoint leak.
+func TestTokenSquatResidualAndApprovalModeBlock(t *testing.T) {
+	sign := func(priv ed25519.PrivateKey, token, id, pk string, ts int64) protocol.Message {
+		m := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: token, ID: id, PubKey: pk, Ts: ts}
+		m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(token, id, pk, ts)))
+		return m
+	}
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader) // attacker's own key
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	xB64 := base64.StdEncoding.EncodeToString(xPub)
+	ts := time.Now().Unix()
+
+	// OPEN mode: buddy-a parks, the squat pairs and gets a roster (the residual).
+	open := newHSRegistry(time.Minute)
+	if _, ok := pairRegister(open, nil, "", v4(1000), sign(aPriv, "tok", "A", aB64, ts)); !ok {
+		t.Fatal("open mode: buddy-a should park")
+	}
+	peers, ok := pairRegister(open, nil, "", v4(2000), sign(xPriv, "tok", "X", xB64, ts))
+	if !ok || len(peers) == 0 {
+		t.Fatal("open mode: a token-holder squat is expected to pair (documented residual)")
+	}
+
+	// APPROVAL mode: only buddy-a is allowlisted; the squat is dropped.
+	allow := filepath.Join(t.TempDir(), "authorized")
+	if err := os.WriteFile(allow, []byte(aB64+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	authz, err := newAuthorizer(allow, srvPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := newHSRegistry(time.Minute)
+	if _, ok := pairRegister(reg, authz, "", v4(1000), sign(aPriv, "tok", "A", aB64, ts)); !ok {
+		t.Fatal("approval mode: allowlisted buddy-a should be accepted")
+	}
+	if peers, ok := pairRegister(reg, authz, "", v4(2000), sign(xPriv, "tok", "X", xB64, ts)); ok || len(peers) > 0 {
+		t.Fatalf("approval mode must block the squat: ok=%v peers=%d", ok, len(peers))
 	}
 }
 
