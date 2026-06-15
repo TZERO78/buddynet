@@ -9,6 +9,9 @@ peers.json
 known_peers
 *.pending
 
+# Lab test environment — .env contains the generated server key, not for commit
+/lab/.env
+
 # Editor / OS
 .DS_Store
 *.swp

@@ -1,0 +1,115 @@
+# BuddyNet Lab — 3-node test environment
+#
+# Three containers, one real tunnel:
+#
+#   server   — handshake + relay combined (the VPS role)
+#   buddy-a  — Peer A: runs a test HTTP service on :7777, forwards it via tunnel
+#   buddy-b  — Peer B: exposes :7070 on the host, tunnels through to buddy-a
+#
+# Run:
+#   ./setup.sh          # build images + bootstrap server identity → writes .env
+#   docker compose up   # start everything and follow logs
+#
+# Test:
+#   curl http://localhost:7070   # must return buddy-a's HTML page via the tunnel
+#
+# Requires: BUDDYNET_SERVER_KEY in .env (setup.sh writes this automatically)
+# See README.md for the full walkthrough.
+
+services:
+
+  # ── Server ─────────────────────────────────────────────────────────────────
+  # Runs handshake (matchmaking) + relay (blind forwarder) on one node, exactly
+  # as a VPS deployment would. The server key persists in the 'server-key' volume.
+  server:
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    image: buddynet-lab-server
+    command:
+      - --role=handshake,relay
+      - --listen
+      - "[::]:51820"
+      - --relay-listen
+      - "[::]:51821"
+      - --key
+      - /var/lib/buddynet/id.key
+      # Advertise the relay to buddies so they have a fallback if hole-punching fails.
+      # "server" resolves to this container inside the lab network.
+      - --relay-endpoint
+      - server:51821
+    ports:
+      - "51820:51820/udp"
+      - "51821:51821/udp"
+    volumes:
+      - server-key:/var/lib/buddynet
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+
+  # ── Buddy A ────────────────────────────────────────────────────────────────
+  # The "service side": hosts a busybox httpd test page on :7777 and tells
+  # buddynet to forward all incoming tunnel streams there.
+  # Uses a custom entrypoint (entrypoint-a.sh) that starts httpd then buddynet.
+  buddy-a:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile
+    image: buddynet-lab-buddy
+    entrypoint: ["/entrypoint-a.sh"]
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - --forward
+      - "127.0.0.1:7777"
+      - --no-interactive
+      - --insecure
+    environment:
+      # Server address (Docker service name resolves inside the lab network)
+      BUDDYNET_SERVER: "server:51820"
+      # Server public key — populated by setup.sh
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      # Shared pairing token — same on both buddies
+      BUDDYNET_TOKEN: "lab-test-token-42"
+    depends_on:
+      - server
+    volumes:
+      - buddy-a-key:/var/lib/buddynet
+    restart: unless-stopped
+
+  # ── Buddy B ────────────────────────────────────────────────────────────────
+  # The "client side": listens on :7070 and forwards every connection through
+  # the tunnel to buddy-a, which forwards it to its httpd on :7777.
+  # Port 7070 is mapped to the host so you can test with curl http://localhost:7070.
+  buddy-b:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile
+    image: buddynet-lab-buddy
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - --L
+      - "0.0.0.0:7070"
+      - --no-interactive
+      - --insecure
+    environment:
+      BUDDYNET_SERVER: "server:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_TOKEN: "lab-test-token-42"
+    depends_on:
+      - server
+    ports:
+      - "7070:7070"
+    volumes:
+      - buddy-b-key:/var/lib/buddynet
+    restart: unless-stopped
+
+volumes:
+  server-key:
+  buddy-a-key:
+  buddy-b-key:
