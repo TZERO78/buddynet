@@ -297,7 +297,10 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		log.Printf("approval mode ON: only allowlisted clients may pair (%d approved)", authz.count())
 		go authz.watch(ctx)
 	} else {
-		log.Print("approval mode OFF: any client with a valid token may pair (set --authorized to restrict)")
+		log.Print("approval mode OFF: any client that knows a token may pair. A token-holder can " +
+			"thereby harvest the partner's endpoints from the signed PEER_LIST, and (only against a buddy " +
+			"run with --insecure) MITM it. Restrict with --authorized, and/or use --quic-handshake so the " +
+			"token never travels in cleartext; always pin buddies with --peer-key.")
 	}
 
 	reg := newHSRegistry(cfg.TTL)
