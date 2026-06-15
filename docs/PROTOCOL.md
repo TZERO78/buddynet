@@ -5,8 +5,9 @@ of truth is [`pkg/protocol`](../pkg/protocol); a one-byte drift between
 implementations would break signature verification, so anything that crosses the
 wire or is signed lives there and nowhere else.
 
-- **Version:** `1` (`protocol.Version`). Every message stamps `ver`; a mismatch
-  is reported clearly instead of failing as an opaque signature error.
+- **Version:** `3` (`protocol.Version`). Every message stamps `ver`; a mismatch
+  is reported clearly instead of failing as an opaque signature error. v3 added
+  the relay bind address-validation cookie (see "Relay bind handshake").
 - **Field cap:** untrusted strings are bounded by `MaxFieldLen` (128) before
   being used as map keys.
 
@@ -145,18 +146,29 @@ To use a relay, each buddy claims a leg over the **same socket** it will run QUI
 on ([`internal/relay/offer.go`](../internal/relay/offer.go)):
 
 ```
-client → relay :  "BNRELAY1" || {"s": session_token}    (~5×/s until acked)
-relay  → client:  "BNRELAY1" || {"s": session_token}    (ack; opens return path)
+client → relay :  "BNRELAY1" || {"s": session_token}              (~5×/s)
+relay  → client:  "BNRLYC1"  || cookie(16B)                       (address-validation challenge)
+client → relay :  "BNRELAY1" || {"s": session_token, "c": cookie} (echoes the cookie)
+relay  → client:  "BNRELAY1" || {"s": session_token}              (ack; opens return path)
 ```
+
+The relay binds **no leg** until the client echoes a valid cookie —
+`HMAC(per-process key, epoch‖src-IP)`, truncated, accepted for the current and
+previous 30 s epoch. The challenge is a fixed, compact binary message **smaller
+than the bind that triggers it**, so it is never an amplifier. This is the same
+return-routability proof the handshake server uses: it closes the relay's only
+reflection / traffic-laundering vector — without it, a spoofed bind could
+register a victim's address as a leg and have attacker data forwarded to it.
 
 Once both legs are bound, the relay forwards every **non-bind** datagram from one
 leg to the other. QUIC's first byte is never the bind prefix, so data and
 control are unambiguous. The relay:
 
+- requires an **address-validation cookie** before binding a leg (above),
 - caps sessions and **exactly two legs** per token (a third is rejected),
 - rate-limits bind control packets per source and caps **legs per source IP**
   (data forwarding is never throttled),
-- never originates traffic to an address it has not heard a bind from
+- never originates traffic to an address it has not heard a validated bind from
   (anti-reflector), and
 - reaps a leg after its TTL with no traffic.
 
@@ -175,5 +187,6 @@ endpoint — the relay forwards ciphertext and never sees content.
 | Replaying a signed registration (approval mode) | bounded cache rejects a repeated `reg_sig` within the freshness window |
 | Spoofed-source memory blowup | hard caps on tokens / ids / candidates; capped+pruned approval-mode maps |
 | Flooding the listener (CPU) | global + per-source rate limit before any crypto |
-| Turning a server into a reflector | source address validated first — a UDP cookie (`HMAC(subkey, epoch‖src-IP)`, reply smaller than request) or QUIC's handshake — before any `PEER_LIST`; relay replies only to a just-heard source |
+| Turning a server into a reflector | source address validated first — a UDP cookie (`HMAC(subkey, epoch‖src-IP)`, reply smaller than request) or QUIC's handshake — before any `PEER_LIST` |
+| Turning a **relay** into a reflector / traffic launderer | a bind binds no leg until the source echoes an address-validation cookie (`HMAC(per-process key, epoch‖src-IP)`, reply smaller than the bind); a spoofed source can never validate |
 | Reading an enrollment code on the wire | sealed box to the server identity |

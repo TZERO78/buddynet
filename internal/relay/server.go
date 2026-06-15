@@ -1,10 +1,16 @@
 package relay
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"log"
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tzero78/buddynet/internal/ratelimit"
@@ -52,9 +58,10 @@ type session struct {
 // session and never inspects, decrypts, or stores payload — it sees only
 // encrypted QUIC packets between two NAT-bound addresses.
 type Server struct {
-	ttl     time.Duration
-	bindRL  *ratelimit.Limiter
-	allowed []netip.Prefix // if non-empty, only these source nets may bind a leg
+	ttl       time.Duration
+	bindRL    *ratelimit.Limiter
+	allowed   []netip.Prefix // if non-empty, only these source nets may bind a leg
+	cookieKey []byte         // keys the address-validation HMAC (random per process)
 
 	mu        sync.Mutex
 	sessions  map[string]*session // token -> session
@@ -63,6 +70,32 @@ type Server struct {
 
 	done      chan struct{} // closed when Run returns, so reap stops with it
 	closeOnce sync.Once
+
+	// Audit counters (control-plane only; the data path is never counted so the hot
+	// loop stays allocation- and contention-free). Summarized once per interval and
+	// only when non-zero, so a quiet relay stays silent and abuse shows up.
+	statPaired     atomic.Int64
+	statChallenged atomic.Int64
+	statRejected   atomic.Int64 // over-cap / outside allowlist / rate-limited
+}
+
+const statsInterval = 60 * time.Second
+
+func (s *Server) statsLoop() {
+	t := time.NewTicker(statsInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+		}
+		pa, ch, rj := s.statPaired.Swap(0), s.statChallenged.Swap(0), s.statRejected.Swap(0)
+		if pa|ch|rj == 0 {
+			continue
+		}
+		log.Printf("relay stats (last %s): paired=%d challenged=%d rejected=%d", statsInterval, pa, ch, rj)
+	}
 }
 
 // NewServer returns a relay whose bindings expire after ttl with no traffic. If
@@ -70,15 +103,60 @@ type Server struct {
 // those CIDRs may bind a leg (optional access control for a private relay); an
 // empty allowed keeps the default open-to-all behaviour.
 func NewServer(ttl time.Duration, allowed []netip.Prefix) *Server {
+	// The relay holds no identity key, so the cookie HMAC is keyed by a random
+	// secret minted per process: it need only be unforgeable and stable for this
+	// run (a restart just re-challenges live binds, a sub-second cost). 32 bytes
+	// of crypto/rand cannot realistically fail; fall back to a zero key only to
+	// stay non-panicking, which still validates returns within one process.
+	key := make([]byte, 32)
+	_, _ = rand.Read(key)
 	return &Server{
 		ttl:       ttl,
 		bindRL:    ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),
 		allowed:   allowed,
+		cookieKey: key,
 		sessions:  map[string]*session{},
 		byAddr:    map[string]*session{},
 		legsPerIP: map[string]int{},
 		done:      make(chan struct{}),
 	}
+}
+
+// cookieEpoch is the validity granularity of a bind address-validation cookie. A
+// cookie is accepted for the current and previous epoch, so it lives 30..60s —
+// long enough to complete a bind round-trip, short enough to bound replay of a
+// captured cookie to its source address.
+const cookieEpoch = 30 * time.Second
+
+// computeCookie is HMAC(cookieKey, epoch || canonical-ip), truncated to CookieLen.
+// Binding to the source IP is what makes it prove return-routability: only a host
+// that actually received the challenge at that address can echo a matching value.
+func (s *Server) computeCookie(ip net.IP, epoch int64) []byte {
+	mac := hmac.New(sha256.New, s.cookieKey)
+	var e [8]byte
+	binary.BigEndian.PutUint64(e[:], uint64(epoch))
+	mac.Write(e[:])
+	mac.Write(ip.To16())
+	return mac.Sum(nil)[:CookieLen]
+}
+
+// freshCookie mints a cookie for the current epoch and source IP.
+func (s *Server) freshCookie(ip net.IP) []byte {
+	return s.computeCookie(ip, time.Now().UnixNano()/int64(cookieEpoch))
+}
+
+// validCookie accepts a base64 cookie matching the current or previous epoch for
+// ip, compared in constant time. An empty/garbage cookie is rejected.
+func (s *Server) validCookie(b64 string, ip net.IP) bool {
+	if b64 == "" {
+		return false
+	}
+	got, err := base64.RawURLEncoding.DecodeString(b64)
+	if err != nil || len(got) != CookieLen {
+		return false
+	}
+	now := time.Now().UnixNano() / int64(cookieEpoch)
+	return hmac.Equal(got, s.computeCookie(ip, now)) || hmac.Equal(got, s.computeCookie(ip, now-1))
 }
 
 // cidrAllowed reports whether a source IP may bind. With no allowlist the relay
@@ -107,6 +185,7 @@ func (s *Server) cidrAllowed(ip net.IP) bool {
 func (s *Server) Run(conn *net.UDPConn) {
 	defer s.stop() // stop reap when the read loop exits (socket closed on shutdown)
 	go s.reap()
+	go s.statsLoop()
 	buf := make([]byte, 1500)
 	for {
 		n, src, err := conn.ReadFromUDP(buf)
@@ -115,7 +194,7 @@ func (s *Server) Run(conn *net.UDPConn) {
 		}
 		pkt := buf[:n]
 		if b, ok := ParseBind(pkt); ok {
-			s.bind(conn, b.SessionToken, src)
+			s.bind(conn, b, src)
 			continue
 		}
 		s.forward(conn, src, pkt)
@@ -123,23 +202,38 @@ func (s *Server) Run(conn *net.UDPConn) {
 }
 
 // bind claims src as a leg of token's session and acks. The third distinct leg
-// for a token is rejected (cap), so a stranger cannot hijack a pairing.
-func (s *Server) bind(conn *net.UDPConn, token string, src *net.UDPAddr) {
+// for a token is rejected (cap), so a stranger cannot hijack a pairing. A bind
+// without a valid address-validation cookie is answered with a challenge and
+// creates NO state, so a spoofed source can never have a leg bound for it (the
+// relay's anti-reflection / anti-laundering guarantee).
+func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
+	token := b.SessionToken
 	// Access control (optional): a source outside the allowlist may not bind a
 	// leg, so it cannot use the relay at all. Checked before the rate limiter so a
 	// disallowed source consumes no budget.
 	if !s.cidrAllowed(src.IP) {
+		s.statRejected.Add(1)
 		return
 	}
 	// Throttle bind control packets per source so a flood cannot churn sessions;
 	// data forwarding (the hot path) is never rate-limited.
 	if !s.bindRL.Allow(src.IP.String()) {
+		s.statRejected.Add(1)
+		return
+	}
+	// Return-routability: an unvalidated bind only ever draws a (smaller-than-the-
+	// bind) challenge, never state. A spoofed source never receives the challenge,
+	// so it can never echo a valid cookie — closing reflection before any binding.
+	if !s.validCookie(b.Cookie, src.IP) {
+		s.statChallenged.Add(1)
+		conn.WriteToUDP(MarshalChallenge(s.freshCookie(src.IP)), src)
 		return
 	}
 	s.mu.Lock()
 	ses := s.sessions[token]
 	if ses == nil {
 		if len(s.sessions) >= maxSessions {
+			s.statRejected.Add(1)
 			s.mu.Unlock()
 			return // global capacity reached: drop silently
 		}
@@ -157,10 +251,12 @@ func (s *Server) bind(conn *net.UDPConn, token string, src *net.UDPAddr) {
 	if found == nil {
 		ip := src.IP.String()
 		if len(ses.legs) >= maxLegsPerSes {
+			s.statRejected.Add(1)
 			s.mu.Unlock()
 			return // a third party tried to join this session
 		}
 		if s.legsPerIP[ip] >= maxLegsPerIP {
+			s.statRejected.Add(1)
 			s.mu.Unlock()
 			return // one source is hoarding sessions: refuse further legs
 		}
@@ -169,6 +265,7 @@ func (s *Server) bind(conn *net.UDPConn, token string, src *net.UDPAddr) {
 		s.byAddr[key] = ses
 		s.legsPerIP[ip]++
 		if len(ses.legs) == 2 {
+			s.statPaired.Add(1)
 			log.Printf("relay: session paired (%s <-> %s)", ses.legs[0].addr, ses.legs[1].addr)
 		}
 	}

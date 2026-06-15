@@ -50,6 +50,34 @@ func TestUpsertPairsTwoDistinctPeers(t *testing.T) {
 	}
 }
 
+// F4: in open mode (no allowlist) a buddy always signs its REGISTER, so when a
+// signature is present we verify it — a registration claiming a public key it
+// does not own (forged/mismatched signature) must be dropped, while a valid one
+// (and a legacy unsigned one) is accepted.
+func TestOpenModeProofOfPossession(t *testing.T) {
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pkB64 := base64.StdEncoding.EncodeToString(pub)
+	ts := time.Now().Unix()
+	good := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts}
+	good.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("tok", "A", pkB64, ts)))
+
+	// Valid proof: accepted (parks awaiting a partner).
+	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), good); !ok {
+		t.Fatal("valid open-mode registration must be accepted")
+	}
+	// Forged proof: a present-but-invalid signature is dropped.
+	forged := good
+	forged.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("OTHER", "A", pkB64, ts)))
+	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), forged); ok {
+		t.Fatal("open-mode registration with an invalid key-ownership proof must be dropped")
+	}
+	// Legacy unsigned registration: still accepted (token-gated, backward compatible).
+	legacy := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64}
+	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), legacy); !ok {
+		t.Fatal("legacy unsigned open-mode registration must still be accepted")
+	}
+}
+
 func TestUpsertSameIDDoesNotSelfPair(t *testing.T) {
 	r := newHSRegistry(time.Minute)
 	r.upsert(regMsg("tok", "A", "pk"), v4(1000))

@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/hkdf"
@@ -301,6 +302,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 
 	reg := newHSRegistry(cfg.TTL)
 	go reg.reap(ctx)
+	go hsStats.logLoop(ctx)
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
 	hsDebug = cfg.Debug
 	if len(cfg.AllowCIDRs) > 0 {
@@ -315,6 +317,9 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl, cfg.AllowCIDRs)
 	}
 	log.Print("handshake control plane: UDP (source address validated by cookie)")
+	log.Print("WARNING: on plain UDP the REGISTER (incl. the pairing token) travels in CLEARTEXT — " +
+		"an on-path observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --insecure). " +
+		"Pass --quic-handshake on the server AND every buddy to encrypt the control plane; always pin buddies with --peer-key.")
 
 	buf := make([]byte, 1500)
 	for {
@@ -335,6 +340,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		// Gate before any parsing or crypto so a flood is dropped cheaply and the
 		// expensive per-packet work stays bounded (DoS / reflection defense).
 		if !rl.Allow(src.IP.String()) {
+			hsStats.rateLimited.Add(1)
 			hsDebugf("rate-limited %s", src)
 			continue
 		}
@@ -371,12 +377,18 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 // handleControlReq processes one QUIC control request and replies on its stream.
 func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) {
 	src, _ := req.Remote.(*net.UDPAddr)
-	if src == nil || !cidrAllowed(allowed, src.IP) || !rl.Allow(src.IP.String()) {
+	if src == nil || !cidrAllowed(allowed, src.IP) {
+		req.Reply(nil)
+		return
+	}
+	if !rl.Allow(src.IP.String()) {
+		hsStats.rateLimited.Add(1)
 		req.Reply(nil)
 		return
 	}
 	m, ok := parseRegister(req.Payload)
 	if !ok {
+		hsStats.dropped.Add(1)
 		req.Reply(nil)
 		return
 	}
@@ -399,6 +411,41 @@ func hsDebugf(format string, args ...any) {
 	}
 }
 
+// hsCounters are lightweight audit counters for the handshake server: they make
+// floods, mass-registration attempts and cookie challenges visible WITHOUT
+// logging per-packet (which a flood would weaponize to fill the disk). They are
+// summarized once per statsInterval and only when something happened, so a quiet
+// server stays silent and an attack shows up as a periodic spike line.
+type hsCounters struct {
+	paired      atomic.Int64
+	challenged  atomic.Int64 // sent an address-validation cookie (unvalidated source)
+	rateLimited atomic.Int64
+	dropped     atomic.Int64 // malformed / over-cap / failed proof
+}
+
+var hsStats hsCounters
+
+const statsInterval = 60 * time.Second
+
+func (c *hsCounters) logLoop(ctx context.Context) {
+	t := time.NewTicker(statsInterval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
+		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
+		if pa|ch|rl|dr == 0 {
+			continue // idle interval: stay quiet
+		}
+		log.Printf("stats (last %s): paired=%d challenged=%d rate-limited=%d dropped=%d",
+			statsInterval, pa, ch, rl, dr)
+	}
+}
+
 // handleRegister handles one UDP datagram. It enforces the address-validation
 // cookie (UDP-only — QUIC validates the address in its handshake), then pairs;
 // when a partner is found it replies to the sender (only) with a signed
@@ -406,6 +453,7 @@ func hsDebugf(format string, args ...any) {
 func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, src *net.UDPAddr, raw []byte) {
 	m, ok := parseRegister(raw)
 	if !ok {
+		hsStats.dropped.Add(1)
 		hsDebugf("drop invalid datagram from %s", src)
 		return
 	}
@@ -413,6 +461,7 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 	// further work. A spoofed source never receives the cookie, so it can never
 	// complete this step — closing reflection before any crypto or PEER_LIST.
 	if !validCookie(m.Cookie, src.IP) {
+		hsStats.challenged.Add(1)
 		sendCookie(conn, src)
 		hsDebugf("challenged unvalidated register token=%s from %s", logTag(m.Token), src)
 		return
@@ -464,9 +513,22 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			}
 			return nil, false
 		}
+	} else if m.RegSig != "" {
+		// Open mode (no allowlist): pairing is gated only by the secret token, so a
+		// signature is not strictly required. But a buddy always sends one, so when
+		// it IS present we verify it — proof-of-possession of the registered key.
+		// This stops a party who learned the token from registering under SOMEONE
+		// ELSE'S public key (e.g. squatting the victim's identity in the roster);
+		// it cannot stop the same party from registering under its own fresh key,
+		// which only token confidentiality prevents.
+		if !verifyRegistration(m, regSkew) {
+			hsDebugf("drop register with invalid key-ownership proof token=%s from %s", logTag(m.Token), src)
+			return nil, false
+		}
 	}
 	self, partner, ok := reg.upsert(m, src)
 	if !ok {
+		hsStats.dropped.Add(1)
 		hsDebugf("reject over-cap register token=%s id=%s from %s", logTag(m.Token), m.ID, src)
 		return nil, false
 	}
@@ -474,6 +536,7 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 		hsDebugf("parked token=%s id=%s from %s, awaiting partner", logTag(m.Token), self.id, src)
 		return nil, true // ok, but no partner yet
 	}
+	hsStats.paired.Add(1)
 	log.Printf("paired token=%s: %s(%d cand) <-> %s(%d cand)",
 		logTag(m.Token), self.id, len(self.cands), partner.id, len(partner.cands))
 	return []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}, true
