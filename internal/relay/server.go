@@ -58,6 +58,9 @@ type Server struct {
 	sessions  map[string]*session // token -> session
 	byAddr    map[string]*session // src addr string -> its session (fast forward)
 	legsPerIP map[string]int      // source IP -> legs it holds (abuse ceiling)
+
+	done      chan struct{} // closed when Run returns, so reap stops with it
+	closeOnce sync.Once
 }
 
 // NewServer returns a relay whose bindings expire after ttl with no traffic.
@@ -68,12 +71,14 @@ func NewServer(ttl time.Duration) *Server {
 		sessions:  map[string]*session{},
 		byAddr:    map[string]*session{},
 		legsPerIP: map[string]int{},
+		done:      make(chan struct{}),
 	}
 }
 
 // Run reads datagrams off conn until it is closed: bind control packets claim a
 // leg (and are acked), everything else is forwarded to the session's other leg.
 func (s *Server) Run(conn *net.UDPConn) {
+	defer s.stop() // stop reap when the read loop exits (socket closed on shutdown)
 	go s.reap()
 	buf := make([]byte, 1500)
 	for {
@@ -176,10 +181,21 @@ func (s *Server) releaseIPLocked(ip string) {
 	s.legsPerIP[ip]--
 }
 
+// stop signals reap to exit. Idempotent; called when Run's read loop returns.
+func (s *Server) stop() { s.closeOnce.Do(func() { close(s.done) }) }
+
 // reap drops sessions whose legs have gone quiet past the TTL, so the maps can
-// never grow unbounded.
+// never grow unbounded. It runs until stop() is called (Run returning), so the
+// ticker is released on shutdown instead of leaking like a bare time.Tick.
 func (s *Server) reap() {
-	for range time.Tick(s.ttl) {
+	t := time.NewTicker(s.ttl)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+		}
 		s.mu.Lock()
 		for token, ses := range s.sessions {
 			kept := ses.legs[:0]

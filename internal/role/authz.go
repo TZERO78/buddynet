@@ -2,6 +2,7 @@ package role
 
 import (
 	"bufio"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
@@ -96,8 +97,15 @@ func (a *authorizer) reload() error {
 	return nil
 }
 
-func (a *authorizer) watch() {
-	for range time.Tick(2 * time.Second) {
+func (a *authorizer) watch(ctx context.Context) {
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 		fi, err := os.Stat(a.path)
 		if err != nil {
 			continue

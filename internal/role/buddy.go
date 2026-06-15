@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -139,6 +140,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	}
 
 	inviteStart := time.Now()
+	backoff := reconnectBase
 	for {
 		// Prefer a stored session (reconnect): use its secret as the rendezvous
 		// token and pin the partner key it recorded. Otherwise pair with the
@@ -152,6 +154,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 			return fmt.Errorf("invite token expired after %s without pairing — run --invite again for a fresh one", cfg.InviteTimeout)
 		}
 
+		runStart := time.Now()
 		if err := buddyRun(ctx, cfg, att, serverPub, trust, reg, myID, myPub, myVIP, priv); err != nil && ctx.Err() == nil {
 			// An unconfirmed SAS (mismatch or timeout) is a deliberate "do not
 			// trust" — retrying would just re-prompt forever, so stop instead of
@@ -164,13 +167,46 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		if ctx.Err() != nil {
 			return nil
 		}
-		log.Print("reconnecting in 3s...")
+		// A run that lasted longer than the cap means a real tunnel was up; reset
+		// the backoff so a single long-lived session always reconnects promptly.
+		// A run that failed fast (server/network flapping) grows the delay, with
+		// jitter, so many buddies don't reconnect in lockstep (thundering herd).
+		if time.Since(runStart) > reconnectMax {
+			backoff = reconnectBase
+		}
+		wait := jitter(backoff)
+		log.Printf("reconnecting in %s...", wait.Round(100*time.Millisecond))
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(3 * time.Second):
+		case <-time.After(wait):
+		}
+		if backoff *= 2; backoff > reconnectMax {
+			backoff = reconnectMax
 		}
 	}
+}
+
+// Reconnect backoff bounds: start at reconnectBase, double up to reconnectMax,
+// each wait jittered to spread reconnects across many buddies.
+const (
+	reconnectBase = 3 * time.Second
+	reconnectMax  = 60 * time.Second
+)
+
+// jitter returns a duration in [d/2, d]: full-ish jitter so synchronized clients
+// (e.g. after a shared server outage) do not retry in lockstep. It draws from
+// crypto/rand — overkill for load spreading, but it keeps the whole binary free
+// of math/rand so there is no weak-RNG to misuse elsewhere.
+func jitter(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return d // CSPRNG failure (never happens) — fall back to the full delay
+	}
+	return d/2 + time.Duration(binary.BigEndian.Uint64(b[:])%(uint64(d/2)+1))
 }
 
 // nextAttempt decides how to connect this round: reconnect via a stored session

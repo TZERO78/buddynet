@@ -204,8 +204,15 @@ func bucketSeen(bucket map[string]*hsPeer) time.Time {
 	return newest
 }
 
-func (r *hsRegistry) reap() {
-	for range time.Tick(r.ttl) {
+func (r *hsRegistry) reap(ctx context.Context) {
+	t := time.NewTicker(r.ttl)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
 		r.mu.Lock()
 		for token, bucket := range r.waiting {
 			for id, p := range bucket {
@@ -264,13 +271,13 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 			return err
 		}
 		log.Printf("approval mode ON: only allowlisted clients may pair (%d approved)", authz.count())
-		go authz.watch()
+		go authz.watch(ctx)
 	} else {
 		log.Print("approval mode OFF: any client with a valid token may pair (set --authorized to restrict)")
 	}
 
 	reg := newHSRegistry(cfg.TTL)
-	go reg.reap()
+	go reg.reap(ctx)
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
 	hsDebug = cfg.Debug
 
