@@ -33,7 +33,13 @@ StateDirectory=buddynet
 StateDirectoryMode=0700
 
 # --- Logging: isolate and cap so a reconnect storm cannot fill the disk -----
+# SyslogIdentifier carries the instance name (%i) so several tunnels are told
+# apart in the journal (journalctl --namespace=buddynet -t buddynet-buddy@<name>).
+# journal is the systemd default; set explicitly for clarity.
 LogNamespace=buddynet
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=buddynet-buddy@%i
 LogRateLimitIntervalSec=10s
 LogRateLimitBurst=200
 

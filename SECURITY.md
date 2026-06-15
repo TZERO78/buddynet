@@ -164,6 +164,10 @@ journalctl --namespace=buddynet | grep 'stats (last'
 #   stats (last 1m0s): role=relay paired=.. challenged=.. rejected=.. [ALERT: leg-cap=..]
 ```
 
+Each role tags its lines with a `SyslogIdentifier`, so you can narrow to one role
+within the namespace: `journalctl --namespace=buddynet -t buddynet-handshake`
+(or `-t buddynet-relay`, `-t buddynet-buddy@<name>`).
+
 Peer identity in the audit trail is the **stable key tag** (`key=<first 8 chars
 of the base64 pubkey>`), so it survives reconnects — unlike the ephemeral per-run
 id. Tokens are anonymized: a server-keyed HMAC on the handshake/authz side (so the
