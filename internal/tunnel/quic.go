@@ -158,11 +158,15 @@ func (q quicStream) Close() error {
 // are meaningless here; it does not weaken authentication.
 func tlsConfig(priv ed25519.PrivateKey, partnerPub ed25519.PublicKey) *tls.Config {
 	return &tls.Config{
-		Certificates:       []tls.Certificate{selfSignedCert(priv)},
-		ClientAuth:         tls.RequireAnyClientCert,
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS13,
-		NextProtos:         []string{ALPN},
+		Certificates: []tls.Certificate{selfSignedCert(priv)},
+		ClientAuth:   tls.RequireAnyClientCert,
+		// InsecureSkipVerify disables ONLY the CA/hostname chain checks, which are
+		// meaningless without a PKI; identity is enforced by key in
+		// VerifyPeerCertificate below. Removing that callback would drop all
+		// authentication — keep them together.
+		InsecureSkipVerify:    true, //nosec G402 -- intentional: PKI-free, peer identity pinned by key in VerifyPeerCertificate
+		MinVersion:            tls.VersionTLS13,
+		NextProtos:            []string{ALPN},
 		VerifyPeerCertificate: pinnedPeerVerify(partnerPub),
 	}
 }
