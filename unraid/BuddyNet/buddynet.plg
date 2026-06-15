@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.06.15">
+<!ENTITY version   "2026.06.15.1">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -24,6 +24,12 @@ a small handshake server, hole-punches through NAT (no port forwarding), and
 falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. BuddyPeer (two buddies) is the v1 milestone.
+
+###2026.06.15.1
+- Pinned to buddynet **v1.2.1** — completes the structured log schema: a
+  virtual-IP mismatch now logs `SECURITY: event=vip-mismatch` at the detection
+  point (all detection points now emit `SECURITY:` events). Checksum gate bumped
+  to the v1.2.1 `buddynet-linux-amd64` sha256.
 
 ###2026.06.15
 - Pinned to buddynet **v1.2.0** (security hardening + structured logging release):
@@ -359,12 +365,12 @@ mkdir -p "$PLG"
 # NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
 # version and URL are hard-coded here on purpose.
 # MAINTAINER: set these to a real published release before shipping the plugin.
-BINVER="v1.2.0"
+BINVER="v1.2.1"
 BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
 # SHA256 of the release binary; verified on every install so a corrupted or
 # tampered download is never installed. Matches buddynet-linux-amd64.sha256 of
 # the BINVER release — bump both together on each new release.
-BINSHA="d70f47495cd83ada66296d559bbd2cae01e0ced79f35db423d17f1c07597f0b9"
+BINSHA="4b71db2f73357ef02bc12981825adfbbb108dfbd8f4bcf3353c4ca5a863eddc7"
 verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
 
 # Download the buddynet binary to flash (only if missing or its checksum is wrong).
