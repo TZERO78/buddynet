@@ -26,6 +26,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net/netip"
 	"os"
 	"os/signal"
 	"strings"
@@ -53,6 +54,7 @@ func main() {
 	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
 	listen := flag.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr))
 	relayListenFlag := flag.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr))
+	allowCIDR := flag.String("allow-cidr", "", "relay: comma-separated CIDRs allowed to use the relay (empty = open to all; the relay is unauthenticated by design)")
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
@@ -178,6 +180,13 @@ func main() {
 		bArgs.validate()
 	}
 
+	// Parse the optional relay allowlist up front so a bad CIDR fails fast.
+	relayCIDRs, cerr := parseCIDRs(*allowCIDR)
+	if cerr != nil {
+		fmt.Fprintln(os.Stderr, "error:", cerr)
+		os.Exit(2)
+	}
+
 	// Run every selected role concurrently; the first hard failure cancels the
 	// rest and is reported.
 	var wg sync.WaitGroup
@@ -202,6 +211,7 @@ func main() {
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
 					Listen: relayListen(*relayListenFlag, *listen, roles), TTL: *ttl,
+					AllowCIDRs: relayCIDRs,
 				}))
 			case protocol.RoleBuddy:
 				fail("buddy", role.Buddy(ctx, bArgs.config()))
@@ -238,6 +248,33 @@ func parseRoles(s string) ([]protocol.Role, error) {
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("--role is required (buddy | relay | handshake)")
+	}
+	return out, nil
+}
+
+// parseCIDRs splits a comma-separated --allow-cidr value into validated
+// prefixes. An empty value yields nil (relay open to all). A bare IP is accepted
+// as a /32 or /128 host route. Any malformed entry is a hard error.
+func parseCIDRs(s string) ([]netip.Prefix, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil
+	}
+	var out []netip.Prefix
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if p, err := netip.ParsePrefix(part); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		addr, err := netip.ParseAddr(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --allow-cidr entry %q (want a CIDR like 10.0.0.0/8 or an IP)", part)
+		}
+		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
 	}
 	return out, nil
 }

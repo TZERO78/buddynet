@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"net"
+	"net/netip"
 	"time"
 
 	"github.com/tzero78/buddynet/internal/relay"
@@ -15,6 +16,10 @@ import (
 type RelayConfig struct {
 	Listen string        // UDP address, e.g. "[::]:51821"
 	TTL    time.Duration // drop a session leg after this long with no traffic
+	// AllowCIDRs, if non-empty, restricts which source networks may use the relay
+	// (it stays unauthenticated by design — this is a coarse access control for a
+	// private relay). Empty keeps it open to all.
+	AllowCIDRs []netip.Prefix
 }
 
 // Relay runs the blind forwarder until ctx is cancelled. It is the same dormant
@@ -34,11 +39,15 @@ func Relay(ctx context.Context, cfg RelayConfig) error {
 	}
 	defer conn.Close()
 	log.Printf("buddynet relay listening on %s (udp, dual-stack) — forwarding encrypted sessions blind", conn.LocalAddr())
-	log.Print("NOTE: the relay is UNAUTHENTICATED by design (open bandwidth, never a reflector). " +
-		"If it faces the public internet, restrict reach with a firewall — it sees only ciphertext, but anyone can use it.")
+	if len(cfg.AllowCIDRs) > 0 {
+		log.Printf("relay access control ON: only %v may bind a leg", cfg.AllowCIDRs)
+	} else {
+		log.Print("NOTE: the relay is UNAUTHENTICATED by design (open bandwidth, never a reflector). " +
+			"If it faces the public internet, restrict reach with --allow-cidr or a firewall — it sees only ciphertext, but anyone can use it.")
+	}
 	go func() { <-ctx.Done(); conn.Close() }()
 
-	relay.NewServer(cfg.TTL).Run(conn)
+	relay.NewServer(cfg.TTL, cfg.AllowCIDRs).Run(conn)
 	if ctx.Err() != nil {
 		log.Print("shutting down")
 	}
