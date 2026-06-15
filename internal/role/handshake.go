@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -137,11 +138,19 @@ func (p *hsPeer) asProtocolPeer(relay string) protocol.Peer {
 type hsRegistry struct {
 	mu      sync.Mutex
 	waiting map[string]map[string]*hsPeer
+	// seenPKs tracks every distinct Ed25519 pubkey observed per token (capped at
+	// maxIDsPerToken+1 entries to bound memory). Used for squat/intrusion detection:
+	// a new pubkey on an established token fires a WARNING in the server log.
+	seenPKs map[string]map[string]struct{}
 	ttl     time.Duration
 }
 
 func newHSRegistry(ttl time.Duration) *hsRegistry {
-	return &hsRegistry{waiting: map[string]map[string]*hsPeer{}, ttl: ttl}
+	return &hsRegistry{
+		waiting: map[string]map[string]*hsPeer{},
+		seenPKs: map[string]map[string]struct{}{},
+		ttl:     ttl,
+	}
 }
 
 func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner *hsPeer, ok bool) {
@@ -166,12 +175,42 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 	self = bucket[m.ID]
 	if self == nil {
 		if len(bucket) >= maxIDsPerToken {
-			return nil, nil, false // third party tried to join this token
+			// A third distinct identity is trying to join an already-full token slot.
+			// This fires when a squat succeeded (attacker took one slot) and the
+			// legitimate buddy now finds no room, or when an attacker probes an
+			// occupied token.
+			hsStats.squatRejected.Add(1)
+			log.Printf("WARNING: third-party register rejected for token=%s from %s (id=%s) — slot full; possible squat in progress",
+				logTag(m.Token), src, m.ID)
+			return nil, nil, false
 		}
 		self = &hsPeer{id: m.ID, cands: map[string]protocol.Candidate{}}
 		bucket[m.ID] = self
 	}
 	if m.PubKey != "" {
+		// Intrusion detection: track distinct pubkeys per token. A new pubkey on an
+		// established token means either a legitimate new device (key rotation, fresh
+		// install) or an attacker squatting the token. Either warrants attention.
+		known := r.seenPKs[m.Token]
+		if known == nil {
+			known = map[string]struct{}{}
+			r.seenPKs[m.Token] = known
+		}
+		if _, seen := known[m.PubKey]; !seen {
+			// Only warn once a full pair (maxIDsPerToken distinct pubkeys) is already
+			// established. A first or second pubkey is expected; a third is anomalous —
+			// it means either a new device joined with the same token, a key was rotated,
+			// or an attacker squatted the token with a foreign key.
+			if len(known) >= maxIDsPerToken {
+				hsStats.newPubKey.Add(1)
+				log.Printf("WARNING: unexpected new pubkey on token=%s from %s (id=%s) — "+
+					"already have %d established identity(ies); possible squat, key rotation, or new device",
+					logTag(m.Token), src, m.ID, len(known))
+			}
+			if len(known) < maxIDsPerToken+1 { // cap: don't grow seenPKs without bound
+				known[m.PubKey] = struct{}{}
+			}
+		}
 		self.pubkey = m.PubKey
 	}
 	if m.VirtualIP != "" {
@@ -213,6 +252,7 @@ func (r *hsRegistry) evictStalestLocked() bool {
 		return false
 	}
 	delete(r.waiting, victim)
+	delete(r.seenPKs, victim)
 	return true
 }
 
@@ -246,6 +286,7 @@ func (r *hsRegistry) reap(ctx context.Context) {
 			}
 			if len(bucket) == 0 {
 				delete(r.waiting, token)
+				delete(r.seenPKs, token) // release pubkey history when the session is gone
 			}
 		}
 		r.mu.Unlock()
@@ -420,10 +461,12 @@ func hsDebugf(format string, args ...any) {
 // summarized once per statsInterval and only when something happened, so a quiet
 // server stays silent and an attack shows up as a periodic spike line.
 type hsCounters struct {
-	paired      atomic.Int64
-	challenged  atomic.Int64 // sent an address-validation cookie (unvalidated source)
-	rateLimited atomic.Int64
-	dropped     atomic.Int64 // malformed / over-cap / failed proof
+	paired        atomic.Int64
+	challenged    atomic.Int64 // sent an address-validation cookie (unvalidated source)
+	rateLimited   atomic.Int64
+	dropped       atomic.Int64 // malformed / over-cap / failed proof
+	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
+	squatRejected atomic.Int64 // 3rd-party register rejected on full slot (slot already squatted)
 }
 
 var hsStats hsCounters
@@ -441,11 +484,16 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		}
 		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
-		if pa|ch|rl|dr == 0 {
+		npk, sq := c.newPubKey.Swap(0), c.squatRejected.Swap(0)
+		if pa|ch|rl|dr|npk|sq == 0 {
 			continue // idle interval: stay quiet
 		}
-		log.Printf("stats (last %s): paired=%d challenged=%d rate-limited=%d dropped=%d",
+		line := fmt.Sprintf("stats (last %s): paired=%d challenged=%d rate-limited=%d dropped=%d",
 			statsInterval, pa, ch, rl, dr)
+		if npk > 0 || sq > 0 {
+			line += fmt.Sprintf(" WARNING: new-pubkey=%d squat-rejected=%d", npk, sq)
+		}
+		log.Print(line)
 	}
 }
 
