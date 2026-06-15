@@ -54,7 +54,7 @@ func main() {
 	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
 	listen := flag.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr))
 	relayListenFlag := flag.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr))
-	allowCIDR := flag.String("allow-cidr", "", "relay: comma-separated CIDRs allowed to use the relay (empty = open to all; the relay is unauthenticated by design)")
+	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); other sources are dropped before any crypto (empty = open to all)")
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
@@ -181,7 +181,7 @@ func main() {
 	}
 
 	// Parse the optional relay allowlist up front so a bad CIDR fails fast.
-	relayCIDRs, cerr := parseCIDRs(*allowCIDR)
+	allowedCIDRs, cerr := parseCIDRs(*allowCIDR)
 	if cerr != nil {
 		fmt.Fprintln(os.Stderr, "error:", cerr)
 		os.Exit(2)
@@ -206,12 +206,12 @@ func main() {
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
 					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
-					QUIC: *quicHandshake,
+					QUIC: *quicHandshake, AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
 					Listen: relayListen(*relayListenFlag, *listen, roles), TTL: *ttl,
-					AllowCIDRs: relayCIDRs,
+					AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleBuddy:
 				fail("buddy", role.Buddy(ctx, bArgs.config()))
