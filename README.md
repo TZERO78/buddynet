@@ -90,6 +90,13 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   (cookie or QUIC), global + per-source rate limits, bounded in-memory state, and
   replay rejection in approval mode. Pick the transport with `--quic-handshake`
   (set it the same on the server and every buddy).
+- Restrict **who** can reach a server role with `--allow-cidr` (comma-separated
+  CIDRs; relay **and** handshake). Disallowed sources are dropped before any
+  crypto, so a private relay/handshake needs no separate firewall.
+- A direct tunnel isn't revocable centrally — the server isn't in the data path.
+  `--reauth-interval` periodically rebuilds the tunnel so a revocation or token
+  rotation takes effect within the interval (off by default; see
+  [SECURITY.md](SECURITY.md#revoking-access)).
 
 The full threat model — what BuddyNet protects against, the trust hierarchy, and
 its honest limits — is in **[SECURITY.md](SECURITY.md)**.
@@ -111,6 +118,24 @@ docker compose -f deployments/docker-compose.yml up -d --build
 On a VPS you can run both server roles in one process:
 `buddynet --role=handshake,relay`. On **Unraid**, the buddy role ships as a
 plugin — see [unraid/BuddyNet](unraid/BuddyNet/README.md).
+
+## Verifying a download
+
+Release binaries are signed with [Sigstore](https://www.sigstore.dev/) (keyless
+`cosign`). Each `buddynet-<os>-<arch>` ships a `.bundle` (signature + certificate
++ transparency-log proof) alongside a `.sha256`. Verify provenance before running:
+
+```bash
+cosign verify-blob --bundle buddynet-linux-amd64.bundle \
+  --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  buddynet-linux-amd64
+# -> Verified OK
+```
+
+Each release also carries an SPDX SBOM (`buddynet-<tag>-sbom.spdx.json`).
+(Releases up to v1.1.0 used separate `.sig`/`.pem` files; v1.1.2 onward uses the
+single `.bundle`.)
 
 ## Status
 
