@@ -33,6 +33,7 @@ const (
 	maxControlReq  = 8192  // bound on a REGISTER read by the server
 	maxControlResp = 65536 // bound on a PEER_LIST read by the client
 	maxCtrlStreams = 16    // concurrent control streams a peer may open
+	maxCtrlConns   = 256   // concurrent QUIC control connections the server services
 )
 
 // pinnedPeerVerify returns a TLS VerifyPeerCertificate that accepts the peer
@@ -161,12 +162,24 @@ func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duratio
 }
 
 func (s *ControlServer) acceptConns() {
+	// Cap concurrent connections so a flood of (source-validated) QUIC dials
+	// cannot grow goroutines/memory without bound. The per-stream rate limiter
+	// gates work inside a connection; this bounds the number of connections.
+	sem := make(chan struct{}, maxCtrlConns)
 	for {
 		qc, err := s.ln.Accept(context.Background())
 		if err != nil {
 			return // listener closed
 		}
-		go s.acceptStreams(qc)
+		select {
+		case sem <- struct{}{}:
+			go func() {
+				defer func() { <-sem }()
+				s.acceptStreams(qc)
+			}()
+		default:
+			qc.CloseWithError(0, "server at capacity") // shed load instead of queuing unboundedly
+		}
 	}
 }
 
