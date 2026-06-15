@@ -349,12 +349,12 @@ mkdir -p "$PLG"
 # NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
 # version and URL are hard-coded here on purpose.
 # MAINTAINER: set these to a real published release before shipping the plugin.
-BINVER="v1.1.0"
+BINVER="v1.1.2"
 BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
 # SHA256 of the release binary; verified on every install so a corrupted or
 # tampered download is never installed. Matches buddynet-linux-amd64.sha256 of
 # the BINVER release — bump both together on each new release.
-BINSHA="f35efc47486ab394640573a4baa095d0c2b6cf5c1f8024e92811632e4b789560"
+BINSHA="f5a96e8189631110feb4b876a92187f9f59ee091bf09f3a055af3bf659d9bba1"
 verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
 
 # Download the buddynet binary to flash (only if missing or its checksum is wrong).
