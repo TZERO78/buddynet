@@ -1,136 +1,186 @@
-# BuddyNet Lab — 3-Container Live Test
+# BuddyNet Lab — Live Test Environment
 
 A self-contained Docker environment to run BuddyNet end-to-end on a single machine.
-No VPS required: the three containers simulate a full deployment — server, Peer A, and Peer B.
+No VPS required: the containers simulate a full deployment — server, Peer A, and Peer B.
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                   Docker Lab Network                 │
-│                                                      │
-│  ┌──────────┐      REGISTER/PEER_LIST      ┌───────┐ │
-│  │ buddy-a  │◄───────────────────────────►│server │ │
-│  │          │      (signed, pinned)        │       │ │
-│  │ httpd    │◄───────────────────────────►│HS+RLY │ │
-│  │ :7777    │                              └───────┘ │
-│  └────┬─────┘                                        │
-│       │  QUIC tunnel (encrypted, hole-punched)        │
-│  ┌────▼─────┐                                        │
-│  │ buddy-b  │                                        │
-│  │          │◄── curl http://localhost:7070           │
-│  │ :7070    │    (forwarded through tunnel)           │
-│  └──────────┘                                        │
-└──────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│                     Docker Lab Network                   │
+│                                                          │
+│  ┌──────────┐      REGISTER/PEER_LIST       ┌─────────┐ │
+│  │ buddy-a  │◄─────────────────────────────►│ server  │ │
+│  │ httpd    │     (signed, server-pinned)   │ HS+RLY  │ │
+│  │ :7777    │                               └─────────┘ │
+│  └────┬─────┘                                            │
+│       │  QUIC tunnel (encrypted, hole-punched or relayed) │
+│  ┌────▼─────┐                                            │
+│  │ buddy-b  │◄─── curl http://localhost:7070             │
+│  │ :7070    │     (forwarded through tunnel)             │
+│  └──────────┘                                            │
+└──────────────────────────────────────────────────────────┘
 ```
 
 ## Container roles
 
-| Container | Role | What it does |
-|-----------|------|--------------|
-| `server`  | `handshake,relay` | Matchmaking (control plane) + blind relay fallback. Equivalent to a VPS deployment. |
-| `buddy-a` | `buddy` | Runs a busybox httpd test page on `:7777`. BuddyNet forwards all incoming tunnel streams there. |
-| `buddy-b` | `buddy` | Listens on `:7070` (mapped to the host). Every connection is forwarded through the QUIC tunnel to buddy-a → httpd. |
+| Container  | Role             | What it does |
+|------------|------------------|--------------|
+| `server`   | `handshake,relay`| Matchmaking + blind relay fallback. Equivalent to a VPS deployment. |
+| `buddy-a`  | `buddy`          | Runs a busybox httpd on `:7777`; forwards incoming tunnel streams to it. |
+| `buddy-b`  | `buddy`          | Listens on `:7070` (host-mapped); forwards connections through the tunnel to buddy-a. |
 
 ## Prerequisites
 
 - Docker with Compose v2 (`docker compose version`)
-- Ports 51820/udp, 51821/udp, 7070/tcp free on the host
+- Ports `51820/udp`, `51821/udp`, `7070/tcp` free on the host
+- For the application-tunnel tests: `rsync` installed on the host; `sudo` with `ebtables` for the relay-fallback test
 
 ## Quickstart
 
 ```bash
-# From the project root:
 cd lab
 ./setup.sh
 ```
 
-`setup.sh` does exactly four things:
-1. Builds `buddynet-lab-server` (distroless) and `buddynet-lab-buddy` (alpine) images.
-2. Runs the server image once to bootstrap its Ed25519 identity key in a persistent Docker volume.
-3. Writes the server's base64 public key into `lab/.env` as `BUDDYNET_SERVER_KEY`.
-4. Starts all three containers with `docker compose up -d`.
+`setup.sh`:
+1. Builds the `buddynet-lab-server` and `buddynet-lab-buddy` images.
+2. Bootstraps the server's Ed25519 identity key in a persistent Docker volume.
+3. Writes the server's public key into `lab/.env` as `BUDDYNET_SERVER_KEY`.
+4. Starts all containers with `docker compose up -d`.
 
-## Testing the tunnel
-
-Wait ~5 seconds for the tunnel to establish after startup, then:
+## Testing the basic tunnel
 
 ```bash
-# From the host — proxied through BuddyNet end-to-end:
+# From the host — response comes through the BuddyNet tunnel end-to-end:
 curl http://localhost:7070
-# Expected: BuddyNet Lab - Peer A HTML page
+# Expected: BuddyNet Lab - Peer A
 
 # Or from inside buddy-b:
 docker compose exec buddy-b curl http://localhost:7070
 ```
 
-A successful response means:
-1. buddy-b received the HTTP request on `:7070`
-2. Tunnelled it through QUIC to buddy-a (via server matchmaking + hole-punch or relay)
-3. buddy-a forwarded it to its local httpd on `:7777`
-4. The response traversed back the same path
+## Application-tunnel tests (rsync + kopia)
 
-## Observing the tunnel
+The overlay compose file `docker-compose.apps.yml` adds two additional peer pairs:
 
-```bash
-# All logs combined:
-docker compose logs -f
+| Pair | Token | What it tests |
+|------|-------|---------------|
+| `rsync-a` / `rsync-b` | `lab-rsync-token` | rsync daemon over BuddyNet (`--forward` + `-L`) |
+| `kopia-a` / `kopia-b` | `lab-kopia-token` | kopia SFTP repository backup over BuddyNet |
 
-# Per container:
-docker compose logs -f server
-docker compose logs -f buddy-a
-docker compose logs -f buddy-b
+```
+rsync-a  --forward 127.0.0.1:873  ──BuddyNet──►  rsync-b  -L 0.0.0.0:8873
+                                                    │
+                                               host port 8873
+                                        rsync://localhost:8873/share/
+
+kopia-a  -L 127.0.0.1:2222        ──BuddyNet──►  kopia-b  --forward 127.0.0.1:22
+                                                    │
+                                               sshd (SFTP, user=kopia pass=labpass)
+                                        kopia SFTP backend → /data/repo
 ```
 
-What to look for in the logs:
+### Start the apps stack
+
+```bash
+cd lab
+docker compose -f docker-compose.yml -f docker-compose.apps.yml build
+docker compose -f docker-compose.yml -f docker-compose.apps.yml up -d
+```
+
+### Run the integration tests
+
+```bash
+./test-apps.sh
+```
+
+`test-apps.sh` runs in sequence:
+
+1. **rsync** — lists the share, downloads 20 files, uploads a file back.
+2. **kopia SFTP** — initialises a kopia repository on kopia-b via SFTP through the tunnel, creates a snapshot of `/data/source`.
+3. **Relay fallback** — blocks direct P2P UDP between kopia-a and kopia-b with `ebtables`, waits for BuddyNet to reconnect via the relay (`handshake server as relay`), then creates a second snapshot to confirm data transfer still works over the relay path.
+
+Expected output (abbreviated):
+
+```
+  [PASS] rsync listing works
+  [PASS] rsync download: 20 files transferred
+  [PASS] rsync upload works
+  [PASS] SSH SFTP tunnel kopia-a → kopia-b (password auth)
+  [PASS] kopia SFTP repository ready on kopia-b
+  [PASS] kopia snapshot 1 (source, direct P2P)
+  [PASS] relay fallback: tunnel switched away from direct P2P
+  [PASS] kopia snapshot 2 (source, via relay)
+  [PASS] kopia snapshot list: 2 snapshot(s) on kopia-b
+
+  PASSED: 9   FAILED: 0
+All tests passed.
+```
+
+### kopia-b SFTP credentials (lab only)
+
+| Setting | Value |
+|---------|-------|
+| Host (from kopia-a) | `127.0.0.1:2222` (via BuddyNet tunnel) |
+| Username | `kopia` |
+| Password | `labpass` |
+| Repo path | `/data/repo` |
+| SSH host key | persisted in `kopia-b-key` volume; published to `/data/kopia-b-hostkey.pub` on startup |
+
+## Observing the tunnels
+
+```bash
+# Follow all logs:
+docker compose -f docker-compose.yml -f docker-compose.apps.yml logs -f
+
+# Structured audit events only:
+docker compose -f docker-compose.yml -f docker-compose.apps.yml logs kopia-a kopia-b \
+    | grep -E "CONNECTED:|DISCONNECTED:|TRUST:|PAIRED:|SECURITY:"
+```
+
+Key log events:
 
 | Log line | Meaning |
 |----------|---------|
-| `registered peer … token=lab-test-token-42` | Handshake server paired the buddies |
-| `hole-punch succeeded` | Direct P2P path established (ideal path) |
-| `relay … session` | Relay fallback used (still encrypted; server sees only ciphertext) |
-| `tunnel up` | QUIC session is live, forwarding active |
+| `CONNECTED: … via="direct P2P"` | Hole-punched path established |
+| `DISCONNECTED: reason=peer-closed-or-idle` | Tunnel dropped (P2P cut or idle timeout) |
+| `CONNECTED: … via="handshake server as relay"` | Relay fallback active |
+| `TRUST: action=insecure` | Buddy accepted without peer-key pin (lab only) |
 
 ## Checking the server key pin
-
-The server's public key is stored in `lab/.env` and pinned by both buddies via
-`BUDDYNET_SERVER_KEY`. If you want to inspect it independently:
 
 ```bash
 docker compose run --rm server --key /var/lib/buddynet/id.key identity
 ```
 
-This must match the value in `lab/.env`.
+Must match `BUDDYNET_SERVER_KEY` in `lab/.env`.
 
 ## Teardown
 
 ```bash
-# Stop containers, keep volumes (server key persists for next run):
-docker compose down
+# Stop — volumes (server key, kopia repo) persist:
+docker compose -f docker-compose.yml -f docker-compose.apps.yml down
 
-# Full reset — removes all volumes and keys:
-docker compose down -v
+# Full reset — removes all keys and data:
+docker compose -f docker-compose.yml -f docker-compose.apps.yml down -v
 rm -f .env
 ```
 
-After `down -v`, the next `./setup.sh` generates a fresh server identity.
+After `down -v` the next `./setup.sh` generates a fresh server identity.
 
-## How it maps to a real deployment
+## How this maps to a real deployment
 
 In production you would:
 - Run `server` on a VPS with a real public IP (see `deployments/docker-compose.yml`)
-- Run `buddy-a` and `buddy-b` on separate machines behind NAT
-- Use `--invite` / `--join` instead of the shared `--token` for one-time pairing
-- Remove `--insecure` and pin `--peer-key` or use the TOFU SAS flow for buddy identity
+- Run buddies on separate machines behind NAT
+- Use `--invite` / `--join` instead of a shared `--token` for one-time pairing
+- Remove `--insecure` and pin `--peer-key` or use the TOFU/SAS flow
 
-The lab uses `--insecure` and a fixed shared token (`BUDDYNET_TOKEN=lab-test-token-42`)
-to avoid interactive prompts in an automated container environment. Everything else —
-the handshake protocol, PEER_LIST signing, QUIC tunnel, relay fallback — is identical
-to production.
+The lab uses `--insecure` and a fixed shared token to avoid interactive prompts.
+Everything else — the handshake protocol, PEER_LIST signing, QUIC tunnel, relay fallback — is identical to production.
 
-## Security model (what this lab tests)
+## Security model (what this lab exercises)
 
-- **Server signs every `PEER_LIST`**: buddy-a and buddy-b reject any peer list not
-  signed by the pinned server key. MitM on the control plane is blocked.
-- **Relay is blind**: if hole-punching fails and the relay is used, the `server`
-  container only sees encrypted QUIC packets, never plaintext.
-- **Buddy identity**: both buddies use `--insecure` in the lab (skips peer key check).
-  In production, replace with `--peer-key` (strongest) or the TOFU/SAS flow.
+- **Signed `PEER_LIST`**: buddies reject any peer list not signed by the pinned server key.
+- **Blind relay**: when the relay is used, the server sees only encrypted QUIC packets, never plaintext.
+- **Relay fallback timing**: with `--idle-timeout=20s` (lab setting), BuddyNet detects a dead P2P path and reconnects via relay within ~5 seconds.
+- **Buddy identity**: `--insecure` in the lab skips peer key verification; in production use `--peer-key`.

@@ -1,0 +1,126 @@
+# BuddyNet Lab — application-tunnel overlay
+#
+# Adds rsync and kopia service pairs to the running lab.  Each pair uses its
+# own token so the handshake server keeps them separate from the httpd pair.
+#
+# Usage (from lab/ directory):
+#   docker compose -f docker-compose.yml -f docker-compose.apps.yml up -d
+#
+# Or just the app pairs (assumes the base lab's server is already running):
+#   docker compose -f docker-compose.apps.yml up -d rsync-a rsync-b kopia-a kopia-b
+#
+# Then run:
+#   ./test-apps.sh
+#
+# Ports exposed on the host:
+#   8873   rsync://localhost:8873/share    (tunnelled rsync daemon on rsync-a)
+#   51515  http://localhost:51515          (tunnelled kopia server on kopia-a)
+
+services:
+
+  # ── rsync pair ──────────────────────────────────────────────────────────────
+  rsync-a:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.apps
+    image: buddynet-lab-apps
+    entrypoint: ["/entrypoint-rsync-a.sh"]
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - --forward
+      - "127.0.0.1:873"
+      - --no-interactive
+      - --insecure
+      - --idle-timeout=10m
+    environment:
+      BUDDYNET_SERVER: "server:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_TOKEN: "lab-rsync-token"
+    volumes:
+      - rsync-a-key:/var/lib/buddynet
+      - rsync-data:/data
+    restart: unless-stopped
+
+  rsync-b:
+    image: buddynet-lab-apps
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - -L
+      - "0.0.0.0:8873"
+      - --no-interactive
+      - --insecure
+      - --idle-timeout=10m
+    environment:
+      BUDDYNET_SERVER: "server:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_TOKEN: "lab-rsync-token"
+    ports:
+      - "8873:8873"
+    volumes:
+      - rsync-b-key:/var/lib/buddynet
+    restart: unless-stopped
+    depends_on: [rsync-a]
+
+  # ── kopia pair ──────────────────────────────────────────────────────────────
+  # kopia-a = Backup SOURCE (the machine being backed up).
+  # Generates an SSH key, shares the public key, then exposes kopia-b's SFTP
+  # on 127.0.0.1:2222 via the tunnel so kopia can use it as an SFTP backend.
+  kopia-a:
+    image: buddynet-lab-apps
+    entrypoint: ["/entrypoint-kopia-a.sh"]
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - -L
+      - "127.0.0.1:2222"
+      - --no-interactive
+      - --insecure
+      - --idle-timeout=20s
+    environment:
+      BUDDYNET_SERVER: "server:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_TOKEN: "lab-kopia-token"
+    volumes:
+      - kopia-a-key:/var/lib/buddynet
+      - kopia-shared:/data         # shared volume for SSH key exchange + source data
+    restart: unless-stopped
+
+  # kopia-b = Backup TARGET (the remote storage node).
+  # Runs an SFTP-only SSH server and forwards incoming tunnel streams to it.
+  # No kopia daemon needed — kopia on buddy-a talks SFTP directly.
+  kopia-b:
+    image: buddynet-lab-apps
+    entrypoint: ["/entrypoint-kopia-b.sh"]
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - --forward
+      - "127.0.0.1:22"
+      - --no-interactive
+      - --insecure
+      - --idle-timeout=20s
+    environment:
+      BUDDYNET_SERVER: "server:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_TOKEN: "lab-kopia-token"
+    volumes:
+      - kopia-b-key:/var/lib/buddynet
+      - kopia-shared:/data         # shared volume: reads client_pub.key, stores repo
+      - kopia-repo:/data/repo
+    restart: unless-stopped
+    depends_on: [kopia-a]
+
+volumes:
+  rsync-a-key:
+  rsync-b-key:
+  kopia-a-key:
+  kopia-b-key:
+  rsync-data:
+  kopia-shared:   # SSH key exchange between kopia-a and kopia-b + source data
+  kopia-repo:     # buddy-b: the kopia repository (backup storage)
