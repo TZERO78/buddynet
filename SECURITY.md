@@ -32,6 +32,8 @@ overclaiming.
   registration signatures within the freshness window. The relay carries the same
   per-source bind rate-limit plus a legs-per-source ceiling (it stays
   unauthenticated by design — the caps are abuse ceilings, not access control).
+  For a private deployment, `--allow-cidr` restricts which source networks may
+  reach the relay **and** the handshake server, dropping others before any crypto.
   Ships as a distroless/non-root image and a locked-down systemd sandbox with a
   size-capped log namespace, plus default-drop firewall rules. See
   [`deployments/`](deployments/).
@@ -237,6 +239,27 @@ takes effect within one interval, at the cost of a brief reconnect (leave it off
 for uninterrupted long transfers like a multi-hour backup). To cut a live tunnel
 **immediately**, stop the revoked node's process (`systemctl stop …`) or block it
 at the firewall.
+
+## Release integrity
+
+Release binaries are built by GitHub Actions (pinned by commit SHA; Docker base
+images pinned by digest) and **keyless-signed with cosign/Sigstore**. Each
+artifact ships a `.bundle` (signature + certificate + Rekor transparency-log
+proof) and a `.sha256`, and every release carries an SPDX SBOM. Verify provenance
+before trusting a download:
+
+```bash
+cosign verify-blob --bundle buddynet-linux-amd64.bundle \
+  --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  buddynet-linux-amd64
+```
+
+The identity regexp ties the signature to this repository's workflow, and the
+OIDC issuer to GitHub's Actions token — a binary signed by anything else fails.
+(Releases through v1.1.0 used separate `.sig`/`.pem`; v1.1.2 onward uses the
+`.bundle`.) The Unraid plugin pins the published binary's SHA-256 and refuses to
+install on a mismatch.
 
 ## Reporting a vulnerability
 
