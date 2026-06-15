@@ -1,0 +1,17 @@
+# Keep the pinned dependencies fresh: Go modules, the SHA-pinned GitHub Actions,
+# and the digest-pinned Docker base images. Pinning trades auto-patching for
+# reproducibility; Dependabot brings the patches back as reviewable PRs.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: /deployments
+    schedule:
+      interval: weekly

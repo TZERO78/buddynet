@@ -2,7 +2,7 @@
 # roles — choose with --role at runtime. Multi-arch images are produced by
 # buildx in CI, which runs this build per target platform so `go build` yields
 # each arch natively.
-FROM golang:1.25-alpine AS build
+FROM golang:1.25-alpine@sha256:8d95af53d0d58e1759ddb4028285d9b1239067e4fbf4f544618cad0f60fbc354 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -16,7 +16,7 @@ RUN mkdir -p /out/state
 # Distroless static: no shell, no package manager, runs as an unprivileged user
 # (uid/gid 65532). The binary is fully static (CGO_ENABLED=0) and the roles
 # authenticate by pinned self-signed certs, so no CA bundle is needed.
-FROM gcr.io/distroless/static:nonroot
+FROM gcr.io/distroless/static:nonroot@sha256:963fa6c544fe5ce420f1f54fb88b6fb01479f054c8056d0f74cc2c6000df5240
 COPY --from=build --chown=65532:65532 /out/buddynet /usr/local/bin/buddynet
 # The identity key lives here; owned by uid 65532 so a fresh named volume that
 # mounts over it is writable by the non-root process.
