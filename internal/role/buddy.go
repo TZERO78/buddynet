@@ -281,8 +281,13 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed255
 			return err
 		}
 		// The virtual IP is a pure function of the key; reject a roster that
-		// claims an inconsistent one (defends against a buggy/hostile server).
+		// claims an inconsistent one (defends against a buggy/hostile server, or a
+		// squat that forged a virtual IP). Log the security event HERE, at the
+		// detection point, rather than letting it surface as a generic tunnel error.
 		if want := bcrypto.VirtualIPString(partnerPub); partner.VirtualIP != "" && partner.VirtualIP != want {
+			log.Printf("SECURITY: event=vip-mismatch key=%s detail=%q",
+				keyTag(partner.PubKey),
+				fmt.Sprintf("roster claims vip %s but the key derives %s (hostile/buggy server, or a squat with a forged vip)", partner.VirtualIP, want))
 			return fmt.Errorf("partner virtual IP %s does not match its key (want %s)", partner.VirtualIP, want)
 		}
 		_ = reg.Upsert(partner) // cache for offline fallback next time
