@@ -88,3 +88,7 @@ jobs:
         with:
           files: dist/*
           generate_release_notes: true
+          # A SemVer pre-release tag (v1.2.3-rc1, -beta, …) carries a hyphen; mark
+          # it prerelease explicitly so it never becomes "latest". Don't rely on
+          # the action's auto-detection — it did not fire for v1.0.1-rc1.
+          prerelease: ${{ contains(github.ref_name, '-') }}
