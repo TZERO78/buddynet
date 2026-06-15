@@ -2,7 +2,7 @@
 # roles — choose with --role at runtime. Multi-arch images are produced by
 # buildx in CI, which runs this build per target platform so `go build` yields
 # each arch natively.
-FROM golang:1.25-alpine@sha256:8d95af53d0d58e1759ddb4028285d9b1239067e4fbf4f544618cad0f60fbc354 AS build
+FROM golang:1.26-alpine@sha256:7a3e50096189ad57c9f9f865e7e4aa8585ed1585248513dc5cda498e2f41812c AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
