@@ -44,6 +44,13 @@ type BuddyConfig struct {
 	IdleTimeout time.Duration
 	Status      bool // probe whether the buddy is online, print, exit
 
+	// ReauthInterval, if > 0, tears the tunnel down and re-pairs after this long
+	// even while it is healthy, so a server-side revocation or token rotation
+	// takes effect within the interval (a direct P2P tunnel is otherwise outside
+	// the server's reach — it cannot be cancelled centrally). 0 (default) keeps a
+	// single session up indefinitely, which is what long transfers want.
+	ReauthInterval time.Duration
+
 	// Interactive enables the first-contact SAS prompt (trust-on-first-use only).
 	// When false (a daemon, or no TTY) an unknown partner key is refused rather
 	// than learned blindly — pin it with --peer-key instead.
@@ -361,6 +368,19 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed255
 			return fmt.Errorf("persist session: %w", err)
 		}
 		log.Printf("session established — invite token retired; reconnects now use the stored session secret in %s", cfg.KnownPeers)
+	}
+
+	// Optional forced re-auth: after ReauthInterval, close the session so the
+	// outer loop re-registers (re-running the allowlist/trust checks). This is
+	// the only way a revocation can reach an established direct tunnel, which the
+	// server is not in the path of. Off by default so long transfers are not
+	// interrupted.
+	if cfg.ReauthInterval > 0 {
+		t := time.AfterFunc(cfg.ReauthInterval, func() {
+			log.Printf("re-auth: tearing down the tunnel after %s to re-check authorization", cfg.ReauthInterval)
+			sess.Close()
+		})
+		defer t.Stop()
 	}
 
 	return forward(ctx, sess, cfg.LocalListen, cfg.Forward)
