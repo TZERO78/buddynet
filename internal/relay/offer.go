@@ -82,21 +82,6 @@ func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout ti
 	return errors.New("relay did not acknowledge the session (unreachable or wrong endpoint)")
 }
 
-// Offer builds a signed-by-context RELAY_OFFER advertising a relay between two
-// virtual IPs. (The offer itself rides a PEER_LIST that the handshake server
-// already signs, so it inherits that integrity; a buddy still pins the relay by
-// RelayPubKey before trusting it.)
-func Offer(from, to, relayEndpoint, relayPubKey string) protocol.Message {
-	return protocol.Message{
-		Type:          protocol.TypeRelayOffer,
-		Ver:           protocol.Version,
-		From:          from,
-		To:            to,
-		RelayEndpoint: relayEndpoint,
-		RelayPubKey:   relayPubKey,
-	}
-}
-
 func sameAddr(a, b *net.UDPAddr) bool {
 	return a.Port == b.Port && a.IP.Equal(b.IP)
 }

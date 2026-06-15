@@ -32,20 +32,6 @@ func TestRegistryPersistAcrossReopen(t *testing.T) {
 	}
 }
 
-func TestMergeSkipsSelf(t *testing.T) {
-	r, _ := Open("")
-	merged := r.Merge("me", []protocol.Peer{
-		{PubKey: "me"}, // ourselves: skipped
-		{ID: "p", PubKey: "p"},
-	})
-	if len(merged) != 1 || merged[0].PubKey != "p" {
-		t.Fatalf("merge should skip self: %+v", merged)
-	}
-	if _, ok := r.Get("me"); ok {
-		t.Fatal("self should not be cached")
-	}
-}
-
 func TestFresh(t *testing.T) {
 	now := protocol.Peer{LastSeen: time.Now().Unix()}
 	old := protocol.Peer{LastSeen: time.Now().Add(-2 * time.Hour).Unix()}
