@@ -18,7 +18,12 @@ RestartSec=2
 # encrypted datagrams between session legs and never sees content.
 
 # --- Logging: isolate and cap so a flood cannot fill the disk ---------------
+# SyslogIdentifier distinguishes this role within the namespace
+# (journalctl --namespace=buddynet -t buddynet-relay). journal is the default.
 LogNamespace=buddynet
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=buddynet-relay
 LogRateLimitIntervalSec=10s
 LogRateLimitBurst=200
 

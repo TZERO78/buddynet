@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"log"
 	"net"
 	"net/netip"
@@ -50,8 +51,9 @@ type leg struct {
 // session is the pair of legs sharing a token. Once both are bound, data from
 // one leg is forwarded to the other.
 type session struct {
-	token string
-	legs  []*leg
+	token  string
+	legs   []*leg
+	paired bool // reached two legs at some point (for the close log)
 }
 
 // Server is the blind UDP relay. It forwards datagrams between the two legs of a
@@ -77,6 +79,12 @@ type Server struct {
 	statPaired     atomic.Int64
 	statChallenged atomic.Int64
 	statRejected   atomic.Int64 // over-cap / outside allowlist / rate-limited
+	statHoard      atomic.Int64 // per-IP leg cap hit (possible session hoarding)
+
+	// hoardWarned throttles the per-IP leg-cap WARNING to once per statsInterval so
+	// a source hammering the cap cannot turn each packet into a log line. Bounded
+	// and pruned; the counter carries the volume into the stats line.
+	hoardWarned map[string]time.Time
 }
 
 const statsInterval = 60 * time.Second
@@ -90,12 +98,39 @@ func (s *Server) statsLoop() {
 			return
 		case <-t.C:
 		}
-		pa, ch, rj := s.statPaired.Swap(0), s.statChallenged.Swap(0), s.statRejected.Swap(0)
-		if pa|ch|rj == 0 {
+		pa, ch := s.statPaired.Swap(0), s.statChallenged.Swap(0)
+		rj, ho := s.statRejected.Swap(0), s.statHoard.Swap(0)
+		if pa|ch|rj|ho == 0 {
 			continue
 		}
-		log.Printf("relay stats (last %s): paired=%d challenged=%d rejected=%d", statsInterval, pa, ch, rj)
+		line := fmt.Sprintf("stats (last %s): role=relay paired=%d challenged=%d rejected=%d", statsInterval, pa, ch, rj)
+		if ho > 0 {
+			line += fmt.Sprintf(" ALERT: leg-cap=%d", ho)
+		}
+		log.Print(line)
 	}
+}
+
+// warnHoardLocked logs a per-IP leg-cap WARNING at most once per statsInterval,
+// so a source hammering the cap cannot flood the log (the counter carries the
+// volume). Caller holds s.mu.
+func (s *Server) warnHoardLocked(ip string) {
+	now := time.Now()
+	if last, ok := s.hoardWarned[ip]; ok && now.Sub(last) < statsInterval {
+		return
+	}
+	if len(s.hoardWarned) >= maxSessions {
+		for k, t := range s.hoardWarned {
+			if now.Sub(t) >= statsInterval {
+				delete(s.hoardWarned, k)
+			}
+		}
+		if len(s.hoardWarned) >= maxSessions {
+			return // bounded: skip the line under extreme spread (stats still fire)
+		}
+	}
+	s.hoardWarned[ip] = now
+	log.Printf("SECURITY: event=leg-cap-hit src=%s detail=%q", ip, "one source holds the max legs; possible session hoarding")
 }
 
 // NewServer returns a relay whose bindings expire after ttl with no traffic. If
@@ -111,14 +146,15 @@ func NewServer(ttl time.Duration, allowed []netip.Prefix) *Server {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 	return &Server{
-		ttl:       ttl,
-		bindRL:    ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),
-		allowed:   allowed,
-		cookieKey: key,
-		sessions:  map[string]*session{},
-		byAddr:    map[string]*session{},
-		legsPerIP: map[string]int{},
-		done:      make(chan struct{}),
+		ttl:         ttl,
+		bindRL:      ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),
+		allowed:     allowed,
+		cookieKey:   key,
+		sessions:    map[string]*session{},
+		byAddr:      map[string]*session{},
+		legsPerIP:   map[string]int{},
+		hoardWarned: map[string]time.Time{},
+		done:        make(chan struct{}),
 	}
 }
 
@@ -257,6 +293,8 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 		}
 		if s.legsPerIP[ip] >= maxLegsPerIP {
 			s.statRejected.Add(1)
+			s.statHoard.Add(1)
+			s.warnHoardLocked(ip)
 			s.mu.Unlock()
 			return // one source is hoarding sessions: refuse further legs
 		}
@@ -265,6 +303,7 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 		s.byAddr[key] = ses
 		s.legsPerIP[ip]++
 		if len(ses.legs) == 2 {
+			ses.paired = true
 			s.statPaired.Add(1)
 			log.Printf("relay: session paired (%s <-> %s)", ses.legs[0].addr, ses.legs[1].addr)
 		}
@@ -326,11 +365,12 @@ func (s *Server) reap() {
 			return
 		case <-t.C:
 		}
+		now := time.Now()
 		s.mu.Lock()
 		for token, ses := range s.sessions {
 			kept := ses.legs[:0]
 			for _, l := range ses.legs {
-				if time.Since(l.seen) > s.ttl {
+				if now.Sub(l.seen) > s.ttl {
 					delete(s.byAddr, l.addr.String())
 					s.releaseIPLocked(l.addr.IP.String())
 					continue
@@ -339,7 +379,16 @@ func (s *Server) reap() {
 			}
 			ses.legs = kept
 			if len(ses.legs) == 0 {
+				if ses.paired {
+					log.Printf("relay: session closed (idle > %s)", s.ttl)
+				}
 				delete(s.sessions, token)
+			}
+		}
+		// Release stale per-IP hoard-warning latches so the map mirrors recent abuse.
+		for ip, t := range s.hoardWarned {
+			if now.Sub(t) >= statsInterval {
+				delete(s.hoardWarned, ip)
 			}
 		}
 		s.mu.Unlock()

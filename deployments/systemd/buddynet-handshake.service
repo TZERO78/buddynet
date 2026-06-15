@@ -24,7 +24,13 @@ StateDirectoryMode=0700
 # --- Logging: isolate and cap so a flood/--debug cannot fill the disk -------
 # A private journal namespace keeps BuddyNet logs out of the system journal and
 # lets journald@buddynet.conf cap their size independently (see that file).
+# SyslogIdentifier tags every line so the three roles are distinguishable within
+# the namespace (journalctl --namespace=buddynet -t buddynet-handshake).
+# StandardOutput/Error=journal is the systemd default; set explicitly for clarity.
 LogNamespace=buddynet
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=buddynet-handshake
 LogRateLimitIntervalSec=10s
 LogRateLimitBurst=200
 

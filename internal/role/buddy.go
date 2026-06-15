@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"sort"
+	"sync/atomic"
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
@@ -285,7 +286,9 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed255
 			return fmt.Errorf("partner virtual IP %s does not match its key (want %s)", partner.VirtualIP, want)
 		}
 		_ = reg.Upsert(partner) // cache for offline fallback next time
-		log.Printf("buddy ONLINE: partner %s vip=%s verified (%d candidate(s))", partner.ID, partner.VirtualIP, len(partner.Candidates))
+		// Partner found and identity-verified — NOT "online" yet (the tunnel is not
+		// up until dialChain succeeds below; that emits CONNECTED).
+		log.Printf("partner verified: id=%s key=%s vip=%s candidates=%d", partner.ID, keyTag(partner.PubKey), partner.VirtualIP, len(partner.Candidates))
 	}
 
 	// Assemble the fallback chain. A cached entry is only used when the server
@@ -337,7 +340,8 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed255
 	if err != nil {
 		return err
 	}
-	log.Printf("✓ ONLINE: encrypted tunnel up via %s — buddy at %s", used.Desc, sess.RemoteAddr())
+	log.Printf("CONNECTED: role=buddy partner=%s key=%s vip=%s via=%q remote=%s",
+		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, used.Desc, sess.RemoteAddr())
 
 	// First contact (trust-on-first-use): verify the partner identity with a SAS
 	// over the now-established, channel-bound session BEFORE trusting/persisting
@@ -380,15 +384,28 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed255
 	// the only way a revocation can reach an established direct tunnel, which the
 	// server is not in the path of. Off by default so long transfers are not
 	// interrupted.
+	var reauthFired atomic.Bool
 	if cfg.ReauthInterval > 0 {
 		t := time.AfterFunc(cfg.ReauthInterval, func() {
 			log.Printf("re-auth: tearing down the tunnel after %s to re-check authorization", cfg.ReauthInterval)
+			reauthFired.Store(true)
 			sess.Close()
 		})
 		defer t.Stop()
 	}
 
-	return forward(ctx, sess, cfg.LocalListen, cfg.Forward)
+	connectedAt := time.Now()
+	streams, ferr := forward(ctx, sess, cfg.LocalListen, cfg.Forward)
+	reason := "peer-closed-or-idle"
+	switch {
+	case ctx.Err() != nil:
+		reason = "shutdown"
+	case reauthFired.Load():
+		reason = "reauth"
+	}
+	log.Printf("DISCONNECTED: role=buddy partner=%s key=%s reason=%s duration=%s streams=%d",
+		partner.ID, keyTag(partner.PubKey), reason, time.Since(connectedAt).Round(time.Second), streams)
+	return ferr
 }
 
 // dialChain walks the fallback chain and returns the first session it can

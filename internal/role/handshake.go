@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -137,11 +138,40 @@ func (p *hsPeer) asProtocolPeer(relay string) protocol.Peer {
 type hsRegistry struct {
 	mu      sync.Mutex
 	waiting map[string]map[string]*hsPeer
-	ttl     time.Duration
+	// seenPKs tracks every distinct Ed25519 pubkey observed per token (capped at
+	// maxIDsPerToken+1 entries to bound memory). Used for squat/intrusion detection:
+	// a new pubkey on an established token fires a WARNING in the server log.
+	seenPKs map[string]map[string]struct{}
+	// intruderWarned records tokens for which an intrusion WARNING was already
+	// emitted, so the immediate log fires AT MOST ONCE per token even under an
+	// open-mode squat flood (the per-minute stats counters still carry the volume).
+	// Bounded by maxTokens and released with the token in evict/reap.
+	intruderWarned map[string]struct{}
+	ttl            time.Duration
 }
 
 func newHSRegistry(ttl time.Duration) *hsRegistry {
-	return &hsRegistry{waiting: map[string]map[string]*hsPeer{}, ttl: ttl}
+	return &hsRegistry{
+		waiting:        map[string]map[string]*hsPeer{},
+		seenPKs:        map[string]map[string]struct{}{},
+		intruderWarned: map[string]struct{}{},
+		ttl:            ttl,
+	}
+}
+
+// warnIntruderLocked logs an intrusion WARNING at most once per token, so a flood
+// of foreign registrations on a known token cannot turn each packet into a log
+// line (the codebase gates all per-packet load this way; counters carry volume).
+// Caller holds r.mu.
+func (r *hsRegistry) warnIntruderLocked(token, format string, args ...any) {
+	if _, done := r.intruderWarned[token]; done {
+		return
+	}
+	if len(r.intruderWarned) >= maxTokens {
+		return // bounded: under extreme token spread skip the line (stats still fire)
+	}
+	r.intruderWarned[token] = struct{}{}
+	log.Printf(format, args...)
 }
 
 func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner *hsPeer, ok bool) {
@@ -166,12 +196,43 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 	self = bucket[m.ID]
 	if self == nil {
 		if len(bucket) >= maxIDsPerToken {
-			return nil, nil, false // third party tried to join this token
+			// A third distinct identity is trying to join an already-full token slot.
+			// This fires when a squat succeeded (attacker took one slot) and the
+			// legitimate buddy now finds no room, or when an attacker probes an
+			// occupied token.
+			hsStats.squatRejected.Add(1)
+			r.warnIntruderLocked(m.Token, "SECURITY: event=squat-rejected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "third-party register on a full token slot; possible squat in progress")
+			return nil, nil, false
 		}
 		self = &hsPeer{id: m.ID, cands: map[string]protocol.Candidate{}}
 		bucket[m.ID] = self
 	}
 	if m.PubKey != "" {
+		// Intrusion detection: track distinct pubkeys per token. A new pubkey on an
+		// established token means either a legitimate new device (key rotation, fresh
+		// install) or an attacker squatting the token. Either warrants attention.
+		known := r.seenPKs[m.Token]
+		if known == nil {
+			known = map[string]struct{}{}
+			r.seenPKs[m.Token] = known
+		}
+		// Record at most maxIDsPerToken+1 distinct pubkeys per token. Gating the
+		// warning AND the insert together means a 4th+ distinct key is never inserted
+		// and therefore never re-counted/re-logged — so this fires once per token, not
+		// once per packet (a foreign-key flood at the cap would otherwise log forever).
+		if _, seen := known[m.PubKey]; !seen && len(known) < maxIDsPerToken+1 {
+			// A first or second pubkey is expected; a third is anomalous — a new device
+			// on the same token, a rotated key, or an attacker squatting with a foreign
+			// key. Either way it warrants attention.
+			if len(known) >= maxIDsPerToken {
+				hsStats.newPubKey.Add(1)
+				r.warnIntruderLocked(m.Token, "SECURITY: event=new-pubkey token=%s src=%s key=%s id=%s detail=%q",
+					logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID,
+					"new pubkey on an established token; possible squat, key rotation, or new device")
+			}
+			known[m.PubKey] = struct{}{}
+		}
 		self.pubkey = m.PubKey
 	}
 	if m.VirtualIP != "" {
@@ -213,6 +274,8 @@ func (r *hsRegistry) evictStalestLocked() bool {
 		return false
 	}
 	delete(r.waiting, victim)
+	delete(r.seenPKs, victim)
+	delete(r.intruderWarned, victim)
 	return true
 }
 
@@ -246,6 +309,8 @@ func (r *hsRegistry) reap(ctx context.Context) {
 			}
 			if len(bucket) == 0 {
 				delete(r.waiting, token)
+				delete(r.seenPKs, token)        // release pubkey history when the session is gone
+				delete(r.intruderWarned, token) // and its one-shot warning latch
 			}
 		}
 		r.mu.Unlock()
@@ -420,10 +485,13 @@ func hsDebugf(format string, args ...any) {
 // summarized once per statsInterval and only when something happened, so a quiet
 // server stays silent and an attack shows up as a periodic spike line.
 type hsCounters struct {
-	paired      atomic.Int64
-	challenged  atomic.Int64 // sent an address-validation cookie (unvalidated source)
-	rateLimited atomic.Int64
-	dropped     atomic.Int64 // malformed / over-cap / failed proof
+	paired        atomic.Int64
+	challenged    atomic.Int64 // sent an address-validation cookie (unvalidated source)
+	rateLimited   atomic.Int64
+	dropped       atomic.Int64 // malformed / over-cap / failed proof
+	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
+	squatRejected atomic.Int64 // 3rd-party register rejected on full slot (slot already squatted)
+	replay        atomic.Int64 // approval-mode registration signature replayed
 }
 
 var hsStats hsCounters
@@ -441,11 +509,16 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		}
 		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
-		if pa|ch|rl|dr == 0 {
+		npk, sq, rp := c.newPubKey.Swap(0), c.squatRejected.Swap(0), c.replay.Swap(0)
+		if pa|ch|rl|dr|npk|sq|rp == 0 {
 			continue // idle interval: stay quiet
 		}
-		log.Printf("stats (last %s): paired=%d challenged=%d rate-limited=%d dropped=%d",
+		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d challenged=%d rate-limited=%d dropped=%d",
 			statsInterval, pa, ch, rl, dr)
+		if npk > 0 || sq > 0 || rp > 0 {
+			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d", npk, sq, rp)
+		}
+		log.Print(line)
 	}
 }
 
@@ -505,14 +578,18 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			return nil, false
 		}
 		if authz.replayed(m.RegSig) {
-			hsDebugf("drop replayed register token=%s from %s", logTag(m.Token), src)
+			// A valid signature seen twice within the freshness window: an actual
+			// replay attempt against approval mode. This was previously silent.
+			hsStats.replay.Add(1)
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration signature replayed")
 			return nil, false
 		}
 		if !authz.allowed(m.PubKey) {
 			if m.CodeEnc != "" {
 				authz.recordPending(m.CodeEnc, m.PubKey)
 			} else {
-				authz.logPending(m.PubKey, shortHash(m.Token))
+				authz.logPending(m.PubKey, logTag(m.Token))
 			}
 			return nil, false
 		}
@@ -540,8 +617,9 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 		return nil, true // ok, but no partner yet
 	}
 	hsStats.paired.Add(1)
-	log.Printf("paired token=%s: %s(%d cand) <-> %s(%d cand)",
-		logTag(m.Token), self.id, len(self.cands), partner.id, len(partner.cands))
+	log.Printf("PAIRED: token=%s a=%s/%s b=%s/%s cands=%d/%d",
+		logTag(m.Token), self.id, keyTag(self.pubkey), partner.id, keyTag(partner.pubkey),
+		len(self.cands), len(partner.cands))
 	return []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}, true
 }
 
