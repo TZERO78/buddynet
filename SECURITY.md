@@ -150,7 +150,7 @@ Logs use three deliberately distinct, grep-friendly levels:
 # 1) Security events — always logged, never suppressed, key=value:
 journalctl --namespace=buddynet | grep '^.*SECURITY:'
 #   event=replay-detected | squat-rejected | new-pubkey | key-changed
-#         | pin-mismatch | leg-cap-hit   token=<tag> src=<ip> key=<b64[8]> ...
+#         | pin-mismatch | vip-mismatch | leg-cap-hit   token=<tag> src=<ip> key=<b64[8]> ...
 
 # 2) State transitions — CONNECTED / DISCONNECTED / PAIRED / TRUST / AUTHZ:
 journalctl --namespace=buddynet | grep -E '(CONNECTED|DISCONNECTED|PAIRED|TRUST|AUTHZ):'
