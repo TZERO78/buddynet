@@ -18,7 +18,7 @@ services:
     build:
       context: ..
       dockerfile: deployments/Dockerfile
-    image: ghcr.io/tzero78/buddynet:latest
+    image: ghcr.io/tzero78/buddynet:v1.0.0   # locally built by the handshake service; bump per release
     command:
       - --role=handshake
       - --listen
@@ -39,7 +39,7 @@ services:
       - no-new-privileges:true
 
   relay:
-    image: ghcr.io/tzero78/buddynet:latest
+    image: ghcr.io/tzero78/buddynet:v1.0.0   # locally built by the handshake service; bump per release
     command:
       - --role=relay
       - --listen
