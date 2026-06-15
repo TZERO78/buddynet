@@ -12,6 +12,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -36,6 +37,28 @@ type HandshakeConfig struct {
 	// last resort — use it when this VPS also runs --role=relay (commonly on a
 	// second port). Buddies fall back to it only after a direct punch fails.
 	RelayEndpoint string
+	// AllowCIDRs, if non-empty, drops any datagram/connection whose source is not
+	// inside one of these networks BEFORE the cookie and any crypto — a cheap
+	// DoS pre-filter for a private/known-fleet server. Empty keeps it open to all.
+	AllowCIDRs []netip.Prefix
+}
+
+// cidrAllowed reports whether a source IP may be served. Empty allowlist = open.
+func cidrAllowed(allowed []netip.Prefix, ip net.IP) bool {
+	if len(allowed) == 0 {
+		return true
+	}
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	for _, p := range allowed {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // Hard caps bound server memory regardless of spoofed source addresses.
@@ -280,13 +303,16 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	go reg.reap(ctx)
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
 	hsDebug = cfg.Debug
+	if len(cfg.AllowCIDRs) > 0 {
+		log.Printf("source allowlist ON: only %v may register", cfg.AllowCIDRs)
+	}
 
 	// Transport choice: QUIC validates the source address in its handshake
 	// (structural anti-reflection), plain UDP gets the same property from the
 	// address-validation cookie. Both reuse the same pairing core.
 	if cfg.QUIC {
 		log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
-		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl)
+		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl, cfg.AllowCIDRs)
 	}
 	log.Print("handshake control plane: UDP (source address validated by cookie)")
 
@@ -299,6 +325,11 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 				return nil
 			}
 			log.Printf("read: %v", err)
+			continue
+		}
+		// Source allowlist (optional): drop a disallowed source before anything,
+		// even the rate limiter — a private server need not spend a cycle on it.
+		if !cidrAllowed(cfg.AllowCIDRs, src.IP) {
 			continue
 		}
 		// Gate before any parsing or crypto so a flood is dropped cheaply and the
@@ -317,7 +348,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 // stream is one REGISTER, answered with a signed PEER_LIST (empty until paired,
 // so a polling buddy makes progress). QUIC's handshake already validated the
 // source address, so no cookie is needed; the rate limiter still bounds load.
-func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter) error {
+func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
 	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
 	if err != nil {
 		return err
@@ -333,14 +364,14 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 			}
 			return err
 		}
-		go handleControlReq(req, reg, priv, authz, relayEndpoint, rl)
+		go handleControlReq(req, reg, priv, authz, relayEndpoint, rl, allowed)
 	}
 }
 
 // handleControlReq processes one QUIC control request and replies on its stream.
-func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter) {
+func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) {
 	src, _ := req.Remote.(*net.UDPAddr)
-	if src == nil || !rl.Allow(src.IP.String()) {
+	if src == nil || !cidrAllowed(allowed, src.IP) || !rl.Allow(src.IP.String()) {
 		req.Reply(nil)
 		return
 	}
