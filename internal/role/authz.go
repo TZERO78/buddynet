@@ -117,7 +117,7 @@ func (a *authorizer) watch(ctx context.Context) {
 			if err := a.reload(); err != nil {
 				log.Printf("authorized reload: %v", err)
 			} else {
-				log.Printf("authorized list reloaded (%d key(s))", a.count())
+				log.Printf("AUTHZ: action=reload count=%d", a.count())
 			}
 		}
 	}
@@ -156,8 +156,8 @@ func (a *authorizer) logPending(pubkey, tokenHash string) {
 	}
 	a.logged[pubkey] = time.Now()
 	a.mu.Unlock()
-	log.Printf("pending: client %s requests access (token=%s) — approve with: buddynet --role=handshake --authorized %s approve %s",
-		pubkey, tokenHash, a.path, pubkey)
+	log.Printf("AUTHZ: action=pending key=%s token=%s — approve with: buddynet --role=handshake --authorized %s approve %s",
+		keyTag(pubkey), tokenHash, a.path, pubkey)
 }
 
 // pruneLoggedLocked drops dedup entries older than the dedup window. Caller holds a.mu.
@@ -262,8 +262,8 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 		if err := writePending(a.pendDB, snapshot); err != nil {
 			log.Printf("pending write: %v", err)
 		}
-		log.Printf("pending: a client requests access with code %q — approve it with: buddynet --role=handshake --authorized %s allowclient %s",
-			code, a.path, code)
+		log.Printf("AUTHZ: action=pending key=%s code=%q — approve with: buddynet --role=handshake --authorized %s allowclient %s",
+			keyTag(key), code, a.path, code)
 	}
 }
 

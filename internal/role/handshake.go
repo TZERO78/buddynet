@@ -201,8 +201,8 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 			// legitimate buddy now finds no room, or when an attacker probes an
 			// occupied token.
 			hsStats.squatRejected.Add(1)
-			r.warnIntruderLocked(m.Token, "WARNING: third-party register rejected for token=%s from %s (id=%s) — slot full; possible squat in progress",
-				logTag(m.Token), src, m.ID)
+			r.warnIntruderLocked(m.Token, "SECURITY: event=squat-rejected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "third-party register on a full token slot; possible squat in progress")
 			return nil, nil, false
 		}
 		self = &hsPeer{id: m.ID, cands: map[string]protocol.Candidate{}}
@@ -227,9 +227,9 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 			// key. Either way it warrants attention.
 			if len(known) >= maxIDsPerToken {
 				hsStats.newPubKey.Add(1)
-				r.warnIntruderLocked(m.Token, "WARNING: unexpected new pubkey on token=%s from %s (id=%s) — "+
-					"already have %d established identity(ies); possible squat, key rotation, or new device",
-					logTag(m.Token), src, m.ID, len(known))
+				r.warnIntruderLocked(m.Token, "SECURITY: event=new-pubkey token=%s src=%s key=%s id=%s detail=%q",
+					logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID,
+					"new pubkey on an established token; possible squat, key rotation, or new device")
 			}
 			known[m.PubKey] = struct{}{}
 		}
@@ -491,6 +491,7 @@ type hsCounters struct {
 	dropped       atomic.Int64 // malformed / over-cap / failed proof
 	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
 	squatRejected atomic.Int64 // 3rd-party register rejected on full slot (slot already squatted)
+	replay        atomic.Int64 // approval-mode registration signature replayed
 }
 
 var hsStats hsCounters
@@ -508,14 +509,14 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		}
 		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
-		npk, sq := c.newPubKey.Swap(0), c.squatRejected.Swap(0)
-		if pa|ch|rl|dr|npk|sq == 0 {
+		npk, sq, rp := c.newPubKey.Swap(0), c.squatRejected.Swap(0), c.replay.Swap(0)
+		if pa|ch|rl|dr|npk|sq|rp == 0 {
 			continue // idle interval: stay quiet
 		}
-		line := fmt.Sprintf("stats (last %s): paired=%d challenged=%d rate-limited=%d dropped=%d",
+		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d challenged=%d rate-limited=%d dropped=%d",
 			statsInterval, pa, ch, rl, dr)
-		if npk > 0 || sq > 0 {
-			line += fmt.Sprintf(" WARNING: new-pubkey=%d squat-rejected=%d", npk, sq)
+		if npk > 0 || sq > 0 || rp > 0 {
+			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d", npk, sq, rp)
 		}
 		log.Print(line)
 	}
@@ -577,14 +578,18 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			return nil, false
 		}
 		if authz.replayed(m.RegSig) {
-			hsDebugf("drop replayed register token=%s from %s", logTag(m.Token), src)
+			// A valid signature seen twice within the freshness window: an actual
+			// replay attempt against approval mode. This was previously silent.
+			hsStats.replay.Add(1)
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration signature replayed")
 			return nil, false
 		}
 		if !authz.allowed(m.PubKey) {
 			if m.CodeEnc != "" {
 				authz.recordPending(m.CodeEnc, m.PubKey)
 			} else {
-				authz.logPending(m.PubKey, shortHash(m.Token))
+				authz.logPending(m.PubKey, logTag(m.Token))
 			}
 			return nil, false
 		}
@@ -612,8 +617,9 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 		return nil, true // ok, but no partner yet
 	}
 	hsStats.paired.Add(1)
-	log.Printf("paired token=%s: %s(%d cand) <-> %s(%d cand)",
-		logTag(m.Token), self.id, len(self.cands), partner.id, len(partner.cands))
+	log.Printf("PAIRED: token=%s a=%s/%s b=%s/%s cands=%d/%d",
+		logTag(m.Token), self.id, keyTag(self.pubkey), partner.id, keyTag(partner.pubkey),
+		len(self.cands), len(partner.cands))
 	return []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}, true
 }
 

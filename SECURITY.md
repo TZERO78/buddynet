@@ -142,18 +142,37 @@ journalctl --namespace=buddynet | grep "SAS REJECTED"
 
 A timeout (no answer) is logged separately as caution, not as an attack.
 
-The **server roles** also emit a once-per-minute audit line whenever there was
-activity (and stay silent when idle), so a flood or mass-registration attempt is
-visible without per-packet logging that a flood could weaponize to fill the disk:
+### Log schema
+
+Logs use three deliberately distinct, grep-friendly levels:
 
 ```bash
-journalctl --namespace=buddynet | grep -E "stats \(last|relay stats"
-# handshake: paired/challenged/rate-limited/dropped per minute
-# relay:     paired/challenged/rejected per minute
+# 1) Security events — always logged, never suppressed, key=value:
+journalctl --namespace=buddynet | grep '^.*SECURITY:'
+#   event=replay-detected | squat-rejected | new-pubkey | key-changed
+#         | pin-mismatch | leg-cap-hit   token=<tag> src=<ip> key=<b64[8]> ...
+
+# 2) State transitions — CONNECTED / DISCONNECTED / PAIRED / TRUST / AUTHZ:
+journalctl --namespace=buddynet | grep -E '(CONNECTED|DISCONNECTED|PAIRED|TRUST|AUTHZ):'
+#   DISCONNECTED carries reason=<idle|reauth|shutdown|...> and duration=
+#   CONNECTED/PAIRED/TRUST carry the STABLE key=<b64[8]> (not the ephemeral id)
+
+# 3) Per-minute aggregates — only when active; ALERT segment on security counters:
+journalctl --namespace=buddynet | grep 'stats (last'
+#   stats (last 1m0s): role=handshake paired=.. challenged=.. rate-limited=.. dropped=..
+#                      [ALERT: new-pubkey=.. squat-rejected=.. replay=..]
+#   stats (last 1m0s): role=relay paired=.. challenged=.. rejected=.. [ALERT: leg-cap=..]
 ```
 
-A sustained spike in `rate-limited`/`dropped` (handshake) or `challenged`/
-`rejected` (relay) is the signature of a spoofed-source flood being absorbed.
+Peer identity in the audit trail is the **stable key tag** (`key=<first 8 chars
+of the base64 pubkey>`), so it survives reconnects — unlike the ephemeral per-run
+id. Tokens are anonymized: a server-keyed HMAC on the handshake/authz side (so the
+same token maps to the same `token=` tag across those logs without becoming a
+public guessing oracle) and a plain truncated hash on the buddy side.
+
+An `ALERT:` segment, any `SECURITY:` line, or a sustained spike in
+`rate-limited`/`dropped`/`rejected` is the signature of an attack being absorbed
+(a spoofed-source flood, a token-squat, or a replay attempt).
 
 ## Attacker capabilities
 

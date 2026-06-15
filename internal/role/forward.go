@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/tzero78/buddynet/internal/tunnel"
 )
@@ -18,35 +19,38 @@ const maxConcurrentStreams = 256
 
 // forward runs the data plane over an established session: -L opens a stream per
 // local connection; -forward dials a local service for each incoming stream.
-// Both can run at once. It returns when the session ends or ctx is cancelled.
-func forward(ctx context.Context, sess tunnel.Session, localListen, forwardTo string) error {
+// Both can run at once. It returns the number of streams forwarded (for the
+// session summary the caller logs) when the session ends or ctx is cancelled.
+func forward(ctx context.Context, sess tunnel.Session, localListen, forwardTo string) (streams int64, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	var count atomic.Int64
 	var wg sync.WaitGroup
 	if localListen != "" {
 		wg.Add(1)
-		go func() { defer wg.Done(); serveLocal(ctx, sess, localListen) }()
+		go func() { defer wg.Done(); serveLocal(ctx, sess, localListen, &count) }()
 	}
 	if forwardTo != "" {
 		wg.Add(1)
-		go func() { defer wg.Done(); serveStreams(ctx, sess, forwardTo) }()
+		go func() { defer wg.Done(); serveStreams(ctx, sess, forwardTo, &count) }()
 	}
 
 	select {
 	case <-sess.Done():
-		log.Print("buddy DISCONNECTED: tunnel closed")
+		// Tunnel closed (peer/idle/reauth) — the caller logs DISCONNECTED with the
+		// reason and duration; nothing to log here.
 	case <-ctx.Done():
 		log.Print("shutting down")
 		sess.Close()
 	}
 	cancel()
 	wg.Wait()
-	return nil
+	return count.Load(), nil
 }
 
 // serveLocal accepts local connections and forwards each over a new stream.
-func serveLocal(ctx context.Context, sess tunnel.Session, addr string) {
+func serveLocal(ctx context.Context, sess tunnel.Session, addr string, count *atomic.Int64) {
 	ln, err := listenLocal(addr)
 	if err != nil {
 		log.Printf("-L %s: %v", addr, err)
@@ -69,23 +73,25 @@ func serveLocal(ctx context.Context, sess tunnel.Session, addr string) {
 				c.Close()
 				return
 			}
+			count.Add(1)
 			splice(c, st)
 		}()
 	}
 }
 
 // serveStreams accepts incoming streams and forwards each to the local service.
-func serveStreams(ctx context.Context, sess tunnel.Session, addr string) {
+func serveStreams(ctx context.Context, sess tunnel.Session, addr string, count *atomic.Int64) {
 	log.Printf("-forward: incoming streams go to %s", addr)
 	for {
 		st, err := sess.AcceptStream(ctx)
 		if err != nil {
 			return
 		}
+		count.Add(1)
 		go func() {
 			c, err := dialLocal(addr)
 			if err != nil {
-				log.Printf("dial %s: %v", addr, err)
+				log.Printf("-forward dial %s: %v (closing peer stream)", addr, err)
 				st.Close()
 				return
 			}

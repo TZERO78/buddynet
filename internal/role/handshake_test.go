@@ -156,6 +156,40 @@ func TestIntrusionWarningLatchesOncePerTokenAndStaysBounded(t *testing.T) {
 	}
 }
 
+// TestReplayIsLoggedAndCounted locks the P0 fix: a replayed approval-mode
+// registration is no longer silent — it is dropped AND increments the replay
+// counter that feeds the stats ALERT line.
+func TestReplayIsLoggedAndCounted(t *testing.T) {
+	hsStats.replay.Store(0)
+	t.Cleanup(func() { hsStats.replay.Store(0) })
+
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	pkB64 := base64.StdEncoding.EncodeToString(pub)
+	allow := filepath.Join(t.TempDir(), "authorized")
+	if err := os.WriteFile(allow, []byte(pkB64+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	authz, err := newAuthorizer(allow, srvPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := time.Now().Unix()
+	m := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts}
+	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("tok", "A", pkB64, ts)))
+
+	reg := newHSRegistry(time.Minute)
+	if _, ok := pairRegister(reg, authz, "", v4(1000), m); !ok {
+		t.Fatal("first allowlisted registration should be accepted")
+	}
+	if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
+		t.Fatal("a replayed registration (same signature) must be dropped")
+	}
+	if got := hsStats.replay.Load(); got != 1 {
+		t.Fatalf("replay counter = %d, want 1 (replay must be counted, not silent)", got)
+	}
+}
+
 func TestUpsertSameIDDoesNotSelfPair(t *testing.T) {
 	r := newHSRegistry(time.Minute)
 	r.upsert(regMsg("tok", "A", "pk"), v4(1000))

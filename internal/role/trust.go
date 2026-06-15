@@ -38,10 +38,17 @@ func (t *trustPolicy) decide(token string, partnerPub ed25519.PublicKey) (needSA
 	switch {
 	case t.pinned != nil:
 		if !partnerPub.Equal(t.pinned) {
+			// Log the security event HERE, at the detection point with full context,
+			// rather than letting it surface three call-frames up as a generic
+			// "tunnel error".
+			log.Printf("SECURITY: event=pin-mismatch token=%s key=%s detail=%q",
+				tokenTag(token), keyTag(partnerB64), "partner key is not the pinned --peer-key (possible hijack/MITM)")
 			return false, errors.New("partner identity MISMATCH: not the pinned --peer-key — refusing (possible hijack/MITM)")
 		}
+		log.Printf("TRUST: action=pinned-ok key=%s token=%s", keyTag(partnerB64), tokenTag(token))
 		return false, nil
 	case t.insecure:
+		log.Printf("TRUST: action=insecure key=%s token=%s detail=%q", keyTag(partnerB64), tokenTag(token), "identity NOT verified (--insecure)")
 		return false, nil
 	default:
 		known, err := loadKnownPeer(t.storePath, token)
@@ -49,11 +56,15 @@ func (t *trustPolicy) decide(token string, partnerPub ed25519.PublicKey) (needSA
 			return false, fmt.Errorf("trust store %s: %w", t.storePath, err)
 		}
 		if known == "" {
-			return true, nil // first contact: verify via SAS, then confirm
+			return true, nil // first contact: verify via SAS, then confirm (logged as tofu-new)
 		}
 		if known != partnerB64 {
+			log.Printf("SECURITY: event=key-changed token=%s key=%s detail=%q",
+				tokenTag(token), keyTag(partnerB64),
+				fmt.Sprintf("buddy key changed (known %s) — refusing (possible MITM)", keyTag(known)))
 			return false, fmt.Errorf("buddy key CHANGED for this token (known %s, got %s) — refusing (possible MITM). If legitimate, remove the entry from %s", known, partnerB64, t.storePath)
 		}
+		log.Printf("TRUST: action=tofu-match key=%s token=%s", keyTag(partnerB64), tokenTag(token))
 		return false, nil
 	}
 }
@@ -69,7 +80,8 @@ func (t *trustPolicy) confirm(token string, partnerPub ed25519.PublicKey) error 
 	if err := learnPeer(t.storePath, token, partnerB64); err != nil {
 		return fmt.Errorf("trust store %s: %w", t.storePath, err)
 	}
-	log.Printf("trust-on-first-use: recorded buddy identity %s for this token in %s — pin it with --peer-key to skip this next time", partnerB64, t.storePath)
+	log.Printf("TRUST: action=tofu-new key=%s token=%s store=%s detail=%q",
+		keyTag(partnerB64), tokenTag(token), t.storePath, "recorded on first contact; pin with --peer-key to skip the SAS next time")
 	return nil
 }
 
