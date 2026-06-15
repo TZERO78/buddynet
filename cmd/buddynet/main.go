@@ -71,6 +71,7 @@ func main() {
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
 	punchDur := flag.Duration("punch", 2*time.Second, "buddy: how long to hole-punch before bringing up QUIC")
 	idleTimeout := flag.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all")
+	reauthInterval := flag.Duration("reauth-interval", 0, "buddy: periodically rebuild the tunnel so a revocation/token rotation takes effect within this long (0 = off; a direct tunnel cannot be cancelled centrally). May interrupt long transfers.")
 	noInteractive := flag.Bool("no-interactive", false, "buddy: never prompt for first-contact SAS confirmation; refuse to learn a NEW buddy key (pin it with --peer-key instead). For daemons/Unraid.")
 	sasTimeout := flag.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)")
 	inviteTimeout := flag.Duration("invite-timeout", 15*time.Minute, "buddy: give up the first pairing (--invite/--join) after this long; the invite token is one-time")
@@ -159,6 +160,7 @@ func main() {
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
 		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
+		reauthInterval: *reauthInterval,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -265,7 +267,7 @@ type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	localListen, forward                                                    string
 	insecure, status, interactive, ephemeral, quic                          bool
-	punchDur, idleTimeout, sasTimeout, inviteTimeout                        time.Duration
+	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
 
 // config maps the parsed flags onto the role package's BuddyConfig.
@@ -278,6 +280,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
+		ReauthInterval: a.reauthInterval,
 	}
 }
 

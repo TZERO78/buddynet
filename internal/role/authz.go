@@ -172,9 +172,13 @@ func (a *authorizer) pruneLoggedLocked() {
 // replayed reports whether this exact registration signature was seen recently,
 // recording fresh ones. Callers invoke it only AFTER verifyRegistration passes,
 // so the cache holds valid signatures and an attacker cannot pollute it with
-// garbage. The map is bounded; if it fills with still-fresh entries we fail open
-// (admit, don't record) — the rate limiter already bounds volume, and the sig is
-// validly signed regardless.
+// garbage. The map is bounded; when it is full we prune expired entries and, if
+// still full, EVICT THE OLDEST (LRU) to make room — never failing open (which
+// would let a replay through) and never refusing the new entry (which would let
+// an attacker with one approved key DoS all pairings by flooding fresh sigs).
+// Under a sustained flood the effective replay window narrows to the most recent
+// maxReplaySigs entries, but the global rate limiter bounds how fast that can
+// happen.
 func (a *authorizer) replayed(sig string) bool {
 	if sig == "" {
 		return false
@@ -188,11 +192,27 @@ func (a *authorizer) replayed(sig string) bool {
 	if len(a.recentSigs) >= maxReplaySigs {
 		a.pruneSigsLocked(now)
 		if len(a.recentSigs) >= maxReplaySigs {
-			return false
+			a.evictOldestSigLocked()
 		}
 	}
 	a.recentSigs[sig] = now
 	return false
+}
+
+// evictOldestSigLocked removes the single oldest replay-cache entry (closest to
+// expiry), freeing a slot without failing open. Caller holds a.mu.
+func (a *authorizer) evictOldestSigLocked() {
+	var oldest string
+	var oldestT time.Time
+	first := true
+	for s, t := range a.recentSigs {
+		if first || t.Before(oldestT) {
+			oldest, oldestT, first = s, t, false
+		}
+	}
+	if !first {
+		delete(a.recentSigs, oldest)
+	}
 }
 
 // pruneSigsLocked drops replay-cache entries past the replay window. Caller holds a.mu.

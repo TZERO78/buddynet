@@ -192,10 +192,11 @@ global + per-source rate limits and the bounded registry caps still apply.
 
 ## Deliberately out of scope
 
-- **Token revocation / blacklist.** A rejected SAS drops the connection and the
-  fix is to re-invite (a fresh token); the SAS plus token rotation protect
-  confidentiality, so a server-side blacklist would only have closed a narrow
-  DoS window at the cost of new attack surface. Not built, on purpose.
+- **Server-forced disconnect of a live tunnel.** The handshake server is not in
+  the data path, so it **cannot kill an established direct tunnel** — see
+  [Revoking access](#revoking-access) for what to do instead. A server-side token
+  blacklist is still not built: it would close only a narrow window at the cost of
+  new attack surface.
 - **At-rest key encryption / rotation.** Identity keys are `0600` files; protect
   and back them up (see below). No passphrase.
 
@@ -213,6 +214,29 @@ trusted automatically (the safe behaviour):
 
 **Prevention:** keys are tiny `0600` files — persist them on durable storage
 (server: `StateDirectory`/volume; buddy: `--key`) and back them up.
+
+## Revoking access
+
+BuddyNet's data plane is a **direct** peer-to-peer tunnel — once two buddies have
+punched a path, the handshake server is no longer in it and **cannot tear that
+tunnel down**. Revocation is therefore not instantaneous the way it is in a
+hub-and-spoke VPN. What actually revokes access:
+
+- **Approval mode (`--authorized`).** `revoke <key>` removes a client from the
+  allowlist so it can no longer *re-pair*; an already-established tunnel keeps
+  running until it next re-registers.
+- **`--peer-key` pin.** Change or remove the pin on the surviving side; the
+  revoked key is then refused on the next connect.
+- **Token rotation.** Re-invite (`--invite`) to mint a fresh token and retire the
+  old session secret; the old credential stops working for new connects.
+
+To **bound** how long an established tunnel can outlive a revocation, run the
+buddy with **`--reauth-interval`** (off by default). It rebuilds the tunnel on
+that interval, re-running the allowlist/trust checks each time — so a revocation
+takes effect within one interval, at the cost of a brief reconnect (leave it off
+for uninterrupted long transfers like a multi-hour backup). To cut a live tunnel
+**immediately**, stop the revoked node's process (`systemctl stop …`) or block it
+at the firewall.
 
 ## Reporting a vulnerability
 
