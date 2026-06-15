@@ -1,0 +1,37 @@
+# Lab image for application-tunnel tests (rsync, kopia).
+# Extends the base lab image with rsync and the kopia binary.
+# NOT for production use; see deployments/Dockerfile for the hardened image.
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/buddynet ./cmd/buddynet
+RUN mkdir -p /out/state
+
+FROM alpine:3.21
+RUN apk add --no-cache curl rsync openssl openssh sshpass
+
+# kopia — backup tool, used to test snapshot transfers over the tunnel.
+ARG KOPIA_VERSION=0.23.0
+RUN set -eux; \
+    ARCH=$(uname -m); \
+    case "$ARCH" in \
+      x86_64)  KARCH=x64 ;; \
+      aarch64) KARCH=arm64 ;; \
+      *) echo "unsupported arch: $ARCH"; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/kopia/kopia/releases/download/v${KOPIA_VERSION}/kopia-${KOPIA_VERSION}-linux-${KARCH}.tar.gz" \
+      | tar -xz -C /tmp; \
+    install -m 755 /tmp/kopia-*/kopia /usr/local/bin/kopia; \
+    rm -rf /tmp/kopia-*
+
+COPY --from=build /out/buddynet /usr/local/bin/buddynet
+COPY --from=build /out/state /var/lib/buddynet
+COPY lab/entrypoint-rsync-a.sh /entrypoint-rsync-a.sh
+COPY lab/entrypoint-kopia-a.sh /entrypoint-kopia-a.sh
+COPY lab/entrypoint-kopia-b.sh /entrypoint-kopia-b.sh
+RUN chmod +x /entrypoint-rsync-a.sh /entrypoint-kopia-a.sh /entrypoint-kopia-b.sh
+VOLUME ["/var/lib/buddynet"]
+EXPOSE 51820/udp
+ENTRYPOINT ["/usr/local/bin/buddynet"]
