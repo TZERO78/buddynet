@@ -3,6 +3,7 @@ package relay
 import (
 	"log"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -51,8 +52,9 @@ type session struct {
 // session and never inspects, decrypts, or stores payload — it sees only
 // encrypted QUIC packets between two NAT-bound addresses.
 type Server struct {
-	ttl    time.Duration
-	bindRL *ratelimit.Limiter
+	ttl     time.Duration
+	bindRL  *ratelimit.Limiter
+	allowed []netip.Prefix // if non-empty, only these source nets may bind a leg
 
 	mu        sync.Mutex
 	sessions  map[string]*session // token -> session
@@ -63,16 +65,41 @@ type Server struct {
 	closeOnce sync.Once
 }
 
-// NewServer returns a relay whose bindings expire after ttl with no traffic.
-func NewServer(ttl time.Duration) *Server {
+// NewServer returns a relay whose bindings expire after ttl with no traffic. If
+// allowed is non-empty the relay is no longer open: only sources inside one of
+// those CIDRs may bind a leg (optional access control for a private relay); an
+// empty allowed keeps the default open-to-all behaviour.
+func NewServer(ttl time.Duration, allowed []netip.Prefix) *Server {
 	return &Server{
 		ttl:       ttl,
 		bindRL:    ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),
+		allowed:   allowed,
 		sessions:  map[string]*session{},
 		byAddr:    map[string]*session{},
 		legsPerIP: map[string]int{},
 		done:      make(chan struct{}),
 	}
+}
+
+// cidrAllowed reports whether a source IP may bind. With no allowlist the relay
+// is open (default); otherwise the IP must fall inside one of the allowed CIDRs.
+// Gating at bind is sufficient: forwarding only ever reaches addresses that have
+// already bound a leg.
+func (s *Server) cidrAllowed(ip net.IP) bool {
+	if len(s.allowed) == 0 {
+		return true
+	}
+	a, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	for _, p := range s.allowed {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // Run reads datagrams off conn until it is closed: bind control packets claim a
@@ -98,6 +125,12 @@ func (s *Server) Run(conn *net.UDPConn) {
 // bind claims src as a leg of token's session and acks. The third distinct leg
 // for a token is rejected (cap), so a stranger cannot hijack a pairing.
 func (s *Server) bind(conn *net.UDPConn, token string, src *net.UDPAddr) {
+	// Access control (optional): a source outside the allowlist may not bind a
+	// leg, so it cannot use the relay at all. Checked before the rate limiter so a
+	// disallowed source consumes no budget.
+	if !s.cidrAllowed(src.IP) {
+		return
+	}
 	// Throttle bind control packets per source so a flood cannot churn sessions;
 	// data forwarding (the hot path) is never rate-limited.
 	if !s.bindRL.Allow(src.IP.String()) {

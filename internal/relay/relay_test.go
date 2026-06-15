@@ -28,7 +28,7 @@ func TestParseBind(t *testing.T) {
 func TestRelayForwardsBlind(t *testing.T) {
 	relayConn := mustListen(t)
 	defer relayConn.Close()
-	go NewServer(2 * time.Second).Run(relayConn)
+	go NewServer(2*time.Second, nil).Run(relayConn)
 	relayAddr := relayConn.LocalAddr().(*net.UDPAddr)
 	dial := &net.UDPAddr{IP: net.IPv6loopback, Port: relayAddr.Port}
 
@@ -66,7 +66,7 @@ func TestRelayForwardsBlind(t *testing.T) {
 func TestRelayDropsUnboundSource(t *testing.T) {
 	relayConn := mustListen(t)
 	defer relayConn.Close()
-	go NewServer(2 * time.Second).Run(relayConn)
+	go NewServer(2*time.Second, nil).Run(relayConn)
 	relayAddr := relayConn.LocalAddr().(*net.UDPAddr)
 	dial := &net.UDPAddr{IP: net.IPv6loopback, Port: relayAddr.Port}
 
