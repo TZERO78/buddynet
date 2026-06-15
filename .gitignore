@@ -12,3 +12,13 @@ known_peers
 # Editor / OS
 .DS_Store
 *.swp
+
+# Claude Code / local working context — these live in the working tree for
+# convenience but must NEVER be pushed to GitHub:
+#   CLAUDE.md      repo guidance for Claude Code (kept local for this project)
+#   .claude/       per-project Claude state, incl. a symlink to the memory store
+#   docs/plans/    pre-agreed implementation plans (referenced from CLAUDE.md)
+/CLAUDE.md
+/.claude/
+/docs/plans/
+AGENTS.md
