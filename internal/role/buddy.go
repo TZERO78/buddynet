@@ -669,7 +669,9 @@ func sessionToken(token, pubA, pubB string) string {
 
 func randomID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("crypto/rand unavailable: %v", err)) // unrecoverable; never happens for crypto/rand
+	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 

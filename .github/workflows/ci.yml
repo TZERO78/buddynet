@@ -32,3 +32,35 @@ jobs:
 
       - name: build
         run: go build ./...
+
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      # Known CVEs in our dependencies AND in the Go toolchain, filtered to the
+      # code paths we actually call. High signal, low noise — blocking.
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+      # Static security analysis. Several rules are excluded because they fire
+      # only as false positives on this codebase (see the comment at each site):
+      #   G402 InsecureSkipVerify — intentional: PKI-free, identity is pinned by
+      #        key in VerifyPeerCertificate (internal/tunnel/{quic,control}.go).
+      #   G123 TLS resumption + VerifyPeerCertificate — peers are key-pinned across
+      #        reconnects; tracked as a hardening follow-up, not a vuln.
+      #   G117 "struct field matches secret pattern" on JSON marshaling — that IS
+      #        the wire protocol (SessionToken etc.); marshaling it is the point.
+      #   G115 int64->uint64 of a positive cookie epoch — provably non-negative.
+      #   G104 unchecked best-effort writes (conn.WriteToUDP), G304 file opens from
+      #        config-supplied paths — pervasive in net/CLI code, not vulnerabilities.
+      # Every other rule (exec, SQL, weak crypto, etc.) stays blocking.
+      - name: gosec
+        uses: securego/gosec@v2.21.4
+        with:
+          args: -severity medium -exclude=G104,G115,G117,G123,G304,G402 ./...

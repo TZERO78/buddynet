@@ -79,7 +79,9 @@ type ControlClient struct {
 func DialControl(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, serverPub ed25519.PublicKey, idle time.Duration) (*ControlClient, error) {
 	tr := &quic.Transport{Conn: conn}
 	tlsConf := &tls.Config{
-		InsecureSkipVerify:    true, // identity is pinned by key below, not by CA/hostname
+		// PKI-free: identity is pinned by key in VerifyPeerCertificate below, not by
+		// CA/hostname. Dropping that callback would remove all authentication.
+		InsecureSkipVerify:    true, //nosec G402 -- server identity is pinned by key in VerifyPeerCertificate
 		MinVersion:            tls.VersionTLS13,
 		NextProtos:            []string{controlALPN},
 		VerifyPeerCertificate: pinnedPeerVerify(serverPub),

@@ -34,6 +34,8 @@ func Relay(ctx context.Context, cfg RelayConfig) error {
 	}
 	defer conn.Close()
 	log.Printf("buddynet relay listening on %s (udp, dual-stack) — forwarding encrypted sessions blind", conn.LocalAddr())
+	log.Print("NOTE: the relay is UNAUTHENTICATED by design (open bandwidth, never a reflector). " +
+		"If it faces the public internet, restrict reach with a firewall — it sees only ciphertext, but anyone can use it.")
 	go func() { <-ctx.Done(); conn.Close() }()
 
 	relay.NewServer(cfg.TTL).Run(conn)
