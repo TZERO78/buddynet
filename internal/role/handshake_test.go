@@ -129,6 +129,33 @@ func TestTokenSquatResidualAndApprovalModeBlock(t *testing.T) {
 	}
 }
 
+// TestIntrusionWarningLatchesOncePerTokenAndStaysBounded guards the squat-
+// detection logging against turning a foreign-registration flood into one log
+// line per packet: the immediate WARNING must fire at most once per token, and
+// the per-token pubkey history must stay bounded regardless of flood volume.
+func TestIntrusionWarningLatchesOncePerTokenAndStaysBounded(t *testing.T) {
+	r := newHSRegistry(time.Minute)
+	r.upsert(regMsg("tok", "A", "pkA"), v4(1000))
+	r.upsert(regMsg("tok", "B", "pkB"), v4(2000))
+
+	// Open-mode squat flood: many foreign identities on the same full token (each
+	// hits the slot-full rejection path).
+	for i := 0; i < 500; i++ {
+		r.upsert(regMsg("tok", fmt.Sprintf("X%d", i), fmt.Sprintf("pkX%d", i)), v4(3000+i))
+	}
+	// Key-rotation flood reusing an existing slot exercises the new-pubkey path.
+	for i := 0; i < 500; i++ {
+		r.upsert(regMsg("tok", "A", fmt.Sprintf("pkA%d", i)), v4(1000))
+	}
+
+	if got := len(r.seenPKs["tok"]); got > maxIDsPerToken+1 {
+		t.Fatalf("seenPKs must stay bounded, got %d (want <= %d)", got, maxIDsPerToken+1)
+	}
+	if got := len(r.intruderWarned); got != 1 {
+		t.Fatalf("intrusion warning must latch exactly once per token, got %d entries", got)
+	}
+}
+
 func TestUpsertSameIDDoesNotSelfPair(t *testing.T) {
 	r := newHSRegistry(time.Minute)
 	r.upsert(regMsg("tok", "A", "pk"), v4(1000))

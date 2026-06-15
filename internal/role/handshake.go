@@ -142,15 +142,36 @@ type hsRegistry struct {
 	// maxIDsPerToken+1 entries to bound memory). Used for squat/intrusion detection:
 	// a new pubkey on an established token fires a WARNING in the server log.
 	seenPKs map[string]map[string]struct{}
-	ttl     time.Duration
+	// intruderWarned records tokens for which an intrusion WARNING was already
+	// emitted, so the immediate log fires AT MOST ONCE per token even under an
+	// open-mode squat flood (the per-minute stats counters still carry the volume).
+	// Bounded by maxTokens and released with the token in evict/reap.
+	intruderWarned map[string]struct{}
+	ttl            time.Duration
 }
 
 func newHSRegistry(ttl time.Duration) *hsRegistry {
 	return &hsRegistry{
-		waiting: map[string]map[string]*hsPeer{},
-		seenPKs: map[string]map[string]struct{}{},
-		ttl:     ttl,
+		waiting:        map[string]map[string]*hsPeer{},
+		seenPKs:        map[string]map[string]struct{}{},
+		intruderWarned: map[string]struct{}{},
+		ttl:            ttl,
 	}
+}
+
+// warnIntruderLocked logs an intrusion WARNING at most once per token, so a flood
+// of foreign registrations on a known token cannot turn each packet into a log
+// line (the codebase gates all per-packet load this way; counters carry volume).
+// Caller holds r.mu.
+func (r *hsRegistry) warnIntruderLocked(token, format string, args ...any) {
+	if _, done := r.intruderWarned[token]; done {
+		return
+	}
+	if len(r.intruderWarned) >= maxTokens {
+		return // bounded: under extreme token spread skip the line (stats still fire)
+	}
+	r.intruderWarned[token] = struct{}{}
+	log.Printf(format, args...)
 }
 
 func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner *hsPeer, ok bool) {
@@ -180,7 +201,7 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 			// legitimate buddy now finds no room, or when an attacker probes an
 			// occupied token.
 			hsStats.squatRejected.Add(1)
-			log.Printf("WARNING: third-party register rejected for token=%s from %s (id=%s) — slot full; possible squat in progress",
+			r.warnIntruderLocked(m.Token, "WARNING: third-party register rejected for token=%s from %s (id=%s) — slot full; possible squat in progress",
 				logTag(m.Token), src, m.ID)
 			return nil, nil, false
 		}
@@ -196,20 +217,21 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 			known = map[string]struct{}{}
 			r.seenPKs[m.Token] = known
 		}
-		if _, seen := known[m.PubKey]; !seen {
-			// Only warn once a full pair (maxIDsPerToken distinct pubkeys) is already
-			// established. A first or second pubkey is expected; a third is anomalous —
-			// it means either a new device joined with the same token, a key was rotated,
-			// or an attacker squatted the token with a foreign key.
+		// Record at most maxIDsPerToken+1 distinct pubkeys per token. Gating the
+		// warning AND the insert together means a 4th+ distinct key is never inserted
+		// and therefore never re-counted/re-logged — so this fires once per token, not
+		// once per packet (a foreign-key flood at the cap would otherwise log forever).
+		if _, seen := known[m.PubKey]; !seen && len(known) < maxIDsPerToken+1 {
+			// A first or second pubkey is expected; a third is anomalous — a new device
+			// on the same token, a rotated key, or an attacker squatting with a foreign
+			// key. Either way it warrants attention.
 			if len(known) >= maxIDsPerToken {
 				hsStats.newPubKey.Add(1)
-				log.Printf("WARNING: unexpected new pubkey on token=%s from %s (id=%s) — "+
+				r.warnIntruderLocked(m.Token, "WARNING: unexpected new pubkey on token=%s from %s (id=%s) — "+
 					"already have %d established identity(ies); possible squat, key rotation, or new device",
 					logTag(m.Token), src, m.ID, len(known))
 			}
-			if len(known) < maxIDsPerToken+1 { // cap: don't grow seenPKs without bound
-				known[m.PubKey] = struct{}{}
-			}
+			known[m.PubKey] = struct{}{}
 		}
 		self.pubkey = m.PubKey
 	}
@@ -253,6 +275,7 @@ func (r *hsRegistry) evictStalestLocked() bool {
 	}
 	delete(r.waiting, victim)
 	delete(r.seenPKs, victim)
+	delete(r.intruderWarned, victim)
 	return true
 }
 
@@ -286,7 +309,8 @@ func (r *hsRegistry) reap(ctx context.Context) {
 			}
 			if len(bucket) == 0 {
 				delete(r.waiting, token)
-				delete(r.seenPKs, token) // release pubkey history when the session is gone
+				delete(r.seenPKs, token)        // release pubkey history when the session is gone
+				delete(r.intruderWarned, token) // and its one-shot warning latch
 			}
 		}
 		r.mu.Unlock()
