@@ -45,7 +45,8 @@ func resolvectlRemove() error {
 
 func resolvectl(args ...string) error {
 	// A context-bound exec would cancel cleanup; use a bare command here.
-	out, err := exec.Command("resolvectl", args...).CombinedOutput()
+	// All callers pass only hardcoded literal strings — no user input reaches args.
+	out, err := exec.Command("resolvectl", args...).CombinedOutput() // #nosec G204 -- args are hardcoded literals from internal callers only
 	if err != nil && len(out) > 0 {
 		return &runError{cmd: "resolvectl " + strings.Join(args, " "), out: string(out), err: err}
 	}
