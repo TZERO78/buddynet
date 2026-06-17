@@ -10,19 +10,20 @@ that runs `--dns`.
 # Machine A — announces itself as "alice", runs the resolver
 buddynet --role=buddy \
   --server VPS:51820 --server-key SERVER_KEY \
-  --invite -forward 127.0.0.1:873 \
+  --quic-handshake \
+  --invite --forward 127.0.0.1:873 \
   --name alice --dns
 
 # Machine B — announces itself as "bob", runs the resolver
 buddynet --role=buddy \
   --server VPS:51820 --server-key SERVER_KEY \
+  --quic-handshake \
   --join=TOKEN -L 127.0.0.1:9000 \
   --name bob --dns
 
 # From B, once paired:
-ping bob.buddy       # this machine itself
-ping alice.buddy     # resolves to alice's virtual IP (10.66.0.X)
-dig @127.0.0.153 alice.buddy   # direct query to the stub resolver
+ping alice.buddy                 # resolves to alice's virtual IP (10.66.0.X)
+dig @127.0.0.153 alice.buddy    # direct query to the stub resolver
 ```
 
 ## Flags
