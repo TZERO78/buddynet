@@ -99,6 +99,7 @@ type hsPeer struct {
 	role      protocol.Role
 	pubkey    string
 	virtualIP string
+	name      string // self-asserted .buddy name; relayed as-is, not validated by the server
 	cands     map[string]protocol.Candidate
 	seen      time.Time
 }
@@ -128,6 +129,7 @@ func (p *hsPeer) asProtocolPeer(relay string) protocol.Peer {
 		ID:         p.id,
 		PubKey:     p.pubkey,
 		VirtualIP:  p.virtualIP,
+		Name:       p.name,
 		Candidates: p.candidates(),
 		Relay:      relay,
 		LastSeen:   p.seen.Unix(),
@@ -240,6 +242,12 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 	}
 	if m.Role != "" {
 		self.role = m.Role
+	}
+	// Accept the name only if it passes the DNS-label rules. The server relays it
+	// verbatim and trusts the receiving buddy to apply TOFU pinning; we just
+	// reject garbage so the wire stays clean.
+	if m.Name != "" && protocol.ValidName(m.Name) {
+		self.name = m.Name
 	}
 	self.observe(src)
 

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	buddydns "github.com/tzero78/buddynet/internal/dns"
 	"github.com/tzero78/buddynet/internal/peer"
 	"github.com/tzero78/buddynet/internal/relay"
 	"github.com/tzero78/buddynet/internal/tunnel"
@@ -72,6 +73,18 @@ type BuddyConfig struct {
 	// the same with the address-validation cookie. Either way the SAME socket is
 	// then reused to hole-punch and run the peer tunnel.
 	QUIC bool
+
+	// Name is this node's self-asserted .buddy hostname (e.g. "alice" → alice.buddy).
+	// It is sent in REGISTER and relayed by the handshake server to the partner,
+	// who TOFU-pins it. Empty means no name — the node is still reachable via its
+	// fingerprint alias in the DNS table.
+	Name string
+
+	// DNS, when true, starts a stub resolver on 127.0.0.153:53 that answers
+	// A queries for <name>.buddy and <fp8>.buddy from the live peer registry.
+	// Requires CAP_NET_BIND_SERVICE or root; fails gracefully with a WARNING
+	// if the bind is not permitted.
+	DNS bool
 }
 
 // attempt is the per-connection plan: which rendezvous token to register with,
@@ -146,6 +159,19 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	reg, err := peer.Open(cfg.PeersPath)
 	if err != nil {
 		return fmt.Errorf("peer cache %s: %w", cfg.PeersPath, err)
+	}
+
+	// Start the .buddy stub resolver once per process lifetime, not per reconnect.
+	// It runs until ctx is cancelled; bind failures are logged as WARNING and the
+	// tunnel continues without DNS.
+	if cfg.DNS {
+		myVIPAddr := bcrypto.VirtualIP(priv.Public().(ed25519.PublicKey))
+		go func() {
+			if err := buddydns.Run(ctx, reg, cfg.Name, myVIPAddr); err != nil {
+				log.Printf("WARNING: MagicDNS server error: %v", err)
+			}
+		}()
+		buddydns.RegisterSystem(ctx)
 	}
 
 	if cfg.Status {
@@ -580,6 +606,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		ID:        myID,
 		PubKey:    myPub,
 		VirtualIP: myVIP,
+		Name:      cfg.Name,
 		Ts:        ts,
 	}
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
@@ -664,6 +691,7 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 		ID:        myID,
 		PubKey:    myPub,
 		VirtualIP: myVIP,
+		Name:      cfg.Name,
 		Ts:        ts,
 	}
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
