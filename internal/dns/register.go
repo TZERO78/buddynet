@@ -33,24 +33,21 @@ func RegisterSystem(ctx context.Context) {
 // always present and does not require a real network interface.
 func resolvectlAdd() error {
 	ip := strings.TrimSuffix(stubAddr, ":53")
-	if err := run("resolvectl", "dns", "lo", ip); err != nil {
+	if err := resolvectl("dns", "lo", ip); err != nil {
 		return err
 	}
-	return run("resolvectl", "domain", "lo", "~buddy")
+	return resolvectl("domain", "lo", "~buddy")
 }
 
 func resolvectlRemove() error {
-	if err := run("resolvectl", "revert", "lo"); err != nil {
-		return err
-	}
-	return nil
+	return resolvectl("revert", "lo")
 }
 
-func run(name string, args ...string) error {
+func resolvectl(args ...string) error {
 	// A context-bound exec would cancel cleanup; use a bare command here.
-	out, err := exec.Command(name, args...).CombinedOutput()
+	out, err := exec.Command("resolvectl", args...).CombinedOutput()
 	if err != nil && len(out) > 0 {
-		return &runError{cmd: name + " " + strings.Join(args, " "), out: string(out), err: err}
+		return &runError{cmd: "resolvectl " + strings.Join(args, " "), out: string(out), err: err}
 	}
 	return err
 }
