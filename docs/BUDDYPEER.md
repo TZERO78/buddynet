@@ -13,22 +13,16 @@ has a third buddy on the token, so a `PEER_LIST` always names a single partner.
 Run the bootstrap server and print the key your buddies will pin:
 
 ```bash
-buddynet --role=handshake --key /var/lib/buddynet/id.key
+buddynet --role=handshake,relay \
+    --key /var/lib/buddynet/id.key \
+    --relay-endpoint vps.example:51821 \
+    --quic-handshake
 buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
 ```
 
-Optionally also run a relay on the same box for buddies behind symmetric NAT,
-and advertise it:
-
-```bash
-buddynet --role=relay --listen '[::]:51821'
-# then start handshake with:  --relay-endpoint vps.example:51821
-```
-
-The bootstrap exchange uses plain UDP by default, with a source-address cookie so
-the server is never a reflector. To run it over QUIC instead, add
-`--quic-handshake` here **and** on every buddy (or set `BUDDYNET_QUIC=1`); the
-two must match.
+`--quic-handshake` must be set identically on the server **and** on every buddy
+(or `BUDDYNET_QUIC=1`). Without it the pairing token travels in cleartext over
+the public internet. See [OPERATIONS.md](OPERATIONS.md#quic-control-plane---quic-handshake).
 
 ## Pairing two buddies
 
@@ -36,7 +30,8 @@ two must match.
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --invite -forward 127.0.0.1:873
+    --quic-handshake \
+    --invite --forward 127.0.0.1:873
 # prints a one-time TOKEN and waits for the buddy to join
 ```
 
@@ -44,6 +39,7 @@ buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+    --quic-handshake \
     --join=TOKEN -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
@@ -61,6 +57,7 @@ reconnects via the stored session secret:
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+    --quic-handshake \
     -L 127.0.0.1:9000        # no --join/--token: reconnects via the stored session
 ```
 

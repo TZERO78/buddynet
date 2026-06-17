@@ -34,9 +34,10 @@ buddynet --role=buddy \
   --join=TOKEN -L 127.0.0.1:9000
 ```
 
-On first contact both sides print a **Short Authentication String (SAS)** — four
-words, matching on both ends. Confirm with `y` on each machine. The session
-secret is then stored in `--known-peers` and the tunnel stays up.
+On first contact both sides print a **Short Authentication String (SAS)** — a
+6-character code (e.g. `K7QX2M`), identical on both ends. Confirm with `y` on
+each machine. The session secret is then stored in `--known-peers` and the
+tunnel stays up.
 
 From the second reconnect onwards neither side needs user input — the stored
 session secret is used automatically.
