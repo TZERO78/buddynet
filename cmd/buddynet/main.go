@@ -82,6 +82,7 @@ func main() {
 	join := flag.String("join", "", "buddy: join with the one-time invite token your buddy gave you; on success a session secret is stored for reconnects")
 	name := flag.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars")
 	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
+	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
@@ -123,6 +124,11 @@ func main() {
 	if !*quicHandshake {
 		if v := os.Getenv("BUDDYNET_QUIC"); v == "1" || v == "true" {
 			*quicHandshake = true
+		}
+	}
+	if !*lazyFlag {
+		if v := os.Getenv("BUDDYNET_LAZY"); v == "1" || v == "true" {
+			*lazyFlag = true
 		}
 	}
 
@@ -171,7 +177,7 @@ func main() {
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
 		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
 		reauthInterval: *reauthInterval,
-		name:           *name, dns: *dnsFlag,
+		name:           *name, dns: *dnsFlag, lazy: *lazyFlag,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -312,7 +318,7 @@ func orDefault(v, def string) string {
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	localListen, forward, name                                              string
-	insecure, status, interactive, ephemeral, quic, dns                     bool
+	insecure, status, interactive, ephemeral, quic, dns, lazy               bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
 
@@ -327,7 +333,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
 		ReauthInterval: a.reauthInterval,
-		Name:           a.name, DNS: a.dns,
+		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
 	}
 }
 
@@ -347,6 +353,10 @@ func (a buddyArgs) validate() {
 	}
 	if !a.status && a.localListen == "" && a.forward == "" {
 		fmt.Fprintln(os.Stderr, "error: set at least one of -L or -forward (otherwise the tunnel carries nothing)")
+		os.Exit(2)
+	}
+	if a.lazy && a.localListen == "" {
+		fmt.Fprintln(os.Stderr, "error: --lazy requires -L (there is no listener to keep open without it)")
 		os.Exit(2)
 	}
 }

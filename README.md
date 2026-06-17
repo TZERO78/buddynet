@@ -78,6 +78,9 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
   virtual IPs and ciphertext, never content.
 - **QUIC now, WireGuard later.** The data plane sits behind a `Transport`
   interface; v1 ships QUIC (TLS 1.3), v2 can drop in WireGuard unchanged.
+- **Lazy tunnel (`--lazy`).** The `-L` TCP listener binds immediately; the
+  QUIC tunnel is established on demand when the first connection arrives.
+  Useful for backup tools (rsync, kopia) that are invoked infrequently.
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.

@@ -212,6 +212,44 @@ journalctl -t buddynet-handshake -f
 
 ---
 
+## Lazy tunnel mode (`--lazy`)
+
+By default BuddyNet establishes the QUIC tunnel before binding the local
+listener (`-L`). If the server or peer is unreachable at startup the port
+is never opened — the caller sees `connection refused`.
+
+`--lazy` inverts this:
+
+- The `-L` TCP listener binds **immediately**, before any tunnel attempt.
+- The QUIC tunnel is established **on demand** when the first connection
+  arrives.
+- Subsequent connections within the same session are instant (CONNECTED
+  fast-path).
+- If the tunnel drops (idle-timeout or peer close) the listener stays open
+  and the next connection wakes a fresh dial.
+
+```bash
+buddynet --role=buddy \
+  --server vps.example:51820 --server-key KEY \
+  --join=TOKEN --quic-handshake \
+  -L 127.0.0.1:5432 --forward 10.66.0.2:5432 \
+  --lazy
+```
+
+**When to use it:** backup tools (rsync, kopia), cron jobs, or any client
+that is invoked infrequently and should not have to wait for a persistent
+daemon to reconnect before binding its port.
+
+**Constraints:**
+
+- Requires `-L`. `--lazy` without `-L` is a startup error.
+- The first connection experiences the full tunnel setup latency (~1–2 RTT
+  for hole-punch or relay fallback). The OS TCP receive buffer (≥ 64 KB)
+  holds client data during this WAKING window.
+- `BUDDYNET_LAZY=1` is the equivalent environment variable.
+
+---
+
 ## `--status` probe
 
 A one-shot connectivity check for scripts and monitoring. See the full
