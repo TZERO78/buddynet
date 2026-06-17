@@ -85,6 +85,12 @@ type BuddyConfig struct {
 	// Requires CAP_NET_BIND_SERVICE or root; fails gracefully with a WARNING
 	// if the bind is not permitted.
 	DNS bool
+
+	// Lazy defers tunnel establishment until the first -L connection arrives.
+	// The -L listener binds immediately (so connect() never returns ECONNREFUSED),
+	// but the QUIC tunnel is only dialled when a client actually connects.
+	// Requires LocalListen to be set.
+	Lazy bool
 }
 
 // attempt is the per-connection plan: which rendezvous token to register with,
@@ -178,9 +184,33 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		return buddyProbe(ctx, cfg, serverPub, trust, myID, myPub, myVIP, priv)
 	}
 
+	// --lazy: bind the -L listener immediately so clients never see ECONNREFUSED,
+	// but defer the QUIC tunnel until the first connection actually arrives.
+	var lt *lazyTunnel
+	var lazyCount atomic.Int64
+	if cfg.Lazy && cfg.LocalListen != "" {
+		ln, lerr := listenLocal(cfg.LocalListen)
+		if lerr != nil {
+			return fmt.Errorf("lazy -L %s: %w", cfg.LocalListen, lerr)
+		}
+		go func() { <-ctx.Done(); ln.Close() }()
+		log.Printf("lazy -L: listening on %s (tunnel starts on first connection)", cfg.LocalListen)
+		lt = newLazyTunnel()
+		go lazyForward(ctx, ln, lt, &lazyCount)
+	}
+
 	inviteStart := time.Now()
 	backoff := reconnectBase
 	for {
+		// In lazy mode, sleep until a local connection needs a tunnel.
+		if lt != nil {
+			select {
+			case <-lt.wake:
+			case <-ctx.Done():
+				return nil
+			}
+		}
+
 		// Prefer a stored session (reconnect): use its secret as the rendezvous
 		// token and pin the partner key it recorded. Otherwise pair with the
 		// invite/legacy token; an ephemeral invite stores a session on success.
@@ -194,7 +224,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		}
 
 		runStart := time.Now()
-		if err := buddyRun(ctx, cfg, att, serverPub, trust, reg, myID, myPub, myVIP, priv); err != nil && ctx.Err() == nil {
+		if err := buddyRun(ctx, cfg, att, serverPub, trust, reg, myID, myPub, myVIP, priv, lt); err != nil && ctx.Err() == nil {
 			// An unconfirmed SAS (mismatch or timeout) is a deliberate "do not
 			// trust" — retrying would just re-prompt forever, so stop instead of
 			// reconnecting.
@@ -265,8 +295,19 @@ func nextAttempt(cfg BuddyConfig) (attempt, error) {
 }
 
 // buddyRun does one full attempt: register, walk the fallback chain to a
-// session, then forward until the tunnel drops.
-func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed25519.PublicKey, trust *trustPolicy, reg *peer.Registry, myID, myPub, myVIP string, priv ed25519.PrivateKey) error {
+// session, then forward until the tunnel drops. lt is non-nil in --lazy mode.
+func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed25519.PublicKey, trust *trustPolicy, reg *peer.Registry, myID, myPub, myVIP string, priv ed25519.PrivateKey, lt *lazyTunnel) (retErr error) {
+	// In lazy mode: if we return an error before setSession is reached,
+	// unblock any waiting -L connections with the error and reset to SLEEPING.
+	if lt != nil {
+		defer func() {
+			if retErr != nil {
+				lt.setFailed(retErr)
+				lt.markIdle()
+			}
+		}()
+	}
+
 	// One dual-stack UDP socket does everything (register, punch, relay-bind,
 	// QUIC); reusing it preserves the NAT mapping the server observed.
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
@@ -426,7 +467,27 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed255
 	}
 
 	connectedAt := time.Now()
-	streams, ferr := forward(ctx, sess, cfg.LocalListen, cfg.Forward)
+	var streams int64
+	var ferr error
+
+	if lt != nil {
+		// Lazy path: signal waiting -L connections that the tunnel is ready, then
+		// run the --forward side (if set) until the session ends. lazyForward()
+		// already handles the -L side in its own goroutine.
+		lt.setSession(sess)
+		if cfg.Forward != "" {
+			var fwdCount atomic.Int64
+			serveStreams(ctx, sess, cfg.Forward, &fwdCount)
+			streams = fwdCount.Load()
+		} else {
+			<-sess.Done()
+		}
+		lt.markIdle()
+	} else {
+		// Non-lazy path: unchanged.
+		streams, ferr = forward(ctx, sess, cfg.LocalListen, cfg.Forward)
+	}
+
 	reason := "peer-closed-or-idle"
 	switch {
 	case ctx.Err() != nil:
