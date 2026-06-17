@@ -21,18 +21,27 @@ all three roles; in a buddy the relay and handshake code sit dormant as fallback
 
 ## Quickstart (BuddyPeer: two sites, one VPS)
 
-**1 — On the VPS,** run the bootstrap server and grab the key to pin:
+**1 — On the VPS,** run the bootstrap server with `--quic-handshake` and grab
+the key to pin:
 
 ```bash
-buddynet --role=handshake --key /var/lib/buddynet/id.key
+buddynet --role=handshake,relay \
+    --key /var/lib/buddynet/id.key \
+    --relay-endpoint vps.example:51821 \
+    --quic-handshake
 buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
 ```
+
+> **Always use `--quic-handshake`.** Without it the pairing token travels in
+> cleartext over the public internet. Set it identically on the server and on
+> every buddy. See [docs/OPERATIONS.md](docs/OPERATIONS.md#quic-control-plane---quic-handshake).
 
 **2 — Inviter** (e.g. the machine being backed up *to*, running an rsync daemon):
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --invite -forward 127.0.0.1:873
+    --quic-handshake \
+    --invite --forward 127.0.0.1:873
 # prints a one-time TOKEN, then waits for your buddy to join
 ```
 
@@ -40,6 +49,7 @@ buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+    --quic-handshake \
     --join=TOKEN -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
@@ -56,10 +66,11 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
 - **Signed matchmaking.** The handshake server learns peers' public endpoints,
   pairs two that share a token, and hands back a **signed** `PEER_LIST`. No
   tunnel data ever flows through it.
-- **Spoof-proof bootstrap.** The server validates a source address *before* it
-  answers — a small UDP cookie by default, or QUIC's own address validation with
-  `--quic-handshake` — so it is never a reflector and never does work for a forged
-  sender.
+- **Encrypted control plane.** Use `--quic-handshake` (server + every buddy) to
+  run matchmaking over QUIC/TLS 1.3 — the pairing token stays encrypted in
+  transit. Plain UDP is available for constrained environments but sends the token
+  in cleartext. QUIC also validates source addresses structurally (no extra
+  round-trip), so the server is never a reflector.
 - **Fallback chain.** Direct P2P → known relay → handshake-as-relay → cached
   peer (works even if the server is offline).
 - **Blind relay.** Buddies run their own QUIC/TLS end to end; a relay only
@@ -70,6 +81,19 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
 
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
+
+## Documentation
+
+| Doc | What it covers |
+|-----|---------------|
+| [docs/BUDDYPEER.md](docs/BUDDYPEER.md) | The two-peer use case end to end |
+| [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
+| [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
+| [docs/MAGICDNS.md](docs/MAGICDNS.md) | `.buddy` names and the stub resolver |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | QUIC, IP allowlists, relay setup, log schema |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and package map |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | Wire format and message types |
+| [SECURITY.md](SECURITY.md) | Threat model and trust hierarchy |
 
 ## Security
 
@@ -86,10 +110,10 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   file or `BUDDYNET_TOKEN`).
 - Optional allowlist (approval mode) on the handshake server, with sealed
   enrollment codes so a code can't be read off the wire.
-- The bootstrap server is hardened against abuse: source-address validation
-  (cookie or QUIC), global + per-source rate limits, bounded in-memory state, and
-  replay rejection in approval mode. Pick the transport with `--quic-handshake`
-  (set it the same on the server and every buddy).
+- The bootstrap server is hardened against abuse: source-address validation,
+  global + per-source rate limits, bounded in-memory state, and replay rejection
+  in approval mode. `--quic-handshake` (recommended default) encrypts the control
+  plane and validates source addresses without a cookie round-trip.
 - Restrict **who** can reach a server role with `--allow-cidr` (comma-separated
   CIDRs; relay **and** handshake). Disallowed sources are dropped before any
   crypto, so a private relay/handshake needs no separate firewall.
