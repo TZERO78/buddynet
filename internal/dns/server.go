@@ -30,6 +30,14 @@ func Run(ctx context.Context, reg *peer.Registry, selfName string, selfIP netip.
 	mux.HandleFunc("buddy.", func(w dns.ResponseWriter, r *dns.Msg) {
 		handleBuddy(w, r, reg, selfName, selfIP)
 	})
+	// Non-.buddy queries: return NXDOMAIN (this resolver is not authoritative
+	// for any other TLD; the default ServeMux behaviour is REFUSED, which is
+	// misleading for a stub that simply doesn't know about other namespaces).
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeNameError)
+		w.WriteMsg(m)
+	})
 
 	udpSrv := &dns.Server{Addr: stubAddr, Net: "udp", Handler: mux}
 	tcpSrv := &dns.Server{Addr: stubAddr, Net: "tcp", Handler: mux}
