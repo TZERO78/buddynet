@@ -1,0 +1,5 @@
+# Lab image for the MagicDNS test pair — extends the base lab image with
+# bind-tools (dig) so test-dns.sh can query the .buddy stub resolver.
+# NOT for production use.
+FROM buddynet-lab-buddy
+RUN apk add --no-cache bind-tools

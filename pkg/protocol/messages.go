@@ -71,6 +71,7 @@ type Peer struct {
 	ID         string      `json:"id"`
 	PubKey     string      `json:"pubkey"`               // base64 Ed25519 identity
 	VirtualIP  string      `json:"virtual_ip"`           // 10.66.0.X
+	Name       string      `json:"name,omitempty"`       // self-asserted .buddy name, TOFU-pinned
 	Candidates []Candidate `json:"candidates,omitempty"` // observed endpoints
 	Relay      string      `json:"relay,omitempty"`      // relay endpoint, if any
 	LastSeen   int64       `json:"last_seen,omitempty"`  // unix seconds
@@ -89,6 +90,7 @@ type Message struct {
 	ID        string `json:"id,omitempty"`         // ephemeral per-run id
 	PubKey    string `json:"pubkey,omitempty"`     // base64 Ed25519 identity
 	VirtualIP string `json:"virtual_ip,omitempty"` // sender's 10.66.0.X
+	Name      string `json:"name,omitempty"`       // self-asserted .buddy name (optional)
 
 	// Key-ownership proof for an allowlist (approval-mode) handshake server: the
 	// peer signs RegistrationPayload(token,id,pubkey,ts) with its private key.
