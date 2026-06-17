@@ -1,8 +1,11 @@
 package crypto
 
 import (
+	"bytes"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +63,28 @@ func TestLoadOrCreateKeyPersists(t *testing.T) {
 	b, _, _ := LoadOrCreateKey("")
 	if a.Equal(b) {
 		t.Fatal("ephemeral keys should not be identical")
+	}
+}
+
+// LoadOrCreateKey must emit a WARNING when the key file's permissions are wider
+// than 0600, so operators notice accidental chmod mistakes before they matter.
+func TestLoadKeyWarnsInsecurePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "id.key")
+	if _, _, err := LoadOrCreateKey(path); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	if _, _, err := LoadOrCreateKey(path); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !strings.Contains(buf.String(), "WARNING") {
+		t.Fatal("expected WARNING log about insecure key file permissions")
 	}
 }

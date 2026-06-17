@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"fmt"
+	"log"
 	"net/netip"
 	"os"
 	"strings"
@@ -84,6 +85,9 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 	data, rerr := os.ReadFile(path)
 	switch {
 	case rerr == nil:
+		if info, serr := os.Stat(path); serr == nil && info.Mode().Perm() != 0o600 {
+			log.Printf("WARNING: key file %s has permissions %v, expected 0600", path, info.Mode().Perm())
+		}
 		// Tolerate a trailing newline/whitespace so a key written with `echo` or an
 		// editor still loads (StdEncoding would otherwise reject the newline and the
 		// node could silently regenerate a fresh identity, changing its address).
