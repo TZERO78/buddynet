@@ -375,8 +375,8 @@ func TestIntegrationPairingOverQUIC(t *testing.T) {
 		}
 		defer c.Close()
 		cfg := BuddyConfig{QUIC: true}
-		p, err := buddyRegisterQUIC(c, []*net.UDPAddr{srvAddr}, cfg, "tok",
-			randomID(), bcrypto.PubKeyB64(pub), bcrypto.VirtualIPString(pub), priv, srvPub, 15*time.Second)
+		nd := &node{id: randomID(), pub: bcrypto.PubKeyB64(pub), vip: bcrypto.VirtualIPString(pub), priv: priv, serverPub: srvPub}
+		p, err := buddyRegisterQUIC(c, []*net.UDPAddr{srvAddr}, cfg, nd, "tok", 15*time.Second)
 		out <- result{peer: p, err: err}
 	}
 
