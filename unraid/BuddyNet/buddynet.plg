@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.06.15.1">
+<!ENTITY version   "2026.06.19">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -24,6 +24,16 @@ a small handshake server, hole-punches through NAT (no port forwarding), and
 falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. BuddyPeer (two buddies) is the v1 milestone.
+
+###2026.06.19
+- Surfaced **MagicDNS** and the **Lazy tunnel** on the settings page:
+  - **MagicDNS name** (`--name`) — reachable as `&lt;name&gt;.buddy`.
+  - **MagicDNS resolver** (`--dns`) — answer `*.buddy` on `127.0.0.153:53`
+    (runs as root here, so the privileged bind succeeds).
+  - **Lazy tunnel** (`--lazy`) — defer the encrypted tunnel until the first `-L`
+    connection arrives; ignored (with a log warning) when no `-L` is set.
+- MAINTAINER: bump `BINVER`/`BINSHA` to the **v2.0.0** release (the first build
+  carrying these features and the `/16` virtual-IP change) before publishing.
 
 ###2026.06.15.1
 - Pinned to buddynet **v1.2.1** — completes the structured log schema: a
@@ -159,6 +169,21 @@ Expose local port (-L) — to push backups TO your buddy:
 Forward to local service (-forward) — to receive backups FROM your buddy:
 : <input type="text" name="FORWARD" value="<?=v($cfg,'FORWARD')?>" placeholder="127.0.0.1:873 (leave empty to disable)">
 
+MagicDNS name (--name) — reachable as &lt;name&gt;.buddy:
+: <input type="text" name="NAME" value="<?=v($cfg,'NAME')?>" placeholder="alice (letters/digits/hyphens, max 63 — leave empty to disable)">
+
+MagicDNS resolver (--dns) — answer *.buddy on 127.0.0.153:53:
+: <select name="DNS">
+  <option value="disable" <?=v($cfg,'DNS')=='disable'?'selected':''?>>Disabled</option>
+  <option value="enable"  <?=v($cfg,'DNS')=='enable'?'selected':''?>>Enabled</option>
+  </select>
+
+Lazy tunnel (--lazy) — defer the tunnel until the first -L connection (needs -L):
+: <select name="LAZY">
+  <option value="disable" <?=v($cfg,'LAZY')=='disable'?'selected':''?>>Disabled</option>
+  <option value="enable"  <?=v($cfg,'LAZY')=='enable'?'selected':''?>>Enabled</option>
+  </select>
+
 &nbsp;
 : <input type="submit" value="Apply">
 
@@ -167,6 +192,15 @@ Forward to local service (-forward) — to receive backups FROM your buddy:
 Set **both** addresses for back-and-forth backup over one tunnel: -L lets you
 rsync to your buddy (`rsync://localhost:9000/...`), -forward lets your buddy
 reach your local rsync daemon on :873. At least one is required.
+
+**MagicDNS** lets you reach your buddy by a name instead of a virtual IP. Set a
+**name** (e.g. `alice` → your buddy reaches you as `alice.buddy`) and/or enable
+the **resolver** so this host answers `*.buddy` queries on `127.0.0.153:53`. To
+use the names on the Unraid host itself, route the `.buddy` TLD to that resolver
+(see the project [MAGICDNS.md](https://github.com/TZERO78/buddynet/blob/main/docs/MAGICDNS.md)).
+**Lazy tunnel** keeps the -L listener open but defers the encrypted tunnel until
+the first connection actually arrives (needs -L set) — handy when a backup tool
+connects only occasionally.
 
 This node runs the **buddy** role. Its identity key, trust store and peer cache
 live on the array under `/mnt/user/appdata/buddynet/`. Because Unraid runs the
@@ -266,6 +300,7 @@ trim() { local s="$*"; s="${s#"${s%%[![:space:]]*}"}"; s="${s%"${s##*[![:space:]
 SERVER="$(trim "${SERVER:-}")"; SERVER_KEY="$(trim "${SERVER_KEY:-}")"; TOKEN="$(trim "${TOKEN:-}")"
 TOKEN_FILE="$(trim "${TOKEN_FILE:-}")"; PEER_KEY="$(trim "${PEER_KEY:-}")"
 LISTEN="$(trim "${LISTEN:-}")"; FORWARD="$(trim "${FORWARD:-}")"
+NAME="$(trim "${NAME:-}")"; DNS="$(trim "${DNS:-}")"; LAZY="$(trim "${LAZY:-}")"
 
 is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
@@ -287,6 +322,18 @@ start() {
   fi
   [ -n "$LISTEN" ]  && args+=(-L "$LISTEN")
   [ -n "$FORWARD" ] && args+=(-forward "$FORWARD")
+  # MagicDNS: self-asserted .buddy name and/or the stub resolver (root here, so
+  # the privileged 127.0.0.153:53 bind succeeds).
+  [ -n "$NAME" ] && args+=(--name "$NAME")
+  [ "$DNS" = "enable" ] && args+=(--dns)
+  # Lazy needs -L (there is no listener to hold open without it); skip + warn.
+  if [ "$LAZY" = "enable" ]; then
+    if [ -n "$LISTEN" ]; then
+      args+=(--lazy)
+    else
+      echo "WARNING: Lazy tunnel is enabled but no -L (Expose local port) is set — ignoring --lazy." >>"$LOG"
+    fi
+  fi
   # Prefer the token from a file on the array (real 0600 perms) over the flash
   # cfg value; /boot is FAT and cannot enforce permissions. Only override when the
   # file is non-empty and readable (an empty file must not blank out the token).
