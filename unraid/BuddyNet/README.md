@@ -31,6 +31,13 @@ The install verifies the downloaded `buddynet` binary against a pinned SHA256.
 - **Bidirectional over one tunnel:** `-L` pushes backups *to* your buddy,
   `-forward` lets your buddy reach a local service (e.g. an rsync daemon on
   `:873`). Set at least one.
+- **MagicDNS:** give this node a `--name` (so your buddy reaches it as
+  `<name>.buddy`) and/or enable the `--dns` resolver, which answers `*.buddy`
+  queries on `127.0.0.153:53`. To use the names on the Unraid host, route the
+  `.buddy` TLD to that resolver (see
+  [MAGICDNS.md](../../docs/MAGICDNS.md)).
+- **Lazy tunnel:** with `--lazy` the `-L` listener binds immediately but the
+  encrypted tunnel is only dialled on the first incoming connection (needs `-L`).
 - **Live status** and a **Dashboard tile** with a buddy online/offline
   traffic-light, plus per-direction transfer/throughput.
 - **Secrets off the FAT flash:** the token file, identity key, trust store and
