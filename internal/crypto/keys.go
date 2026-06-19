@@ -19,28 +19,30 @@ import (
 
 // VirtualSubnet is the BuddyNet overlay range. Addresses are assigned
 // deterministically from a node's public key, never by a server.
-const VirtualSubnet = "10.66.0.0/24"
+const VirtualSubnet = "10.66.0.0/16"
 
 // VirtualIP derives a node's overlay address from its public key:
 //
-//	10.66.0.X   where X = SHA-256(pubkey)[0]
+//	10.66.X.Y   where X = SHA-256(pubkey)[0], Y = SHA-256(pubkey)[1]
 //
 // It is deterministic (same key always yields the same IP) and needs no
-// coordination. The host octet is clamped to the usable 1..254 range so we
-// never hand out the network (.0) or broadcast (.255) address; this folds two
-// of the 256 hash values onto .1/.254, an acceptable, rare extra collision in a
-// /24 that is already collision-prone by design (256 hosts, birthday bound
-// ~20). Operators who outgrow a /24 widen the host part in v2.
+// coordination. Two of the 65536 host values are reserved — the all-zeros
+// network address (10.66.0.0) and the all-ones broadcast (10.66.255.255) — and
+// folded onto 10.66.0.1 / 10.66.255.254 respectively, a rare extra collision.
+// Drawing 16 bits instead of 8 widens the space from 254 to ~65534 usable
+// addresses, lifting the birthday bound from ~20 to ~300 nodes at 1% collision
+// probability — enough headroom for multi-buddy deployments. Operators who
+// outgrow a /16 widen the host part further in a later protocol version.
 func VirtualIP(pub ed25519.PublicKey) netip.Addr {
 	sum := sha256.Sum256(pub)
-	host := sum[0]
-	switch host {
-	case 0:
-		host = 1
-	case 255:
-		host = 254
+	hi, lo := sum[0], sum[1]
+	switch {
+	case hi == 0 && lo == 0:
+		lo = 1
+	case hi == 255 && lo == 255:
+		lo = 254
 	}
-	return netip.AddrFrom4([4]byte{10, 66, 0, host})
+	return netip.AddrFrom4([4]byte{10, 66, hi, lo})
 }
 
 // VirtualIPString is VirtualIP rendered as a string, the form carried on the

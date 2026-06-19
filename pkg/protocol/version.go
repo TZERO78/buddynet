@@ -13,7 +13,7 @@ package protocol
 // v2, we speak v1 — update buddynet") instead of failing as an opaque signature
 // error. Bump it on ANY breaking change to the message format or to the bytes
 // covered by a signature.
-const Version = 4
+const Version = 5
 
 // MaxFieldLen bounds untrusted string fields (token, id, pubkey, virtual IP)
 // before they are used as map keys on a server that takes raw internet input.

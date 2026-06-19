@@ -13,7 +13,7 @@ import "context"
 //   - run a userspace WireGuard device (golang.zx2c4.com/wireguard) keyed by the
 //     two nodes' X25519 keys derived from their Ed25519 identities (see the
 //     ed25519->x25519 mapping in package crypto),
-//   - assign each end its deterministic 10.66.0.X virtual IP, and
+//   - assign each end its deterministic 10.66.X.Y virtual IP, and
 //   - expose the resulting tun as Streams (or carry a small mux over the tunnel)
 //     so the layers above are unchanged.
 type WireGuardTransport struct{}

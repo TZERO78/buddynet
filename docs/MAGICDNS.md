@@ -22,7 +22,7 @@ buddynet --role=buddy \
   --name bob --dns
 
 # From B, once paired:
-ping alice.buddy                 # resolves to alice's virtual IP (10.66.0.X)
+ping alice.buddy                 # resolves to alice's virtual IP (10.66.X.Y)
 dig @127.0.0.153 alice.buddy    # direct query to the stub resolver
 ```
 

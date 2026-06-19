@@ -23,17 +23,20 @@ func TestVirtualIPDeterministic(t *testing.T) {
 
 func TestVirtualIPInSubnet(t *testing.T) {
 	prefix := netip.MustParsePrefix(VirtualSubnet)
-	// Many random keys must all land inside 10.66.0.0/24 and never on the
-	// network (.0) or broadcast (.255) host.
+	// Many random keys must all land inside 10.66.0.0/16 and never on the
+	// reserved network (10.66.0.0) or broadcast (10.66.255.255) host.
 	for i := 0; i < 1000; i++ {
 		pub, _, _ := ed25519.GenerateKey(nil)
 		ip := VirtualIP(pub)
 		if !prefix.Contains(ip) {
 			t.Fatalf("%v not in %v", ip, prefix)
 		}
-		last := ip.As4()[3]
-		if last == 0 || last == 255 {
-			t.Fatalf("host octet %d is reserved (%v)", last, ip)
+		b := ip.As4()
+		if b[2] == 0 && b[3] == 0 {
+			t.Fatalf("network address is reserved (%v)", ip)
+		}
+		if b[2] == 255 && b[3] == 255 {
+			t.Fatalf("broadcast address is reserved (%v)", ip)
 		}
 	}
 }
