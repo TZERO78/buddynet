@@ -53,14 +53,14 @@ func Run(ctx context.Context, reg *peer.Registry, selfName string, selfIP netip.
 	case err := <-udpErr:
 		_ = tcpSrv.Shutdown()
 		if isPermissionError(err) {
-			log.Printf("WARNING: MagicDNS disabled — cannot bind %s (need CAP_NET_BIND_SERVICE or root): %v", stubAddr, err)
+			log.Printf("WARNING: BuddyDNS disabled — cannot bind %s (need CAP_NET_BIND_SERVICE or root): %v", stubAddr, err)
 			return nil
 		}
 		return err
 	case err := <-tcpErr:
 		_ = udpSrv.Shutdown()
 		if isPermissionError(err) {
-			log.Printf("WARNING: MagicDNS disabled — cannot bind %s (need CAP_NET_BIND_SERVICE or root): %v", stubAddr, err)
+			log.Printf("WARNING: BuddyDNS disabled — cannot bind %s (need CAP_NET_BIND_SERVICE or root): %v", stubAddr, err)
 			return nil
 		}
 		return err

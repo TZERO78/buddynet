@@ -92,7 +92,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 | [docs/BUDDYPEER.md](docs/BUDDYPEER.md) | The two-peer use case end to end |
 | [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
 | [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
-| [docs/MAGICDNS.md](docs/MAGICDNS.md) | `.buddy` names and the stub resolver |
+| [docs/BUDDYDNS.md](docs/BUDDYDNS.md) | `.buddy` names and the stub resolver |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | QUIC, IP allowlists, relay setup, lazy tunnel, log schema |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and package map |
 | [docs/PROTOCOL.md](docs/PROTOCOL.md) | Wire format and message types |

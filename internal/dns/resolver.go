@@ -1,4 +1,4 @@
-// Package dns is BuddyNet's MagicDNS resolver for the .buddy TLD.
+// Package dns is BuddyNet's BuddyDNS resolver for the .buddy TLD.
 //
 // Peers that set --name announce a self-asserted label. The handshake server
 // relays it verbatim; the receiving buddy TOFU-pins it in the peer registry.
