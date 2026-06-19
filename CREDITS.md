@@ -23,7 +23,7 @@ everyone who built and maintains these projects.
   key to encrypt enrollment codes (no second key to distribute). Thank you,
   Filippo Valsorda.
 - **[miekg/dns](https://github.com/miekg/dns)** — the Go DNS library powering
-  MagicDNS: wire-format encoding/decoding, the `ServeMux`, and the UDP+TCP
+  BuddyDNS: wire-format encoding/decoding, the `ServeMux`, and the UDP+TCP
   server behind the `.buddy` stub resolver. The first external runtime dependency
   BuddyNet took on. Thank you, Miek Gieben and contributors.
 

@@ -188,7 +188,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		myVIPAddr := bcrypto.VirtualIP(priv.Public().(ed25519.PublicKey))
 		go func() {
 			if err := buddydns.Run(ctx, reg, cfg.Name, myVIPAddr); err != nil {
-				log.Printf("WARNING: MagicDNS server error: %v", err)
+				log.Printf("WARNING: BuddyDNS server error: %v", err)
 			}
 		}()
 		buddydns.RegisterSystem(ctx)

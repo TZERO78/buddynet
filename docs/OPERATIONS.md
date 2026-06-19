@@ -182,7 +182,7 @@ WARNING: on plain UDP the REGISTER … travels in CLEARTEXT — use --quic-hands
 WARNING: key file PATH has permissions MODE, expected 0600
 WARNING: generated a NEW identity at PATH — buddies must pin the new key
 NOTE: --reauth-interval is 0 (off): a server-side revocation will NOT tear down a direct tunnel
-NOTE: MagicDNS: could not register .buddy with systemd-resolved (…)
+NOTE: BuddyDNS: could not register .buddy with systemd-resolved (…)
 NOTE: server roster is signed but N out of date — check NTP/time-sync
 ```
 

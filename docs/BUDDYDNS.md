@@ -1,6 +1,6 @@
-# MagicDNS — .buddy Names
+# BuddyDNS — .buddy Names
 
-BuddyNet's MagicDNS lets you reach peers by name instead of virtual IP.
+BuddyNet's BuddyDNS lets you reach peers by name instead of virtual IP.
 Add `--name alice` to your buddy and `ping alice.buddy` works from any peer
 that runs `--dns`.
 

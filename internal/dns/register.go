@@ -15,15 +15,15 @@ import (
 // On ctx cancel the routing is removed (best-effort cleanup).
 func RegisterSystem(ctx context.Context) {
 	if err := resolvectlAdd(); err != nil {
-		log.Printf("NOTE: MagicDNS: could not register .buddy with systemd-resolved (%v); "+
+		log.Printf("NOTE: BuddyDNS: could not register .buddy with systemd-resolved (%v); "+
 			"add 'nameserver 127.0.0.153' to /etc/resolv.conf or point your resolver at it manually", err)
 		return
 	}
-	log.Printf("MagicDNS: .buddy domain routed to %s via resolvectl", stubAddr)
+	log.Printf("BuddyDNS: .buddy domain routed to %s via resolvectl", stubAddr)
 	go func() {
 		<-ctx.Done()
 		if err := resolvectlRemove(); err != nil {
-			log.Printf("NOTE: MagicDNS cleanup: resolvectl revert failed: %v", err)
+			log.Printf("NOTE: BuddyDNS cleanup: resolvectl revert failed: %v", err)
 		}
 	}()
 }

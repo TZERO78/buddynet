@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.06.19.1">
+<!ENTITY version   "2026.06.19.2">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,8 +25,12 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. BuddyPeer (two buddies) is the v1 milestone.
 
+###2026.06.19.2
+- Renamed the `.buddy` name-resolution feature to **BuddyDNS** (settings-page
+  labels + docs only; no functional change, same `--name`/`--dns` flags).
+
 ###2026.06.19.1
-- Pinned to buddynet **v2.0.0** (first release carrying MagicDNS/Lazy *and* the
+- Pinned to buddynet **v2.0.0** (first release carrying BuddyDNS/Lazy *and* the
   `/16` virtual-IP change). Checksum gate set to the v2.0.0 `buddynet-linux-amd64`
   sha256.
   - **BREAKING:** v2.0.0 widens the virtual IP to `10.66.X.Y` (a `/16`), so every
@@ -34,9 +38,9 @@ either direction over one tunnel. BuddyPeer (two buddies) is the v1 milestone.
     the update.
 
 ###2026.06.19
-- Surfaced **MagicDNS** and the **Lazy tunnel** on the settings page:
-  - **MagicDNS name** (`--name`) — reachable as `&lt;name&gt;.buddy`.
-  - **MagicDNS resolver** (`--dns`) — answer `*.buddy` on `127.0.0.153:53`
+- Surfaced **BuddyDNS** and the **Lazy tunnel** on the settings page:
+  - **BuddyDNS name** (`--name`) — reachable as `&lt;name&gt;.buddy`.
+  - **BuddyDNS resolver** (`--dns`) — answer `*.buddy` on `127.0.0.153:53`
     (runs as root here, so the privileged bind succeeds).
   - **Lazy tunnel** (`--lazy`) — defer the encrypted tunnel until the first `-L`
     connection arrives; ignored (with a log warning) when no `-L` is set.
@@ -177,10 +181,10 @@ Expose local port (-L) — to push backups TO your buddy:
 Forward to local service (-forward) — to receive backups FROM your buddy:
 : <input type="text" name="FORWARD" value="<?=v($cfg,'FORWARD')?>" placeholder="127.0.0.1:873 (leave empty to disable)">
 
-MagicDNS name (--name) — reachable as &lt;name&gt;.buddy:
+BuddyDNS name (--name) — reachable as &lt;name&gt;.buddy:
 : <input type="text" name="NAME" value="<?=v($cfg,'NAME')?>" placeholder="alice (letters/digits/hyphens, max 63 — leave empty to disable)">
 
-MagicDNS resolver (--dns) — answer *.buddy on 127.0.0.153:53:
+BuddyDNS resolver (--dns) — answer *.buddy on 127.0.0.153:53:
 : <select name="DNS">
   <option value="disable" <?=v($cfg,'DNS')=='disable'?'selected':''?>>Disabled</option>
   <option value="enable"  <?=v($cfg,'DNS')=='enable'?'selected':''?>>Enabled</option>
@@ -201,11 +205,11 @@ Set **both** addresses for back-and-forth backup over one tunnel: -L lets you
 rsync to your buddy (`rsync://localhost:9000/...`), -forward lets your buddy
 reach your local rsync daemon on :873. At least one is required.
 
-**MagicDNS** lets you reach your buddy by a name instead of a virtual IP. Set a
+**BuddyDNS** lets you reach your buddy by a name instead of a virtual IP. Set a
 **name** (e.g. `alice` → your buddy reaches you as `alice.buddy`) and/or enable
 the **resolver** so this host answers `*.buddy` queries on `127.0.0.153:53`. To
 use the names on the Unraid host itself, route the `.buddy` TLD to that resolver
-(see the project [MAGICDNS.md](https://github.com/TZERO78/buddynet/blob/main/docs/MAGICDNS.md)).
+(see the project [BUDDYDNS.md](https://github.com/TZERO78/buddynet/blob/main/docs/BUDDYDNS.md)).
 **Lazy tunnel** keeps the -L listener open but defers the encrypted tunnel until
 the first connection actually arrives (needs -L set) — handy when a backup tool
 connects only occasionally.
@@ -330,7 +334,7 @@ start() {
   fi
   [ -n "$LISTEN" ]  && args+=(-L "$LISTEN")
   [ -n "$FORWARD" ] && args+=(-forward "$FORWARD")
-  # MagicDNS: self-asserted .buddy name and/or the stub resolver (root here, so
+  # BuddyDNS: self-asserted .buddy name and/or the stub resolver (root here, so
   # the privileged 127.0.0.153:53 bind succeeds).
   [ -n "$NAME" ] && args+=(--name "$NAME")
   [ "$DNS" = "enable" ] && args+=(--dns)
