@@ -16,13 +16,14 @@ https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet
 
 Then configure under **Tools → BuddyNet**.
 
-The install verifies the downloaded `buddynet` binary against a pinned SHA256.
+The install pins **buddynet v2.0.0** and verifies the downloaded
+`buddynet-linux-amd64` against its published SHA256 — a corrupted or tampered
+download is refused.
 
-> **Not yet installable from a release.** The `.plg` install block still has
-> placeholder `BINVER` / `BINURL` / `BINSHA` values. After the first
-> `buddynet` GitHub release (tag `vX.Y.Z`, which builds `buddynet-linux-amd64`),
-> set those three to the real version, asset URL, and `sha256sum` of the asset.
-> Until then the checksum gate will correctly refuse to install.
+> **Upgrading from a v1.x plugin:** v2.0.0 widens the virtual IP to a `/16`
+> (`10.66.X.Y`), so every node's virtual IP changes. After updating, your buddy
+> must **re-pin** your Buddy key (the identity itself is unchanged; only the
+> derived virtual IP moves).
 
 ## What it does
 
