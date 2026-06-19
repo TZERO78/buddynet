@@ -20,10 +20,11 @@ import (
 // buddyRegister sends REGISTER to every server address ~1/s until a signed
 // PEER_LIST arrives and verifies against the pinned server key, then returns the
 // (single, in 2-peer mode) partner.
-func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, rendezvous, myID, myPub, myVIP string, priv ed25519.PrivateKey, serverPub ed25519.PublicKey, timeout time.Duration) (protocol.Peer, error) {
+func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, nd *node, rendezvous string, timeout time.Duration) (protocol.Peer, error) {
 	if cfg.QUIC {
-		return buddyRegisterQUIC(conn, serverAddrs, cfg, rendezvous, myID, myPub, myVIP, priv, serverPub, timeout)
+		return buddyRegisterQUIC(conn, serverAddrs, cfg, nd, rendezvous, timeout)
 	}
+	myID, myPub, myVIP, priv, serverPub := nd.id, nd.pub, nd.vip, nd.priv, nd.serverPub
 	ts := time.Now().Unix()
 	m := protocol.Message{
 		Type:      protocol.TypeRegister,
@@ -108,7 +109,8 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 // PEER_LIST names the partner. QUIC validates the source address, so no cookie
 // is needed. Closing the control client leaves the socket open, so the caller
 // then hole-punches and runs the peer tunnel on the very same mapping.
-func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, rendezvous, myID, myPub, myVIP string, priv ed25519.PrivateKey, serverPub ed25519.PublicKey, timeout time.Duration) (protocol.Peer, error) {
+func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, nd *node, rendezvous string, timeout time.Duration) (protocol.Peer, error) {
+	myID, myPub, myVIP, priv, serverPub := nd.id, nd.pub, nd.vip, nd.priv, nd.serverPub
 	ts := time.Now().Unix()
 	m := protocol.Message{
 		Type:      protocol.TypeRegister,

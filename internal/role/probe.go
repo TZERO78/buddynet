@@ -2,7 +2,6 @@ package role
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log"
@@ -70,7 +69,8 @@ func logSASFailure(reason error, sess tunnel.Session, used relay.Path, partner p
 // returns nil when online and directly reachable, a *ProbeError carrying a
 // distinct exit code for the offline/unreachable/untrusted cases, or a plain
 // error for a local failure (which main maps to exit 1).
-func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKey, trust *trustPolicy, myID, myPub, myVIP string, priv ed25519.PrivateKey) error {
+func buddyProbe(ctx context.Context, cfg BuddyConfig, nd *node) error {
+	trust, myID := nd.trust, nd.id
 	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
 	if err != nil {
 		return err
@@ -81,7 +81,7 @@ func buddyProbe(ctx context.Context, cfg BuddyConfig, serverPub ed25519.PublicKe
 		return err
 	}
 	log.Print("status: checking whether the buddy is online...")
-	partner, err := buddyRegister(conn, serverAddrs, cfg, cfg.Token, myID, myPub, myVIP, priv, serverPub, 10*time.Second)
+	partner, err := buddyRegister(conn, serverAddrs, cfg, nd, cfg.Token, 10*time.Second)
 	if err != nil {
 		fmt.Println("buddy is OFFLINE (no peer registered with this token)")
 		return &ProbeError{Code: ProbeOffline, Msg: "offline"}

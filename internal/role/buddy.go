@@ -98,6 +98,22 @@ type attempt struct {
 	firstPairing bool              // ephemeral invite: derive & store a session on success
 }
 
+// node bundles everything a buddy needs that exists exactly ONCE per process,
+// independent of which partner it is talking to: its own identity (id/pub/vip/
+// priv), the pinned handshake-server key, the trust policy, and the offline peer
+// cache. It collapses the identity tuple that used to thread through every
+// register/connect/probe call as 5+ separate parameters. Phase 1 (multi-peer)
+// layers per-partner peerSession state on top of a single shared node.
+type node struct {
+	id        string             // ephemeral per-run id
+	pub       string             // our base64 Ed25519 public key
+	vip       string             // our virtual IP string
+	priv      ed25519.PrivateKey // our long-term identity key
+	serverPub ed25519.PublicKey  // pinned handshake-server key
+	trust     *trustPolicy       // partner trust decisions (pin / TOFU / insecure)
+	reg       *peer.Registry     // offline peer cache (peers.json)
+}
+
 // Buddy runs the peer until ctx is cancelled, reconnecting whenever the tunnel
 // drops.
 func Buddy(ctx context.Context, cfg BuddyConfig) error {
@@ -161,6 +177,10 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		return fmt.Errorf("peer cache %s: %w", cfg.PeersPath, err)
 	}
 
+	// The process-wide shared context, passed by value-pointer to every
+	// register/connect/probe call instead of the old identity tuple.
+	nd := &node{id: myID, pub: myPub, vip: myVIP, priv: priv, serverPub: serverPub, trust: trust, reg: reg}
+
 	// Start the .buddy stub resolver once per process lifetime, not per reconnect.
 	// It runs until ctx is cancelled; bind failures are logged as WARNING and the
 	// tunnel continues without DNS.
@@ -175,7 +195,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	}
 
 	if cfg.Status {
-		return buddyProbe(ctx, cfg, serverPub, trust, myID, myPub, myVIP, priv)
+		return buddyProbe(ctx, cfg, nd)
 	}
 
 	// --lazy: bind the -L listener immediately so clients never see ECONNREFUSED,
@@ -218,7 +238,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		}
 
 		runStart := time.Now()
-		if err := buddyRun(ctx, cfg, att, serverPub, trust, reg, myID, myPub, myVIP, priv, lt); err != nil && ctx.Err() == nil {
+		if err := buddyRun(ctx, cfg, att, nd, lt); err != nil && ctx.Err() == nil {
 			// An unconfirmed SAS (mismatch or timeout) is a deliberate "do not
 			// trust" — retrying would just re-prompt forever, so stop instead of
 			// reconnecting.

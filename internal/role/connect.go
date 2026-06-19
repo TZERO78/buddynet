@@ -21,7 +21,9 @@ import (
 
 // buddyRun does one full attempt: register, walk the fallback chain to a
 // session, then forward until the tunnel drops. lt is non-nil in --lazy mode.
-func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed25519.PublicKey, trust *trustPolicy, reg *peer.Registry, myID, myPub, myVIP string, priv ed25519.PrivateKey, lt *lazyTunnel) (retErr error) {
+func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *lazyTunnel) (retErr error) {
+	trust, reg := nd.trust, nd.reg
+	myID, myPub, priv := nd.id, nd.pub, nd.priv
 	// In lazy mode: if we return an error before setSession is reached,
 	// unblock any waiting -L connections with the error and reset to SLEEPING.
 	if lt != nil {
@@ -48,7 +50,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, serverPub ed255
 	serverAddrs, serr := resolveAll(cfg.Server)
 	var partner protocol.Peer
 	if serr == nil {
-		partner, err = buddyRegister(conn, serverAddrs, cfg, att.rendezvous, myID, myPub, myVIP, priv, serverPub, 30*time.Second)
+		partner, err = buddyRegister(conn, serverAddrs, cfg, nd, att.rendezvous, 30*time.Second)
 		if err != nil {
 			return err
 		}
