@@ -62,7 +62,7 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
 ## How it works
 
 - **Identity = address.** Each node has one Ed25519 key; its virtual IP is
-  `10.66.0.X` where `X = SHA-256(pubkey)[0]`. No DHCP, nobody assigns IPs.
+  `10.66.X.Y` where `X,Y = SHA-256(pubkey)[0:2]`. No DHCP, nobody assigns IPs.
 - **Signed matchmaking.** The handshake server learns peers' public endpoints,
   pairs two that share a token, and hands back a **signed** `PEER_LIST`. No
   tunnel data ever flows through it.

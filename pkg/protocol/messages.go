@@ -64,13 +64,13 @@ type Candidate struct {
 }
 
 // Peer is one entry in a PEER_LIST: everything a buddy needs to reach another
-// peer. VirtualIP is the deterministic 10.66.0.X derived from PubKey (see
+// peer. VirtualIP is the deterministic 10.66.X.Y derived from PubKey (see
 // package crypto); Relay, when set, is a relay endpoint to use if the direct
 // path fails.
 type Peer struct {
 	ID         string      `json:"id"`
 	PubKey     string      `json:"pubkey"`               // base64 Ed25519 identity
-	VirtualIP  string      `json:"virtual_ip"`           // 10.66.0.X
+	VirtualIP  string      `json:"virtual_ip"`           // 10.66.X.Y
 	Name       string      `json:"name,omitempty"`       // self-asserted .buddy name, TOFU-pinned
 	Candidates []Candidate `json:"candidates,omitempty"` // observed endpoints
 	Relay      string      `json:"relay,omitempty"`      // relay endpoint, if any
@@ -89,7 +89,7 @@ type Message struct {
 	Role      Role   `json:"role,omitempty"`       // sender's role
 	ID        string `json:"id,omitempty"`         // ephemeral per-run id
 	PubKey    string `json:"pubkey,omitempty"`     // base64 Ed25519 identity
-	VirtualIP string `json:"virtual_ip,omitempty"` // sender's 10.66.0.X
+	VirtualIP string `json:"virtual_ip,omitempty"` // sender's 10.66.X.Y
 	Name      string `json:"name,omitempty"`       // self-asserted .buddy name (optional)
 
 	// Key-ownership proof for an allowlist (approval-mode) handshake server: the

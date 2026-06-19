@@ -16,7 +16,7 @@ three roles; in a buddy the relay and handshake code sit dormant as fallback.
                  ▼                                    ▼
         ┌────────────────┐   direct (hole-punch)  ┌────────────────┐
         │   buddy A      │◀══════════════════════▶│   buddy B      │
-        │ vip 10.66.0.x  │   QUIC / TLS 1.3       │ vip 10.66.0.y  │
+        │ vip 10.66.x.x  │   QUIC / TLS 1.3       │ vip 10.66.y.y  │
         └───────┬────────┘                        └────────┬───────┘
                 │          if direct fails:                │
                 │      ┌────────────────────────┐          │
@@ -53,7 +53,9 @@ The virtual IP is a pure function of the public key — no DHCP, no server assig
 it:
 
 ```
-10.66.0.X   where  X = SHA-256(pubkey)[0]   (clamped to 1..254)
+10.66.X.Y   where  X = SHA-256(pubkey)[0], Y = SHA-256(pubkey)[1]
+            (10.66.0.0 and 10.66.255.255 are folded off the reserved
+             network/broadcast addresses)
 ```
 
 Two nodes that know each other's public key already agree on each other's

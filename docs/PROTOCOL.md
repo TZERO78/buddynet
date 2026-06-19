@@ -33,7 +33,7 @@ candidate and the same NAT mapping is reused for the tunnel.
 | `role` | `buddy` / `relay` |
 | `id` | ephemeral per-run id (dedupes a peer's v4+v6 registrations) |
 | `pubkey` | base64 Ed25519 identity |
-| `virtual_ip` | the sender's `10.66.0.X` |
+| `virtual_ip` | the sender's `10.66.X.Y` |
 | `ts`, `reg_sig` | key-ownership proof for an allowlist server (sign `RegistrationPayload(token,id,pubkey,ts)`) |
 | `code_enc` | optional enrollment code, sealed to the server identity |
 | `cookie` | address-validation token echoed from a prior `COOKIE` reply (UDP transport) |

@@ -73,7 +73,7 @@ or `/128`). Both IPv4 and IPv6 are supported.
 
 `--allow-cidr` applies to both the handshake role and the relay role when they
 run on the same node (combined with `--role=handshake,relay`). Buddies' virtual
-IPs (`10.66.0.0/24`) are loopback-only — they are never the source address on
+IPs (`10.66.0.0/16`) are loopback-only — they are never the source address on
 the server-facing socket, so there is no interaction with the virtual network.
 
 **Combined with approval mode:** `--allow-cidr` runs before `--authorized`.
