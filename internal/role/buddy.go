@@ -10,12 +10,14 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	buddydns "github.com/tzero78/buddynet/internal/dns"
 	"github.com/tzero78/buddynet/internal/peer"
+	"github.com/tzero78/buddynet/internal/vip"
 )
 
 // BuddyConfig configures an ordinary peer (--role=buddy): it finds its partner
@@ -213,6 +215,28 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 
 	if cfg.Status {
 		return buddyProbe(ctx, cfg, nd)
+	}
+
+	// --vip-listen: a previous run killed with SIGKILL leaves its partner VIPs on
+	// lo (the deferred release never ran), and a removed buddy's VIP would linger
+	// too. Reconcile once at startup: drop every 10.66.0.0/16 /32 on lo that is NOT
+	// a VIP we will manage this run (manifest + stored sessions + --peer-key).
+	// serveVIP re-adds the live ones idempotently. (No-op without NET_ADMIN.)
+	if cfg.VIPListen != "" {
+		var keep []netip.Addr
+		if specs, serr := assemblePeers(cfg); serr == nil {
+			for _, s := range specs {
+				keep = append(keep, bcrypto.VirtualIP(s.pin))
+			}
+		}
+		if trust.pinned != nil {
+			keep = append(keep, bcrypto.VirtualIP(trust.pinned))
+		}
+		if removed, rerr := vip.ReconcileStale(keep); rerr != nil {
+			log.Printf("NOTE: VIP reconcile skipped (%v) — stale loopback VIPs from a prior crash, if any, are harmless", rerr)
+		} else if removed > 0 {
+			log.Printf("VIP: action=reconcile removed=%d detail=%q", removed, "stale loopback VIPs from a previous run")
+		}
 	}
 
 	// Multi-peer (--peers-file): supervise one isolated worker per listed buddy

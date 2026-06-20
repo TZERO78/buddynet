@@ -14,3 +14,6 @@ import (
 func Assign(ip netip.Addr) (release func() error, err error) {
 	return nil, fmt.Errorf("vip: loopback VIP binding is not supported on %s", runtime.GOOS)
 }
+
+// ReconcileStale is a no-op off Linux (no VIPs are ever bound there).
+func ReconcileStale(keep []netip.Addr) (removed int, err error) { return 0, nil }
