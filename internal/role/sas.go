@@ -83,17 +83,39 @@ func PromptSAS(sas string, timeout time.Duration) error {
    No answer within %s counts as a mismatch (abort).
 Do they match? [y/N] `, sas, timeout)
 
+	return readSASConfirmation(timeout)
+}
+
+// readSASConfirmation reads one line of confirmation from stdin within timeout.
+// It prefers a read deadline, so the read itself unblocks on timeout and no
+// reader goroutine can outlive the call. On a stdin that does not support
+// deadlines (a regular-file redirect) it falls back to a background reader —
+// there the read returns promptly (data or EOF) anyway, so nothing leaks.
+func readSASConfirmation(timeout time.Duration) error {
+	if err := os.Stdin.SetReadDeadline(time.Now().Add(timeout)); err == nil {
+		defer os.Stdin.SetReadDeadline(time.Time{})
+		line, rerr := bufio.NewReader(os.Stdin).ReadString('\n')
+		if rerr != nil {
+			if errors.Is(rerr, os.ErrDeadlineExceeded) {
+				fmt.Fprintln(os.Stderr, "\n⏰ no answer — aborting (key NOT trusted).")
+				return ErrSASTimeout
+			}
+			return ErrSASRejected
+		}
+		return decideSAS(line)
+	}
+
+	// Fallback path (stdin has no deadline support, e.g. `buddynet ... < file`).
 	type result struct {
 		line string
 		err  error
 	}
 	ch := make(chan result, 1)
-	stdin := os.Stdin // capture once; the reader goroutine may outlive a timeout
+	stdin := os.Stdin
 	go func() {
 		line, err := bufio.NewReader(stdin).ReadString('\n')
 		ch <- result{line, err}
 	}()
-
 	select {
 	case <-time.After(timeout):
 		fmt.Fprintln(os.Stderr, "\n⏰ no answer — aborting (key NOT trusted).")
@@ -102,12 +124,18 @@ Do they match? [y/N] `, sas, timeout)
 		if r.err != nil {
 			return ErrSASRejected
 		}
-		switch strings.ToLower(strings.TrimSpace(r.line)) {
-		case "y", "yes":
-			return nil
-		default:
-			fmt.Fprintln(os.Stderr, "aborted — key NOT trusted.")
-			return ErrSASRejected
-		}
+		return decideSAS(r.line)
+	}
+}
+
+// decideSAS maps a human's answer line to the trust decision: an explicit yes
+// trusts the key, anything else (including blank) refuses it.
+func decideSAS(line string) error {
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return nil
+	default:
+		fmt.Fprintln(os.Stderr, "aborted — key NOT trusted.")
+		return ErrSASRejected
 	}
 }
