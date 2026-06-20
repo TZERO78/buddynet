@@ -167,6 +167,15 @@ CONNECTED:    role=buddy partner=… key=… vip=… via=… remote=…   # tunn
 DISCONNECTED: role=buddy partner=… key=… reason=… duration=… streams=N
 ```
 
+### Server lifecycle — `HANDSHAKE:` / `RELAY:`
+
+```
+HANDSHAKE: action=listening      addr=… transport=udp           # bootstrap server is up
+RELAY:     action=listening      addr=… transport=udp detail=…  # relay is up (blind forwarder)
+RELAY:     action=session-paired a=… b=…                        # two legs matched, relaying
+RELAY:     action=session-closed detail="idle > …"              # relayed session expired
+```
+
 ### Multi-buddy supervisor — `SUPERVISOR:` (`--peers-file`)
 
 ```
