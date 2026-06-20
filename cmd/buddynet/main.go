@@ -587,11 +587,21 @@ MANY BUDDIES (BuddyParty) — one node, several tunnels at once
   Curate the list with the peers subcommands below; one failing buddy never
   affects the others.
 
+NAMES & ON-DEMAND
+
+  --name NAME --dns   Reach buddies by NAME.buddy instead of a virtual IP — a
+                      local stub resolver (BuddyDNS) answers *.buddy from the
+                      live peer list. See docs/BUDDYDNS.md.
+  --lazy              With -L, bind the local listener immediately but defer the
+                      tunnel until the first connection actually arrives (the
+                      tunnel sleeps until something connects).
+
 COMMANDS
   %[1]s gen-token                            mint a strong shared token
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
   %[1]s --peers-file PATH peers list|add|remove   manage your BuddyParty buddies
+  %[1]s --authorized FILE approve|allowclient|list|revoke   server allowlist (approval mode)
   %[1]s version
 
 SECURITY — please read
