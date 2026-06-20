@@ -55,7 +55,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 			return err
 		}
 	} else {
-		log.Printf("handshake server %q unreachable (%v) — falling back to cached peers", cfg.Server, serr)
+		log.Printf("CONNECT: action=server-unreachable server=%q detail=%q", cfg.Server, serr.Error())
 	}
 
 	// Identity checks on the partner the server vouched for.
@@ -87,7 +87,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		_ = reg.Upsert(partner) // cache for offline fallback next time
 		// Partner found and identity-verified — NOT "online" yet (the tunnel is not
 		// up until dialChain succeeds below; that emits CONNECTED).
-		log.Printf("partner verified: id=%s key=%s vip=%s candidates=%d", partner.ID, keyTag(partner.PubKey), partner.VirtualIP, len(partner.Candidates))
+		log.Printf("CONNECT: action=partner-verified id=%s key=%s vip=%s cands=%d", partner.ID, keyTag(partner.PubKey), partner.VirtualIP, len(partner.Candidates))
 	}
 
 	// Assemble the fallback chain. A cached entry is only used when the server
@@ -117,7 +117,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
 			return err
 		}
-		log.Printf("trying cached partner %s vip=%s (server offline)", partner.ID, partner.VirtualIP)
+		log.Printf("CONNECT: action=cached id=%s vip=%s detail=\"server offline\"", partner.ID, partner.VirtualIP)
 	}
 
 	partnerPub, err := bcrypto.DecodePubKey(partner.PubKey)
@@ -175,7 +175,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		if err := saveSession(cfg.KnownPeers, att.inviteToken, partner.PubKey, secret); err != nil {
 			return fmt.Errorf("persist session: %w", err)
 		}
-		log.Printf("session established — invite token retired; reconnects now use the stored session secret in %s", cfg.KnownPeers)
+		log.Printf("CONNECT: action=session-stored store=%s detail=\"invite token retired; reconnects use the stored session secret\"", cfg.KnownPeers)
 	}
 
 	// Optional forced re-auth: after ReauthInterval, close the session so the
@@ -186,7 +186,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 	var reauthFired atomic.Bool
 	if cfg.ReauthInterval > 0 {
 		t := time.AfterFunc(cfg.ReauthInterval, func() {
-			log.Printf("re-auth: tearing down the tunnel after %s to re-check authorization", cfg.ReauthInterval)
+			log.Printf("CONNECT: action=reauth interval=%s detail=\"tearing down the tunnel to re-check authorization\"", cfg.ReauthInterval)
 			reauthFired.Store(true)
 			sess.Close()
 		})
@@ -237,22 +237,22 @@ func dialChain(ctx context.Context, tr *tunnel.QUICTransport, conn *net.UDPConn,
 	for _, p := range chain {
 		endpoint, err := primePath(conn, myID, p, session, punchDur)
 		if err != nil {
-			log.Printf("path %q: %v", p.Desc, err)
+			log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, err.Error())
 			lastErr = err
 			continue
 		}
 		attemptCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		var sess tunnel.Session
 		if listening {
-			log.Printf("path %q: listening for buddy (server role)", p.Desc)
+			log.Printf("CONNECT: action=path-try path=%q role=server", p.Desc)
 			sess, err = tr.Listen(attemptCtx)
 		} else {
-			log.Printf("path %q: dialing buddy at %s (client role)", p.Desc, endpoint)
+			log.Printf("CONNECT: action=path-try path=%q role=client endpoint=%s", p.Desc, endpoint)
 			sess, err = tr.Dial(attemptCtx, endpoint)
 		}
 		cancel()
 		if err != nil {
-			log.Printf("path %q: QUIC failed: %v", p.Desc, err)
+			log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, fmt.Sprintf("QUIC failed: %v", err))
 			lastErr = err
 			continue
 		}
