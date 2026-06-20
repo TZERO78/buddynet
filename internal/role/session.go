@@ -120,6 +120,23 @@ func loadSessions(path string) ([]storedSession, error) {
 	return out, sc.Err()
 }
 
+// loadSessionFor returns the stored rendezvous secret for one specific pinned
+// partner. The multi-peer supervisor reloads it each reconnect round so a re-pair
+// is picked up and a session removed from the store (revocation) ends that one
+// peer's worker. ok is false when no session line pins this key.
+func loadSessionFor(path string, pin ed25519.PublicKey) (secret string, ok bool, err error) {
+	sessions, err := loadSessions(path)
+	if err != nil {
+		return "", false, err
+	}
+	for _, s := range sessions {
+		if s.pin.Equal(pin) {
+			return s.secret, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // loadSession returns the FIRST stored session (back-compat for the single-peer
 // reconnect path). Multi-peer callers use loadSessions. ok is false if there is
 // no session line yet.

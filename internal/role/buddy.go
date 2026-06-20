@@ -198,6 +198,17 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		return buddyProbe(ctx, cfg, nd)
 	}
 
+	// Multi-peer: when more than one buddy is already paired (a stored session
+	// each), supervise one isolated reconnect worker per buddy. -L and --lazy bind
+	// a single local port and have no per-peer routing yet (Phase 1.3 VIP routing),
+	// so the multi-peer data plane is the -forward serve side only; reject -L here.
+	if sessions, serr := loadSessions(cfg.KnownPeers); serr == nil && len(sessions) > 1 {
+		if cfg.LocalListen != "" {
+			return fmt.Errorf("multi-peer (%d buddies) with -L is not supported yet: one -L port cannot route to N buddies (Phase 1.3). Use -forward to serve a local service to all buddies", len(sessions))
+		}
+		return superviseReconnect(ctx, cfg, nd, sessions)
+	}
+
 	// --lazy: bind the -L listener immediately so clients never see ECONNREFUSED,
 	// but defer the QUIC tunnel until the first connection actually arrives.
 	var lt *lazyTunnel
@@ -213,61 +224,10 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		go lazyForward(ctx, ln, lt, &lazyCount)
 	}
 
-	inviteStart := time.Now()
-	backoff := reconnectBase
-	for {
-		// In lazy mode, sleep until a local connection needs a tunnel.
-		if lt != nil {
-			select {
-			case <-lt.wake:
-			case <-ctx.Done():
-				return nil
-			}
-		}
-
-		// Prefer a stored session (reconnect): use its secret as the rendezvous
-		// token and pin the partner key it recorded. Otherwise pair with the
-		// invite/legacy token; an ephemeral invite stores a session on success.
-		att, aerr := nextAttempt(cfg)
-		if aerr != nil {
-			return aerr
-		}
-		// A one-time invite is only valid for a limited window of first pairing.
-		if cfg.Ephemeral && att.firstPairing && time.Since(inviteStart) > cfg.InviteTimeout {
-			return fmt.Errorf("invite token expired after %s without pairing — run --invite again for a fresh one", cfg.InviteTimeout)
-		}
-
-		runStart := time.Now()
-		if err := buddyRun(ctx, cfg, att, nd, lt); err != nil && ctx.Err() == nil {
-			// An unconfirmed SAS (mismatch or timeout) is a deliberate "do not
-			// trust" — retrying would just re-prompt forever, so stop instead of
-			// reconnecting.
-			if errors.Is(err, ErrSASRejected) || errors.Is(err, ErrSASTimeout) {
-				return fmt.Errorf("aborted: %w", err)
-			}
-			log.Printf("tunnel error: %v", err)
-		}
-		if ctx.Err() != nil {
-			return nil
-		}
-		// A run that lasted longer than the cap means a real tunnel was up; reset
-		// the backoff so a single long-lived session always reconnects promptly.
-		// A run that failed fast (server/network flapping) grows the delay, with
-		// jitter, so many buddies don't reconnect in lockstep (thundering herd).
-		if time.Since(runStart) > reconnectMax {
-			backoff = reconnectBase
-		}
-		wait := jitter(backoff)
-		log.Printf("reconnecting in %s...", wait.Round(100*time.Millisecond))
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(wait):
-		}
-		if backoff *= 2; backoff > reconnectMax {
-			backoff = reconnectMax
-		}
-	}
+	// Single-peer / first-pairing path: one reconnect loop. nextAttempt prefers a
+	// stored session (reconnect, pinning the recorded key) and otherwise pairs with
+	// the invite/legacy token; an ephemeral invite stores a session on success.
+	return peerLoop(ctx, cfg, nd, lt, func() (attempt, error) { return nextAttempt(cfg) }, time.Now())
 }
 
 // Reconnect backoff bounds: start at reconnectBase, double up to reconnectMax,
