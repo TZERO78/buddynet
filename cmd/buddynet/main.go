@@ -109,6 +109,12 @@ func main() {
 	if cmd := flag.Arg(0); cmd == "approve" || cmd == "allowclient" || cmd == "list" || cmd == "revoke" {
 		os.Exit(runAuthCmd(*authorized, cmd, flag.Args()[1:]))
 	}
+	// `peers` subcommands let a node curate its OWN buddy manifest (--peers-file,
+	// + --known-peers for revocation) and exit: `peers <list|add|remove> [args]`.
+	// Self-management only — there is no admin authority over other nodes.
+	if flag.Arg(0) == "peers" {
+		os.Exit(runPeersCmd(*peersFile, *knownPeers, flag.Args()[1:]))
+	}
 
 	// Env fallbacks (handy for systemd; keeps the secret token out of argv/ps).
 	*roleFlag = orEnv(*roleFlag, "BUDDYNET_ROLE")
@@ -448,6 +454,44 @@ func printIdentity(keyPath string) {
 		log.Fatalf("identity key: %v", err)
 	}
 	fmt.Println(bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
+}
+
+// runPeersCmd dispatches `peers <list|add|remove>` against the --peers-file
+// manifest (and --known-peers for revocation), then exits.
+func runPeersCmd(peersFile, knownPeers string, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers <list|add|remove> [args]")
+		return 2
+	}
+	var err error
+	switch args[0] {
+	case "list":
+		err = role.PeersList(peersFile, knownPeers)
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers add <peer-pubkey> [bootstrap-token]")
+			return 2
+		}
+		token := ""
+		if len(args) > 2 {
+			token = args[2]
+		}
+		err = role.PeersAdd(peersFile, args[1], token)
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers remove <peer-pubkey>")
+			return 2
+		}
+		err = role.PeersRemove(peersFile, knownPeers, args[1])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown peers subcommand %q (want list|add|remove)\n", args[0])
+		return 2
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
 }
 
 func runAuthCmd(path, cmd string, args []string) int {

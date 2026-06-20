@@ -34,6 +34,9 @@ func loadPeersFile(path string) ([]peerSpec, error) {
 	}
 	f, err := os.Open(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil // absent manifest = no peers (consistent with loadSessions)
+		}
 		return nil, fmt.Errorf("peers-file %s: %w", path, err)
 	}
 	defer f.Close()
