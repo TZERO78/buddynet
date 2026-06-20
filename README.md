@@ -8,7 +8,9 @@ peers through a tiny bootstrap server, and brings up a direct (hole-punched)
 encrypted tunnel — falling back to a blind relay only when a direct path is
 impossible. **[BuddyPeer](docs/BUDDYPEER.md)** — two buddies, one server — is the
 v1 milestone: point `rsync`, `borg`, or `ssh` at a local socket and it travels
-straight to your buddy.
+straight to your buddy. **[BuddyParty](docs/PEERS.md)** scales that to many buddies
+at once — your own **private, self-hosted mini-Tailscale**, where the coordination
+server is a VPS *you* own and never sees your traffic.
 
 ```
 buddynet --role=buddy       # ordinary peer; NAT is fine
@@ -90,7 +92,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 | Doc | What it covers |
 |-----|---------------|
 | [docs/BUDDYPEER.md](docs/BUDDYPEER.md) | The two-peer use case end to end |
-| [docs/PEERS.md](docs/PEERS.md) | Multi-buddy: `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
+| [docs/PEERS.md](docs/PEERS.md) | **BuddyParty** (multi-buddy): `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
 | [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
 | [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
 | [docs/BUDDYDNS.md](docs/BUDDYDNS.md) | `.buddy` names and the stub resolver |
@@ -167,9 +169,11 @@ single `.bundle`.)
 
 ## Status
 
-v1 / BuddyPeer (two peers) is implemented and tested end to end. Multi-peer mesh,
-peer-to-peer gossip, and the WireGuard transport are the v2 roadmap — additive on
-the v1 wire format, virtual IPs, and fallback chain.
+v1 / BuddyPeer (two peers) is implemented and tested end to end. **BuddyParty**
+(many buddies at once — `--peers-file`, per-buddy VIP routing, live reload) is
+built and lab-validated for the v2.1 line. Peer-to-peer gossip and the WireGuard
+transport remain on the v2 roadmap — all additive on the v1 wire format, virtual
+IPs, and fallback chain.
 
 ## License
 

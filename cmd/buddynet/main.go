@@ -70,7 +70,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "buddy: do NOT verify the buddy's identity (unsafe; testing only)")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
-	peersFile := flag.String("peers-file", "", "buddy: multi-buddy manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
+	peersFile := flag.String("peers-file", "", "buddy: BuddyParty manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
 	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
 	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
