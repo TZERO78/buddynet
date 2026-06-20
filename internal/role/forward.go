@@ -5,12 +5,14 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/tzero78/buddynet/internal/tunnel"
+	"github.com/tzero78/buddynet/internal/vip"
 )
 
 // maxConcurrentStreams bounds how many local connections we forward at once, so
@@ -18,10 +20,13 @@ import (
 const maxConcurrentStreams = 256
 
 // forward runs the data plane over an established session: -L opens a stream per
-// local connection; -forward dials a local service for each incoming stream.
-// Both can run at once. It returns the number of streams forwarded (for the
-// session summary the caller logs) when the session ends or ctx is cancelled.
-func forward(ctx context.Context, sess tunnel.Session, localListen, forwardTo string) (streams int64, err error) {
+// local connection; --vip-listen does the same but on the partner's virtual IP
+// bound on lo (per-buddy routing); -forward dials a local service for each
+// incoming stream. Any combination can run at once. It returns the number of
+// streams forwarded (for the session summary the caller logs) when the session
+// ends or ctx is cancelled. vipAddr is the partner's VIP (invalid = no VIP
+// route); vipPort is the port to listen on it.
+func forward(ctx context.Context, sess tunnel.Session, localListen, forwardTo string, vipAddr netip.Addr, vipPort string) (streams int64, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -30,6 +35,10 @@ func forward(ctx context.Context, sess tunnel.Session, localListen, forwardTo st
 	if localListen != "" {
 		wg.Add(1)
 		go func() { defer wg.Done(); serveLocal(ctx, sess, localListen, &count) }()
+	}
+	if vipPort != "" && vipAddr.IsValid() {
+		wg.Add(1)
+		go func() { defer wg.Done(); serveVIP(ctx, sess, vipAddr, vipPort, &count) }()
 	}
 	if forwardTo != "" {
 		wg.Add(1)
@@ -57,8 +66,39 @@ func serveLocal(ctx context.Context, sess tunnel.Session, addr string, count *at
 		return
 	}
 	defer ln.Close()
-	go func() { <-ctx.Done(); ln.Close() }()
 	log.Printf("-L: listening on %s, forwarding to peer", addr)
+	acceptAndForward(ctx, sess, ln, count)
+}
+
+// serveVIP binds the partner's virtual IP on the loopback interface and forwards
+// connections to vipAddr:port over the tunnel — the Phase-1 per-buddy routing
+// path (name.buddy:port → this buddy's tunnel). Adding the address needs
+// NET_ADMIN; when it is missing we log a WARNING and serve nothing, leaving the
+// tunnel itself working (graceful degradation, like the DNS bind). The VIP is
+// removed again when the session ends.
+func serveVIP(ctx context.Context, sess tunnel.Session, vipAddr netip.Addr, port string, count *atomic.Int64) {
+	release, err := vip.Assign(vipAddr)
+	if err != nil {
+		log.Printf("WARNING: --vip-listen disabled for %s — cannot bind it on lo (need NET_ADMIN/root): %v", vipAddr, err)
+		return
+	}
+	defer release()
+
+	addr := net.JoinHostPort(vipAddr.String(), port)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Printf("--vip-listen %s: %v", addr, err)
+		return
+	}
+	defer ln.Close()
+	log.Printf("--vip-listen: listening on %s, forwarding to this buddy's tunnel", addr)
+	acceptAndForward(ctx, sess, ln, count)
+}
+
+// acceptAndForward is the shared -L/--vip-listen accept loop: it opens one tunnel
+// stream per accepted connection and splices them, bounded by maxConcurrentStreams.
+func acceptAndForward(ctx context.Context, sess tunnel.Session, ln net.Listener, count *atomic.Int64) {
+	go func() { <-ctx.Done(); ln.Close() }()
 	sem := make(chan struct{}, maxConcurrentStreams)
 	for {
 		c, err := ln.Accept()

@@ -36,6 +36,14 @@ type BuddyConfig struct {
 	LocalListen string // -L: expose local TCP/unix and forward to the peer
 	Forward     string // -forward: dial this local service for incoming streams
 
+	// VIPListen is the port for per-buddy virtual-IP routing (--vip-listen). When
+	// set, each connected partner's VIP (10.66.X.Y) is bound on lo and a listener
+	// on partnerVIP:VIPListen forwards through THAT buddy's tunnel — so name.buddy
+	// resolves and routes to the right peer even with many buddies at once. Unlike
+	// -L (one local port → one peer) it scales to N peers; needs NET_ADMIN, and
+	// degrades gracefully (WARNING, tunnel still up) when that is missing.
+	VIPListen string
+
 	PunchDur    time.Duration
 	IdleTimeout time.Duration
 	Status      bool // probe whether the buddy is online, print, exit
