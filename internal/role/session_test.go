@@ -108,3 +108,54 @@ func TestLoadSessionNoneYet(t *testing.T) {
 		t.Fatalf("absent store: ok=%v err=%v", ok, err)
 	}
 }
+
+// Multi-peer: the store keeps one session line per partner. Saving a second
+// partner must not clobber the first, and re-pairing one partner replaces only
+// that partner's line.
+func TestSessionStoreMultiPeer(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_peers")
+	a, _, _ := ed25519.GenerateKey(rand.Reader)
+	b, _, _ := ed25519.GenerateKey(rand.Reader)
+	aB64, bB64 := bcrypto.PubKeyB64(a), bcrypto.PubKeyB64(b)
+
+	if err := saveSession(path, "tok-a", aB64, "secret-a"); err != nil {
+		t.Fatalf("saveSession a: %v", err)
+	}
+	if err := saveSession(path, "tok-b", bB64, "secret-b"); err != nil {
+		t.Fatalf("saveSession b: %v", err)
+	}
+
+	sessions, err := loadSessions(path)
+	if err != nil {
+		t.Fatalf("loadSessions: %v", err)
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("want 2 sessions, got %d", len(sessions))
+	}
+	got := map[string]string{}
+	for _, s := range sessions {
+		got[bcrypto.PubKeyB64(s.pin)] = s.secret
+	}
+	if got[aB64] != "secret-a" || got[bB64] != "secret-b" {
+		t.Fatalf("multi-peer secrets mismatch: %v", got)
+	}
+
+	// Re-pair partner A only: A's secret changes, B's is untouched.
+	if err := saveSession(path, "tok-a2", aB64, "secret-a2"); err != nil {
+		t.Fatalf("re-pair a: %v", err)
+	}
+	sessions, _ = loadSessions(path)
+	if len(sessions) != 2 {
+		t.Fatalf("re-pair must not change session count, got %d", len(sessions))
+	}
+	got = map[string]string{}
+	for _, s := range sessions {
+		got[bcrypto.PubKeyB64(s.pin)] = s.secret
+	}
+	if got[aB64] != "secret-a2" {
+		t.Fatalf("re-pair should update A: %q", got[aB64])
+	}
+	if got[bB64] != "secret-b" {
+		t.Fatalf("re-pair of A clobbered B: %q", got[bB64])
+	}
+}
