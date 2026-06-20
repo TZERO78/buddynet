@@ -31,7 +31,7 @@ all three roles; in a buddy the relay and handshake code sit dormant as fallback
 | | BuddyNet | Tailscale | Netbird | WireGuard |
 |---|---|---|---|---|
 | Coordination server | **Your VPS** | Tailscale Inc. | Self-hostable | None |
-| Traffic through server | ❌ Never | ❌ Never | ❌ Never | ❌ Never |
+| Traffic through server | ❌ Never | ❌ Never | ❌ Never | N/A (no server) |
 | Zero-config NAT traversal | ✅ | ✅ | ✅ | ❌ Manual |
 | One binary, all roles | ✅ | ❌ | ❌ | ✅ |
 | Sealed token on wire | ✅ v2.2 | N/A | N/A | N/A |
@@ -133,10 +133,12 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 The full threat model — what BuddyNet protects against, the trust hierarchy, and
 its honest limits — is in **[SECURITY.md](SECURITY.md)**.
 
-> **Live-pentested.** The repository includes a
-> [structural attack tool and full results](lab/pentest/README.md) — 14/14
-> defenses verified against a live lab instance. No critical or high findings. One
-> known low-severity cosmetic issue (stale VIP after `kill -9`, fixed in v2.2.0).
+> **Live-pentested (by us).** The repository includes a
+> [structural attack tool and full results](lab/pentest/README.md) — 16 tests, 14
+> defenses verified against a live lab instance, 1 N/A, 1 low finding (stale VIP
+> after `kill -9`, fixed in v2.2.0). No critical or high findings. This is our own
+> structural testing, **not** an independent third-party audit — bugs can always
+> remain. Found one? Please open an issue; we're grateful for every report.
 
 ## Documentation
 
@@ -200,8 +202,9 @@ IPs, and fallback chain.
 
 **Security posture**
 
-- **v2.2.0: Live pentested — 14/14 defenses hold.** Full report:
-  [lab/pentest/README.md](lab/pentest/README.md).
+- **v2.2.0: live pentested by us — 14/14 applicable defenses verified, no
+  critical/high findings** (our own structural testing, not an independent audit).
+  Full report: [lab/pentest/README.md](lab/pentest/README.md).
 - `govulncheck` in CI, Dependabot for dependency updates.
 - cosign keyless signing + SPDX SBOM on every release.
 
