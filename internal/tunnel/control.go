@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/quic-go/quic-go"
+
+	"github.com/tzero78/buddynet/internal/safe"
 )
 
 // This file is the optional QUIC transport for the handshake CONTROL plane (the
@@ -189,7 +191,7 @@ func (s *ControlServer) acceptStreams(qc *quic.Conn) {
 		if err != nil {
 			return // connection closed
 		}
-		go s.readRequest(qc, st)
+		safe.Go("control.read", func() { s.readRequest(qc, st) })
 	}
 }
 

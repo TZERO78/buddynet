@@ -11,6 +11,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/tzero78/buddynet/internal/peer"
+	"github.com/tzero78/buddynet/internal/safe"
 )
 
 // stubAddr is the loopback address the .buddy stub resolver binds on.
@@ -28,7 +29,9 @@ const stubAddr = "127.0.0.153:53"
 func Run(ctx context.Context, reg *peer.Registry, selfName string, selfIP netip.Addr) error {
 	mux := dns.NewServeMux()
 	mux.HandleFunc("buddy.", func(w dns.ResponseWriter, r *dns.Msg) {
-		handleBuddy(w, r, reg, selfName, selfIP)
+		// A crafted query must drop that one query, never crash the resolver
+		// goroutine (and with it the whole process).
+		safe.Do("dns.query", func() { handleBuddy(w, r, reg, selfName, selfIP) })
 	})
 	// Non-.buddy queries: return NXDOMAIN (this resolver is not authoritative
 	// for any other TLD; the default ServeMux behaviour is REFUSED, which is
