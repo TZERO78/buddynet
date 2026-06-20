@@ -138,8 +138,9 @@ go build -ldflags="-s -w" -o buddynet ./cmd/buddynet
 go test ./...
 ```
 
-Runs on Linux, macOS, Windows, and ARM64 (Raspberry Pi, Unraid). Zero external
-runtime dependencies. Server side via Docker:
+Runs on Linux, macOS, Windows, and ARM64 (Raspberry Pi, Unraid). A deliberately
+small, pinned dependency set (`quic-go`, `miekg/dns`, `golang.org/x/crypto`),
+gated by `govulncheck` in CI. Server side via Docker:
 
 ```bash
 docker compose -f deployments/docker-compose.yml up -d --build

@@ -2,10 +2,29 @@ package dns
 
 import (
 	"context"
+	"errors"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
+
+// resolvectlPath is resolved once to an ABSOLUTE path, so a root daemon can never
+// be steered into running an attacker-planted `resolvectl` earlier in $PATH. The
+// command is also run with an empty environment for the same reason.
+var resolvectlPath = findResolvectl()
+
+func findResolvectl() string {
+	for _, p := range []string{"/usr/bin/resolvectl", "/bin/resolvectl", "/usr/sbin/resolvectl", "/sbin/resolvectl"} {
+		if fi, err := os.Stat(p); err == nil && !fi.IsDir() {
+			return p
+		}
+	}
+	if p, err := exec.LookPath("resolvectl"); err == nil {
+		return p
+	}
+	return ""
+}
 
 // RegisterSystem tries to route .buddy queries to our stub resolver.
 // It attempts resolvectl first (systemd-resolved); on failure it logs a note
@@ -44,11 +63,17 @@ func resolvectlRemove() error {
 }
 
 func resolvectl(args ...string) error {
-	// A context-bound exec would cancel cleanup; use a bare command here.
-	// All callers pass only hardcoded literal strings — no user input reaches args.
-	out, err := exec.Command("resolvectl", args...).CombinedOutput() // #nosec G204 -- args are hardcoded literals from internal callers only
+	if resolvectlPath == "" {
+		return errors.New("resolvectl not found on this system")
+	}
+	// Absolute path (no PATH lookup) and an empty environment: a context-bound exec
+	// would cancel cleanup, and all args are hardcoded literals from internal
+	// callers, so neither $PATH nor user input can influence what runs.
+	cmd := exec.Command(resolvectlPath, args...) // #nosec G204 -- absolute path, hardcoded literal args, empty env
+	cmd.Env = []string{}
+	out, err := cmd.CombinedOutput()
 	if err != nil && len(out) > 0 {
-		return &runError{cmd: "resolvectl " + strings.Join(args, " "), out: string(out), err: err}
+		return &runError{cmd: resolvectlPath + " " + strings.Join(args, " "), out: string(out), err: err}
 	}
 	return err
 }
