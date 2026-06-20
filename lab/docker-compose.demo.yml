@@ -1,0 +1,27 @@
+# Demo overlay: friendly buddy names for the ASCII demo (lab/demo.sh).
+# Overrides only NODE_NAME on the party buddies, so BuddyDNS announces
+# bob/alice/steven/markus/sandra instead of beta/gamma/delta/epsilon/zeta.
+# Usage: ./demo.sh (it applies this overlay, clears the hub name cache, plays).
+services:
+  party-beta:
+    environment:
+      NODE_NAME: bob
+  party-gamma:
+    environment:
+      NODE_NAME: alice
+  party-delta:
+    environment:
+      NODE_NAME: steven
+  party-epsilon:
+    environment:
+      NODE_NAME: markus
+  party-zeta:
+    environment:
+      NODE_NAME: sandra
+
+  # The demo's `peers remove`/`add` must write the manifest, so mount it
+  # read-write (the party lab mounts it read-only).
+  party-hub:
+    volumes:
+      - party-hub-key:/var/lib/buddynet
+      - ./party/hub.peers:/peers
