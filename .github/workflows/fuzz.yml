@@ -1,0 +1,41 @@
+name: fuzz
+
+# Continuous fuzzing of the untrusted-input parsers. The repo ships Fuzz* targets
+# (REGISTER / relay bind+challenge / sealed-code / pubkey decode) but a one-shot
+# `go test` only runs their seed corpus; this job actually fuzzes them on a
+# nightly schedule (and on demand), so a crashing input is found over time rather
+# than never. Findings are uploaded as an artifact for triage.
+on:
+  schedule:
+    - cron: "0 3 * * *" # nightly, 03:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { pkg: ./internal/role, target: FuzzParseRegister }
+          - { pkg: ./internal/relay, target: FuzzParseBind }
+          - { pkg: ./internal/relay, target: FuzzParseChallenge }
+          - { pkg: ./internal/crypto, target: FuzzOpenCode }
+          - { pkg: ./internal/crypto, target: FuzzDecodePubKey }
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+        with:
+          go-version: stable
+      - name: fuzz ${{ matrix.target }}
+        run: go test -run '^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s ${{ matrix.pkg }}
+      - name: upload crashers
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: fuzz-corpus-${{ matrix.target }}
+          path: ${{ matrix.pkg }}/testdata/fuzz/
+          if-no-files-found: ignore
