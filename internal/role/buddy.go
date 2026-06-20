@@ -288,7 +288,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	// Single-peer / first-pairing path: one reconnect loop. nextAttempt prefers a
 	// stored session (reconnect, pinning the recorded key) and otherwise pairs with
 	// the invite/legacy token; an ephemeral invite stores a session on success.
-	return peerLoop(ctx, cfg, nd, lt, func() (attempt, error) { return nextAttempt(cfg) }, time.Now())
+	return peerLoop(ctx, cfg, nd, lt, func(int) (attempt, error) { return nextAttempt(cfg) }, time.Now())
 }
 
 // Reconnect backoff bounds: start at reconnectBase, double up to reconnectMax,

@@ -12,9 +12,12 @@ import (
 )
 
 // nextAttemptFn yields the connection plan for the next reconnect round. The
-// single-peer path wraps nextAttempt; a multi-peer worker uses reconnectSource,
-// scoped to one pinned partner.
-type nextAttemptFn func() (attempt, error)
+// single-peer path wraps nextAttempt; a multi-peer worker uses peerSource,
+// scoped to one pinned partner. failures is the number of consecutive reconnect
+// rounds that did NOT bring up a real tunnel (reset to 0 once one did), so the
+// source can tell a transient miss from a persistently unpairable session and
+// fall back to the bootstrap token to recover from a one-sided session loss.
+type nextAttemptFn func(failures int) (attempt, error)
 
 // errSessionRevoked ends a peer worker cleanly when its stored session vanished
 // from the known_peers store between reconnects (the operator revoked it): the
@@ -28,6 +31,7 @@ var errSessionRevoked = errors.New("stored session removed — peer revoked")
 // single-peer path. inviteStart bounds a one-time invite's first-pairing window.
 func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, next nextAttemptFn, inviteStart time.Time) error {
 	backoff := reconnectBase
+	failures := 0
 	for {
 		// In lazy mode, sleep until a local connection needs a tunnel.
 		if lt != nil {
@@ -38,7 +42,7 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 			}
 		}
 
-		att, aerr := next()
+		att, aerr := next(failures)
 		if aerr != nil {
 			return aerr
 		}
@@ -62,10 +66,16 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 			return nil
 		}
 		// A run that lasted longer than the cap means a real tunnel was up; reset
-		// the backoff so a single long-lived session always reconnects promptly. A
-		// run that failed fast (server/network flapping) grows the delay, jittered.
+		// the backoff (and the failure streak) so a single long-lived session always
+		// reconnects promptly. A run that failed fast (server/network flapping, or a
+		// partner that never registers under our rendezvous) grows the delay,
+		// jittered, and counts toward the streak that triggers the bootstrap-token
+		// fallback in peerSource.
 		if time.Since(runStart) > reconnectMax {
 			backoff = reconnectBase
+			failures = 0
+		} else {
+			failures++
 		}
 		wait := jitter(backoff)
 		log.Printf("reconnecting in %s...", wait.Round(100*time.Millisecond))
@@ -177,6 +187,15 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 	}
 }
 
+// sessionFallbackAfter is how many consecutive failed reconnect rounds a stored
+// session may go unpaired before the worker presumes it is stale (the partner
+// lost ITS copy — e.g. a one-sided restore-from-backup, or a `peers remove` +
+// `peers add` re-invite on the other end) and probes the manifest bootstrap
+// token to re-pair. Past the threshold it alternates session/token each round so
+// it meets the partner whichever rendezvous that side is on; a successful
+// bootstrap re-pair stores a fresh session and heals the desync.
+const sessionFallbackAfter = 3
+
 // peerSource is one worker's attempt source. It reloads THIS peer's stored
 // session each round: if a session exists, reconnect with its secret (pinning the
 // recorded key — never an unauthenticated, publicly computable rendezvous); a
@@ -184,20 +203,42 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 // one-time bootstrap token (first pairing, pinned, storing a session on success).
 // With neither, the worker stops via errSessionRevoked (a paired peer whose
 // session was removed = revoked; a manifest peer without a token has no path).
+//
+// ROOT of the re-pair-deadlock fix: a session-derived rendezvous and the
+// bootstrap token are two distinct rendezvous values, so if the two sides'
+// session state desyncs they register under different tokens and the matchmaking
+// server parks both forever — there is no P2P channel to reconcile them. So once
+// a session has failed to pair sessionFallbackAfter times in a row, treat it as
+// possibly stale and fall back to the manifest bootstrap token (still PINNING the
+// manifest key, so a token-knower cannot impersonate the partner — only the
+// pre-existing first-pairing endpoint-harvest exposure applies, and only while a
+// token is present). On success a fresh session is stored and the desync heals.
 func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
-	return func() (attempt, error) {
+	bootstrap := func() attempt {
+		// Meet at the shared bootstrap token, pin the manifest key (so no SAS
+		// prompt — Model A), and store a session secret on success.
+		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true}
+	}
+	return func(failures int) (attempt, error) {
 		secret, ok, err := loadSessionFor(cfg.KnownPeers, spec.pin)
 		if err != nil {
 			return attempt{}, fmt.Errorf("session store %s: %w", cfg.KnownPeers, err)
 		}
 		if ok {
+			// Stale-session recovery: a token must still be in the manifest (the
+			// only rendezvous both sides can re-agree on) and the key must be pinned
+			// (always true in manifest mode; never fall back under --insecure). Past
+			// the threshold, alternate so we also keep trying the real session.
+			if spec.token != "" && !cfg.Insecure && failures >= sessionFallbackAfter && failures%2 == 1 {
+				log.Printf("WARNING: peer %s — session re-pair has failed %d times; the partner may have lost its session (one-sided restore, or a remove+re-add). Probing the bootstrap token to recover; the key stays pinned. If this repeats indefinitely, check the partner's state.",
+					keyTag(bcrypto.PubKeyB64(spec.pin)), failures)
+				return bootstrap(), nil
+			}
 			return attempt{rendezvous: secret, pin: spec.pin}, nil
 		}
 		if spec.token == "" {
 			return attempt{}, errSessionRevoked
 		}
-		// First pairing: meet at the shared bootstrap token, pin the manifest key
-		// (so no SAS prompt — Model A), and store a session secret on success.
-		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true}, nil
+		return bootstrap(), nil
 	}
 }
