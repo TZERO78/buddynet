@@ -126,6 +126,49 @@ All tests passed.
 | Repo path | `/data/repo` |
 | SSH host key | persisted in `kopia-b-key` volume; published to `/data/kopia-b-hostkey.pub` on startup |
 
+## VIP-routing test (Phase 1.3: Loopback-VIP-Bind)
+
+The overlay `docker-compose.vip.yml` validates `--vip-listen`: a buddy binds its
+connected partner's virtual IP (`10.66.X.Y`) on its own loopback interface (via a
+raw netlink `RTM_NEWADDR`, no `ip`/root subprocess) and routes connections to it
+through the tunnel. Unlike `-L` (one fixed local port → one peer), this is the
+per-buddy routing path that scales to many buddies.
+
+```
+vip-a  --forward 127.0.0.1:7777   ──BuddyNet──►  vip-b  --vip-listen 7777
+(alice, httpd :7777)                              (bob binds alice's VIP on lo)
+
+inside vip-b:  curl http://alice.buddy:7777  →  alice's httpd, via the tunnel
+```
+
+`vip-b` runs with `cap_add: [NET_ADMIN]` for the loopback address bind (without
+it the feature degrades gracefully — a `WARNING` and no VIP route, tunnel still up).
+
+```bash
+cd lab
+docker compose -f docker-compose.yml -f docker-compose.vip.yml up -d --build
+./test-vip.sh
+```
+
+`test-vip.sh` checks, in sequence:
+
+1. Both tunnels come up (`CONNECTED`).
+2. `vip-b` bound alice's VIP on `lo` and is listening on it (also confirmed via `ip addr`).
+3. `curl http://<alice-vip>:7777` inside `vip-b` reaches alice's httpd through the tunnel.
+4. `curl http://alice.buddy:7777` works (name → VIP via the stub resolver → tunnel).
+5. **No over-binding**: a VIP that is not a connected buddy is unbound and unreachable.
+
+```
+  [PASS] vip-b bound 10.66.X.Y on lo and is listening on :7777
+  [PASS] ip addr confirms 10.66.X.Y/32 on vip-b's lo
+  [PASS] HTTP over VIP routing (vip-b → alice:7777 via tunnel) works
+  [PASS] alice.buddy resolves to 10.66.X.Y on vip-b's stub
+  [PASS] HTTP via name alice.buddy:7777 works end to end
+  [PASS] unrelated VIP 10.66.200.201 is not bound/reachable (no over-binding)
+
+  Results: 6 passed, 0 failed
+```
+
 ## Observing the tunnels
 
 ```bash
