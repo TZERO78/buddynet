@@ -82,25 +82,99 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 
 // supervise runs one peerLoop per peer spec concurrently — the multi-peer core.
 // Each worker bootstraps (first pairing via its token) or reconnects (via a
-// stored session), independently. A worker that stops (revoked session and no
-// token, or an unconfirmed SAS) takes down ONLY its own buddy; the others keep
-// running. It returns when ctx is cancelled and every worker has drained (no
-// goroutine leak).
+// stored session), independently; a worker that stops takes down ONLY its own
+// buddy. On SIGHUP the manifest is re-read and the worker set is reconciled —
+// new buddies are started, removed ones (e.g. `peers remove`) are stopped —
+// without a restart. It returns when ctx is cancelled and every worker has
+// drained (no goroutine leak).
+//
+// Note: a removed buddy's ALREADY-ESTABLISHED direct tunnel persists until it
+// drops (the server is not in the path); --reauth-interval bounds how long that
+// can be, the same caveat as any revocation on a direct tunnel.
 func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec) error {
-	log.Printf("SUPERVISOR: action=start buddies=%d", len(specs))
+	// running, gen and the loop below all live in THIS goroutine only, so the map
+	// needs no lock. Each worker carries a generation so a stale exit from an old,
+	// already-replaced instance can't clobber a freshly started one for the same key.
+	type handle struct {
+		cancel context.CancelFunc
+		gen    uint64
+	}
 	var wg sync.WaitGroup
-	for _, s := range specs {
-		s := s
+	var gen uint64
+	running := map[string]handle{}
+	type exit struct {
+		key string
+		gen uint64
+	}
+	exited := make(chan exit, 16)
+
+	start := func(s peerSpec) {
+		key := bcrypto.PubKeyB64(s.pin)
+		if _, ok := running[key]; ok {
+			return
+		}
+		gen++
+		g := gen
+		wctx, cancel := context.WithCancel(ctx)
+		running[key] = handle{cancel: cancel, gen: g}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := peerLoop(ctx, cfg, nd, nil, peerSource(cfg, s), time.Time{}); err != nil {
-				log.Printf("SUPERVISOR: action=peer-stopped key=%s detail=%q", keyTag(bcrypto.PubKeyB64(s.pin)), err.Error())
+			if err := peerLoop(wctx, cfg, nd, nil, peerSource(cfg, s), time.Time{}); err != nil {
+				log.Printf("SUPERVISOR: action=peer-stopped key=%s detail=%q", keyTag(key), err.Error())
 			}
+			exited <- exit{key, g}
 		}()
 	}
-	wg.Wait()
-	return nil
+
+	log.Printf("SUPERVISOR: action=start buddies=%d (SIGHUP reloads the manifest)", len(specs))
+	for _, s := range specs {
+		start(s)
+	}
+
+	reload := reloadSignal()
+	for {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			return nil
+
+		case e := <-exited:
+			// A worker that returned on its own (e.g. a session-only peer whose
+			// session was removed) frees its slot, so a later reload can restart it
+			// if it is desired again. The generation check ignores a stale exit from
+			// an instance that was already replaced.
+			if h, ok := running[e.key]; ok && h.gen == e.gen {
+				h.cancel()
+				delete(running, e.key)
+			}
+
+		case <-reload:
+			desired, err := assemblePeers(cfg)
+			if err != nil {
+				log.Printf("SUPERVISOR: action=reload-failed detail=%q", err.Error())
+				continue
+			}
+			want := make(map[string]peerSpec, len(desired))
+			for _, s := range desired {
+				want[bcrypto.PubKeyB64(s.pin)] = s
+			}
+			for key, h := range running {
+				if _, ok := want[key]; !ok {
+					log.Printf("SUPERVISOR: action=reload-stop key=%s", keyTag(key))
+					h.cancel()
+					delete(running, key)
+				}
+			}
+			for key, s := range want {
+				if _, ok := running[key]; !ok {
+					log.Printf("SUPERVISOR: action=reload-start key=%s", keyTag(key))
+					start(s)
+				}
+			}
+			log.Printf("SUPERVISOR: action=reload buddies=%d", len(running))
+		}
+	}
 }
 
 // peerSource is one worker's attempt source. It reloads THIS peer's stored

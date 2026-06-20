@@ -109,6 +109,7 @@ func PeersAdd(peersFile, key, token string) error {
 		return err
 	}
 	fmt.Printf("added buddy %s%s\n", keyTag(keyB64), tokenNote(token))
+	fmt.Println("note: a running buddy picks this up on SIGHUP (kill -HUP <pid>) or restart.")
 	return nil
 }
 
@@ -136,6 +137,8 @@ func PeersRemove(peersFile, knownPeers, key string) error {
 		return nil
 	}
 	fmt.Printf("revoked buddy %s (manifest=%d session=%d)\n", keyTag(keyB64), manifestRemoved, sessionRemoved)
+	fmt.Println("note: a running buddy applies this on SIGHUP (kill -HUP <pid>) or restart;")
+	fmt.Println("      an already-established direct tunnel persists until it drops (see --reauth-interval).")
 	return nil
 }
 

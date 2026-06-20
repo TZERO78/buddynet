@@ -73,10 +73,11 @@ func TestPeerLoopReturnsSourceError(t *testing.T) {
 	}
 }
 
-// supervise starts one isolated worker per spec and drains them all. With every
-// spec unresolvable (no session, no token), each worker exits via
-// errSessionRevoked independently and the supervisor returns without hanging —
-// the isolation property: one peer ending never blocks the others.
+// supervise is a daemon loop: it starts one isolated worker per spec and keeps
+// running (to serve reloads) even after workers exit, returning only on ctx
+// cancel. With every spec unresolvable (no session, no token), each worker exits
+// via errSessionRevoked independently; cancelling then drains them all without
+// hanging — the isolation property: one peer ending never blocks the others.
 func TestSuperviseIsolatedDrain(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known_peers") // no session lines written
 	var specs []peerSpec
@@ -86,15 +87,25 @@ func TestSuperviseIsolatedDrain(t *testing.T) {
 	}
 	cfg := BuddyConfig{KnownPeers: path}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- supervise(context.Background(), cfg, &node{}, specs) }()
+	go func() { done <- supervise(ctx, cfg, &node{}, specs) }()
+
+	// The workers self-exit immediately; the supervisor must NOT return for that.
+	select {
+	case err := <-done:
+		t.Fatalf("supervise returned before cancel (it is a daemon loop): %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	cancel()
 	select {
 	case err := <-done:
 		if err != nil {
 			t.Fatalf("supervise: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("supervise hung — a stopped peer must not block the others")
+		t.Fatal("supervise hung on cancel — a stopped peer must not block the drain")
 	}
 }
 
