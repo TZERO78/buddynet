@@ -358,7 +358,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		return err
 	}
 	defer conn.Close()
-	log.Printf("buddynet handshake listening on %s (udp, dual-stack)", conn.LocalAddr())
+	log.Printf("HANDSHAKE: action=listening addr=%s transport=udp", conn.LocalAddr())
 	go func() { <-ctx.Done(); conn.Close() }()
 
 	var authz *authorizer

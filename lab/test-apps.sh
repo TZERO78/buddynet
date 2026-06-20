@@ -167,20 +167,20 @@ if ! sudo ebtables -L FORWARD > /dev/null 2>&1; then
 else
     # If a relay session from a previous run is still active in the server,
     # wait for it to close (idle-timeout is 1 minute on the relay).
-    # A "session paired" without a subsequent "session closed" in the last 90s
+    # A "session-paired" without a subsequent "session-closed" in the last 90s
     # means an active session exists — wait for it to expire.
     echo "[*] checking for stale relay sessions..."
     for i in $(seq 1 90); do
         LAST_EVENT=$(docker compose logs server 2>/dev/null \
-            | grep -E "session paired|session closed" | tail -1)
-        if echo "$LAST_EVENT" | grep -q "session closed"; then
+            | grep -E "session-paired|session-closed" | tail -1)
+        if echo "$LAST_EVENT" | grep -q "session-closed"; then
             echo "  [+] relay idle — no active session"
             break
         fi
         if [ "$i" -eq 90 ]; then
             echo "  [!] relay session did not close in 90s — proceeding anyway"
         fi
-        if [ "$i" -eq 1 ] && echo "$LAST_EVENT" | grep -q "session paired"; then
+        if [ "$i" -eq 1 ] && echo "$LAST_EVENT" | grep -q "session-paired"; then
             echo "  [~] waiting for stale relay session to close (up to 90s)..."
         fi
         sleep 1

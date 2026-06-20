@@ -305,7 +305,7 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 		if len(ses.legs) == 2 {
 			ses.paired = true
 			s.statPaired.Add(1)
-			log.Printf("relay: session paired (%s <-> %s)", ses.legs[0].addr, ses.legs[1].addr)
+			log.Printf("RELAY: action=session-paired a=%s b=%s", ses.legs[0].addr, ses.legs[1].addr)
 		}
 	}
 	found.seen = time.Now()
@@ -380,7 +380,7 @@ func (s *Server) reap() {
 			ses.legs = kept
 			if len(ses.legs) == 0 {
 				if ses.paired {
-					log.Printf("relay: session closed (idle > %s)", s.ttl)
+					log.Printf("RELAY: action=session-closed detail=%q", fmt.Sprintf("idle > %s", s.ttl))
 				}
 				delete(s.sessions, token)
 			}

@@ -19,7 +19,7 @@ func RegisterSystem(ctx context.Context) {
 			"add 'nameserver 127.0.0.153' to /etc/resolv.conf or point your resolver at it manually", err)
 		return
 	}
-	log.Printf("BuddyDNS: .buddy domain routed to %s via resolvectl", stubAddr)
+	log.Printf("BUDDYDNS: action=resolver-registered addr=%s detail=%q", stubAddr, "*.buddy routed via resolvectl")
 	go func() {
 		<-ctx.Done()
 		if err := resolvectlRemove(); err != nil {

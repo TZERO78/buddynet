@@ -42,12 +42,22 @@ func deriveSessionSecret(sess tunnel.Session, myPub, peerPub ed25519.PublicKey) 
 //	<tokenhash> <partner_pubkey_b64> <session_secret_b64>
 //
 // Legacy trust-on-first-use lines have only the first two fields and are left
-// untouched. BuddyPeer keeps a single session, so reconnect simply loads the one
-// line that carries a session secret.
+// untouched. The store keeps ONE session line PER partner key (multi-peer): each
+// pinned buddy has its own derived rendezvous secret, so reconnect loads every
+// session line and the supervisor runs one peerSession per stored partner.
 
-// saveSession upserts the (single, BuddyPeer) session line: it drops any
-// existing session line, preserves legacy 2-field lines, and appends the new
-// one. The store stays 0600 in a 0700 directory (same trust domain as id.key).
+// storedSession is one persisted per-partner session: the pinned partner key and
+// the derived rendezvous secret used to re-pair with that one buddy.
+type storedSession struct {
+	pin    ed25519.PublicKey
+	secret string
+}
+
+// saveSession upserts the session line FOR THIS PARTNER: it drops only the
+// previous session line whose partner key matches partnerB64 (re-pairing the same
+// buddy), preserves session lines for OTHER partners (multi-peer) and legacy
+// 2-field TOFU lines, then appends the new one. The store stays 0600 in a 0700
+// directory (same trust domain as id.key).
 func saveSession(path, inviteToken, partnerB64, secret string) error {
 	if path == "" {
 		return fmt.Errorf("no known-peers path to persist the session")
@@ -58,8 +68,10 @@ func saveSession(path, inviteToken, partnerB64, secret string) error {
 		for sc.Scan() {
 			line := sc.Text()
 			fields := strings.Fields(line)
-			if len(fields) >= 3 {
-				continue // drop the previous session line (BuddyPeer: one only)
+			// A session line for THIS partner is the one we replace; session lines
+			// for other partners and legacy 2-field lines are preserved.
+			if len(fields) >= 3 && fields[1] == partnerB64 {
+				continue
 			}
 			if strings.TrimSpace(line) != "" {
 				kept = append(kept, line)
@@ -77,20 +89,66 @@ func saveSession(path, inviteToken, partnerB64, secret string) error {
 	return os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0o600)
 }
 
-// loadSession returns the single stored session: the pinned partner key and the
-// rendezvous secret. ok is false if there is no session line yet.
-func loadSession(path string) (partnerPub ed25519.PublicKey, secret string, ok bool, err error) {
+// removeSession drops the stored session line(s) for partnerB64 from the store
+// (revocation), preserving every other session line and legacy TOFU line. It
+// returns how many lines were removed. This is the second half of "remove a
+// buddy": without it the supervisor would keep reconnecting to a peer dropped
+// from the manifest, because a stored session takes over from the bootstrap token.
+func removeSession(path, partnerB64 string) (int, error) {
 	if path == "" {
-		return nil, "", false, nil
+		return 0, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	var kept []string
+	removed := 0
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := sc.Text()
+		fields := strings.Fields(line)
+		if len(fields) >= 3 && fields[1] == partnerB64 {
+			removed++
+			continue
+		}
+		if strings.TrimSpace(line) != "" {
+			kept = append(kept, line)
+		}
+	}
+	f.Close()
+	if err := sc.Err(); err != nil {
+		return 0, err
+	}
+	if removed == 0 {
+		return 0, nil
+	}
+	out := strings.Join(kept, "\n")
+	if out != "" {
+		out += "\n"
+	}
+	return removed, os.WriteFile(path, []byte(out), 0o600)
+}
+
+// loadSessions returns every stored session (one per pinned partner). The
+// multi-peer supervisor starts one peerSession per returned entry. A store with
+// no session line yet returns an empty slice and no error.
+func loadSessions(path string) ([]storedSession, error) {
+	if path == "" {
+		return nil, nil
 	}
 	f, oerr := os.Open(path)
 	if oerr != nil {
 		if os.IsNotExist(oerr) {
-			return nil, "", false, nil
+			return nil, nil
 		}
-		return nil, "", false, oerr
+		return nil, oerr
 	}
 	defer f.Close()
+	var out []storedSession
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
@@ -101,7 +159,35 @@ func loadSession(path string) (partnerPub ed25519.PublicKey, secret string, ok b
 		if derr != nil || len(pub) != ed25519.PublicKeySize {
 			continue
 		}
-		return ed25519.PublicKey(pub), fields[2], true, nil
+		out = append(out, storedSession{pin: ed25519.PublicKey(pub), secret: fields[2]})
 	}
-	return nil, "", false, sc.Err()
+	return out, sc.Err()
+}
+
+// loadSessionFor returns the stored rendezvous secret for one specific pinned
+// partner. The multi-peer supervisor reloads it each reconnect round so a re-pair
+// is picked up and a session removed from the store (revocation) ends that one
+// peer's worker. ok is false when no session line pins this key.
+func loadSessionFor(path string, pin ed25519.PublicKey) (secret string, ok bool, err error) {
+	sessions, err := loadSessions(path)
+	if err != nil {
+		return "", false, err
+	}
+	for _, s := range sessions {
+		if s.pin.Equal(pin) {
+			return s.secret, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+// loadSession returns the FIRST stored session (back-compat for the single-peer
+// reconnect path). Multi-peer callers use loadSessions. ok is false if there is
+// no session line yet.
+func loadSession(path string) (partnerPub ed25519.PublicKey, secret string, ok bool, err error) {
+	sessions, err := loadSessions(path)
+	if err != nil || len(sessions) == 0 {
+		return nil, "", false, err
+	}
+	return sessions[0].pin, sessions[0].secret, true, nil
 }

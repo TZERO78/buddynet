@@ -211,8 +211,9 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		}
 		lt.markIdle()
 	} else {
-		// Non-lazy path: unchanged.
-		streams, ferr = forward(ctx, sess, cfg.LocalListen, cfg.Forward)
+		// Non-lazy path: -L and -forward as before, plus --vip-listen, which binds
+		// THIS partner's virtual IP on lo and routes name.buddy:port to its tunnel.
+		streams, ferr = forward(ctx, sess, cfg.LocalListen, cfg.Forward, bcrypto.VirtualIP(partnerPub), cfg.VIPListen)
 	}
 
 	reason := "peer-closed-or-idle"

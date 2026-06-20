@@ -1,0 +1,93 @@
+# BuddyNet Lab — VIP-routing overlay (Phase 1.3: Loopback-VIP-Bind)
+#
+# Validates --vip-listen end to end: vip-b binds vip-a's virtual IP (10.66.X.Y)
+# on its own loopback interface and routes connections to that VIP through the
+# tunnel to vip-a's httpd. Unlike the -L pair (one fixed local port), this is the
+# per-buddy routing path that scales to many buddies.
+#
+#   vip-a  --forward 127.0.0.1:7777   ──BuddyNet──►  vip-b  --vip-listen 7777
+#   (alice, httpd :7777)                              (bob binds alice's VIP on lo)
+#
+#   inside vip-b:  curl http://<alice-vip>:7777  →  alice's httpd, via the tunnel
+#
+# The base stack's server is reused; alice/bob use their own token so the
+# handshake server keeps them separate from the other pairs.
+#
+# Usage (from lab/ directory, after ./setup.sh):
+#   docker compose -f docker-compose.yml -f docker-compose.vip.yml up -d --build
+#   ./test-vip.sh
+
+services:
+
+  # ── vip-a (alice) ────────────────────────────────────────────────────────────
+  # Service side: httpd on :7777, forwards incoming tunnel streams to it, and
+  # announces --name alice via the stub resolver. Does NOT bind any VIP itself,
+  # so it needs no NET_ADMIN (only NET_BIND_SERVICE for the :53 stub).
+  vip-a:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.dns
+    image: buddynet-lab-dns
+    entrypoint: ["/entrypoint-a.sh"]
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - --forward
+      - "127.0.0.1:7777"
+      - --no-interactive
+      - --insecure
+      - --idle-timeout=10m
+      - --name
+      - alice
+      - --dns
+    environment:
+      BUDDYNET_SERVER: "server:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_TOKEN: "lab-vip-token"
+    depends_on:
+      - server
+    volumes:
+      - vip-a-key:/var/lib/buddynet
+    cap_add:
+      - NET_BIND_SERVICE
+    restart: unless-stopped
+
+  # ── vip-b (bob) ──────────────────────────────────────────────────────────────
+  # Client side: --vip-listen 7777 binds the connected buddy's VIP (alice's) on
+  # the loopback interface and forwards :7777 on it through the tunnel. Needs
+  # NET_ADMIN for the netlink address add (graceful WARNING without it). No -L,
+  # no host port — the test runs curl from inside the container against the VIP.
+  vip-b:
+    build:
+      context: ..
+      dockerfile: lab/Dockerfile.dns
+    image: buddynet-lab-dns
+    command:
+      - --role=buddy
+      - --key
+      - /var/lib/buddynet/id.key
+      - --vip-listen
+      - "7777"
+      - --no-interactive
+      - --insecure
+      - --idle-timeout=10m
+      - --name
+      - bob
+      - --dns
+    environment:
+      BUDDYNET_SERVER: "server:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_TOKEN: "lab-vip-token"
+    depends_on:
+      - server
+    volumes:
+      - vip-b-key:/var/lib/buddynet
+    cap_add:
+      - NET_BIND_SERVICE  # :53 stub resolver
+      - NET_ADMIN         # bind the partner VIP on lo (netlink RTM_NEWADDR)
+    restart: unless-stopped
+
+volumes:
+  vip-a-key:
+  vip-b-key:

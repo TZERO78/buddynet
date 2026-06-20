@@ -6,8 +6,9 @@
 //	buddynet --role=handshake  # bootstrap/matchmaking server on a VPS
 //
 // Every binary carries all three roles; a buddy contains the relay and
-// handshake code as dormant fallback. BuddyPeer — two buddies and one handshake
-// server — is just the two-peer case of BuddyNet:
+// handshake code as dormant fallback. Two buddies and one handshake server is
+// just the two-peer case; the same binary scales to many buddies at once
+// (MultiPeer):
 //
 //	buddynet --role=buddy --invite            # mint a token, wait for the buddy
 //	buddynet --role=buddy --join=TOKEN ...     # join with that token
@@ -26,6 +27,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/netip"
 	"os"
 	"os/signal"
@@ -69,7 +71,9 @@ func main() {
 	insecure := flag.Bool("insecure", false, "buddy: do NOT verify the buddy's identity (unsafe; testing only)")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
+	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
 	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
+	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
 	punchDur := flag.Duration("punch", 2*time.Second, "buddy: how long to hole-punch before bringing up QUIC")
 	idleTimeout := flag.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all")
@@ -105,6 +109,12 @@ func main() {
 	// Handshake allowlist admin subcommands operate on --authorized and exit.
 	if cmd := flag.Arg(0); cmd == "approve" || cmd == "allowclient" || cmd == "list" || cmd == "revoke" {
 		os.Exit(runAuthCmd(*authorized, cmd, flag.Args()[1:]))
+	}
+	// `peers` subcommands let a node curate its OWN buddy manifest (--peers-file,
+	// + --known-peers for revocation) and exit: `peers <list|add|remove> [args]`.
+	// Self-management only — there is no admin authority over other nodes.
+	if flag.Arg(0) == "peers" {
+		os.Exit(runPeersCmd(*peersFile, *knownPeers, flag.Args()[1:]))
 	}
 
 	// Env fallbacks (handy for systemd; keeps the secret token out of argv/ps).
@@ -170,7 +180,7 @@ func main() {
 	bArgs := buddyArgs{
 		server: *server, serverKey: *serverKey, token: *token, peerKey: *peerKey,
 		knownPeers: *knownPeers, insecure: *insecure, code: *code, keyPath: *keyPath,
-		peersPath: *peersPath, localListen: *localListen, forward: *forward,
+		peersPath: *peersPath, peersFile: *peersFile, localListen: *localListen, forward: *forward, vipListen: *vipListen,
 		punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
 		// Interactive only when not explicitly disabled AND a human is at the
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
@@ -317,7 +327,8 @@ func orDefault(v, def string) string {
 
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
-	localListen, forward, name                                              string
+	peersFile                                                               string
+	localListen, forward, vipListen, name                                   string
 	insecure, status, interactive, ephemeral, quic, dns, lazy               bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
@@ -327,8 +338,8 @@ func (a buddyArgs) config() role.BuddyConfig {
 	return role.BuddyConfig{
 		Server: a.server, ServerKey: a.serverKey, Token: a.token,
 		PeerKey: a.peerKey, KnownPeers: a.knownPeers, Insecure: a.insecure,
-		Code: a.code, KeyPath: a.keyPath, PeersPath: a.peersPath,
-		LocalListen: a.localListen, Forward: a.forward,
+		Code: a.code, KeyPath: a.keyPath, PeersPath: a.peersPath, PeersFile: a.peersFile,
+		LocalListen: a.localListen, Forward: a.forward, VIPListen: a.vipListen,
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
@@ -351,9 +362,30 @@ func (a buddyArgs) validate() {
 		fmt.Fprintln(os.Stderr, "error: --status needs --token (the pairing token)")
 		os.Exit(2)
 	}
-	if !a.status && a.localListen == "" && a.forward == "" {
-		fmt.Fprintln(os.Stderr, "error: set at least one of -L or -forward (otherwise the tunnel carries nothing)")
+	if !a.status && a.localListen == "" && a.forward == "" && a.vipListen == "" {
+		fmt.Fprintln(os.Stderr, "error: set at least one of -L, --vip-listen or -forward (otherwise the tunnel carries nothing)")
 		os.Exit(2)
+	}
+	if a.vipListen != "" {
+		if _, err := net.LookupPort("tcp", a.vipListen); err != nil {
+			fmt.Fprintf(os.Stderr, "error: --vip-listen %q is not a valid TCP port\n", a.vipListen)
+			os.Exit(2)
+		}
+	}
+	// --peers-file is the multi-buddy manifest path; it owns pairing for every
+	// listed buddy, so it cannot be combined with the single-peer pairing modes.
+	if a.peersFile != "" {
+		switch {
+		case a.token != "" || a.peerKey != "":
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --token/--peer-key (the manifest pins and pairs each buddy)")
+			os.Exit(2)
+		case a.ephemeral:
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --invite/--join (use a bootstrap token per line in the manifest)")
+			os.Exit(2)
+		case a.lazy:
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --lazy")
+			os.Exit(2)
+		}
 	}
 	if a.lazy && a.localListen == "" {
 		fmt.Fprintln(os.Stderr, "error: --lazy requires -L (there is no listener to keep open without it)")
@@ -425,6 +457,44 @@ func printIdentity(keyPath string) {
 	fmt.Println(bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
 }
 
+// runPeersCmd dispatches `peers <list|add|remove>` against the --peers-file
+// manifest (and --known-peers for revocation), then exits.
+func runPeersCmd(peersFile, knownPeers string, args []string) int {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers <list|add|remove> [args]")
+		return 2
+	}
+	var err error
+	switch args[0] {
+	case "list":
+		err = role.PeersList(peersFile, knownPeers)
+	case "add":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers add <peer-pubkey> [bootstrap-token]")
+			return 2
+		}
+		token := ""
+		if len(args) > 2 {
+			token = args[2]
+		}
+		err = role.PeersAdd(peersFile, args[1], token)
+	case "remove":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers remove <peer-pubkey>")
+			return 2
+		}
+		err = role.PeersRemove(peersFile, knownPeers, args[1])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown peers subcommand %q (want list|add|remove)\n", args[0])
+		return 2
+	}
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "error:", err)
+		return 1
+	}
+	return 0
+}
+
 func runAuthCmd(path, cmd string, args []string) int {
 	if path == "" {
 		fmt.Fprintln(os.Stderr, "error: --authorized <file> is required for "+cmd)
@@ -493,7 +563,7 @@ One binary, three roles (always chosen explicitly with --role):
   relay      a public-IP node that blindly forwards encrypted sessions (fallback)
   handshake  the bootstrap/matchmaking server on a VPS (pairs two buddies)
 
-QUICK START — connect two machines (BuddyPeer)
+QUICK START — connect two machines
 
   1) On a VPS with a public IP, run the bootstrap server and print its key:
        %[1]s --role=handshake --key /var/lib/%[1]s/id.key
@@ -508,10 +578,31 @@ QUICK START — connect two machines (BuddyPeer)
        %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
             --join=TOKEN -L 127.0.0.1:9000
 
+MANY BUDDIES (MultiPeer) — one node, several tunnels at once
+
+  List each buddy's pinned key (+ a one-time bootstrap token) in a manifest, then
+  hold a tunnel to every one of them and route by name:
+       %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
+            --peers-file /var/lib/%[1]s/peers --vip-listen 8080 --dns
+  Now  curl http://alice.buddy:8080  reaches that buddy through its own tunnel.
+  Curate the list with the peers subcommands below; one failing buddy never
+  affects the others.
+
+NAMES & ON-DEMAND
+
+  --name NAME --dns   Reach buddies by NAME.buddy instead of a virtual IP — a
+                      local stub resolver (BuddyDNS) answers *.buddy from the
+                      live peer list. See docs/BUDDYDNS.md.
+  --lazy              With -L, bind the local listener immediately but defer the
+                      tunnel until the first connection actually arrives (the
+                      tunnel sleeps until something connects).
+
 COMMANDS
   %[1]s gen-token                            mint a strong shared token
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
+  %[1]s --peers-file PATH peers list|add|remove   manage your buddies (MultiPeer)
+  %[1]s --authorized FILE approve|allowclient|list|revoke   server allowlist (approval mode)
   %[1]s version
 
 SECURITY — please read

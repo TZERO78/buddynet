@@ -38,7 +38,7 @@ func Relay(ctx context.Context, cfg RelayConfig) error {
 		return err
 	}
 	defer conn.Close()
-	log.Printf("buddynet relay listening on %s (udp, dual-stack) — forwarding encrypted sessions blind", conn.LocalAddr())
+	log.Printf("RELAY: action=listening addr=%s transport=udp detail=%q", conn.LocalAddr(), "forwarding encrypted sessions blind")
 	if len(cfg.AllowCIDRs) > 0 {
 		log.Printf("relay access control ON: only %v may bind a leg", cfg.AllowCIDRs)
 	} else {

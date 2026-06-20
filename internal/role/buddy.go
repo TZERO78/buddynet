@@ -28,13 +28,30 @@ type BuddyConfig struct {
 
 	PeerKey    string // pin the partner's key (strongest)
 	KnownPeers string // TOFU trust store path
-	Insecure   bool   // disable partner verification (testing only)
-	Code       string // enrollment code for an allowlist server
-	KeyPath    string // this node's identity key (created if missing; "" = ephemeral)
-	PeersPath  string // offline peer cache (peers.json); "" = none
+
+	// PeersFile is a multi-buddy manifest (--peers-file): one line per buddy,
+	// "<peer-pubkey-b64> [bootstrap-token]". When set, the supervisor maintains a
+	// tunnel to every listed buddy at once (plus any previously paired peers from
+	// the session store). Each buddy is pinned by key (Model A) and pairs via its
+	// own token; once paired, reconnects use a stored per-peer session secret.
+	// Incompatible with the single-peer pairing modes (--invite/--join/--token)
+	// and --lazy; use --vip-listen (not -L) to route to more than one buddy.
+	PeersFile string
+	Insecure  bool   // disable partner verification (testing only)
+	Code      string // enrollment code for an allowlist server
+	KeyPath   string // this node's identity key (created if missing; "" = ephemeral)
+	PeersPath string // offline peer cache (peers.json); "" = none
 
 	LocalListen string // -L: expose local TCP/unix and forward to the peer
 	Forward     string // -forward: dial this local service for incoming streams
+
+	// VIPListen is the port for per-buddy virtual-IP routing (--vip-listen). When
+	// set, each connected partner's VIP (10.66.X.Y) is bound on lo and a listener
+	// on partnerVIP:VIPListen forwards through THAT buddy's tunnel — so name.buddy
+	// resolves and routes to the right peer even with many buddies at once. Unlike
+	// -L (one local port → one peer) it scales to N peers; needs NET_ADMIN, and
+	// degrades gracefully (WARNING, tunnel still up) when that is missing.
+	VIPListen string
 
 	PunchDur    time.Duration
 	IdleTimeout time.Duration
@@ -198,6 +215,37 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		return buddyProbe(ctx, cfg, nd)
 	}
 
+	// Multi-peer (--peers-file): supervise one isolated worker per listed buddy
+	// (bootstrap or reconnect), plus any previously paired peers. A single -L port
+	// cannot route to N buddies, so >1 buddy needs --vip-listen instead.
+	if cfg.PeersFile != "" {
+		specs, serr := assemblePeers(cfg)
+		if serr != nil {
+			return serr
+		}
+		if len(specs) == 0 {
+			return fmt.Errorf("--peers-file %s lists no buddies (and no stored sessions)", cfg.PeersFile)
+		}
+		if len(specs) > 1 && cfg.LocalListen != "" {
+			return fmt.Errorf("multi-peer (%d buddies) with -L cannot route to N buddies: use --vip-listen instead", len(specs))
+		}
+		return supervise(ctx, cfg, nd, specs)
+	}
+
+	// Multi-peer without a manifest: more than one buddy already paired (a stored
+	// session each), e.g. accumulated via repeated --invite runs. Supervise one
+	// isolated reconnect worker per session.
+	if sessions, serr := loadSessions(cfg.KnownPeers); serr == nil && len(sessions) > 1 {
+		if cfg.LocalListen != "" {
+			return fmt.Errorf("multi-peer (%d buddies) with -L cannot route to N buddies: use --vip-listen instead", len(sessions))
+		}
+		specs := make([]peerSpec, len(sessions))
+		for i, s := range sessions {
+			specs[i] = peerSpec{pin: s.pin}
+		}
+		return supervise(ctx, cfg, nd, specs)
+	}
+
 	// --lazy: bind the -L listener immediately so clients never see ECONNREFUSED,
 	// but defer the QUIC tunnel until the first connection actually arrives.
 	var lt *lazyTunnel
@@ -208,66 +256,15 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 			return fmt.Errorf("lazy -L %s: %w", cfg.LocalListen, lerr)
 		}
 		go func() { <-ctx.Done(); ln.Close() }()
-		log.Printf("lazy -L: listening on %s (tunnel starts on first connection)", cfg.LocalListen)
+		log.Printf("LAZY: action=listening addr=%s detail=%q", cfg.LocalListen, "tunnel deferred until first connection")
 		lt = newLazyTunnel()
 		go lazyForward(ctx, ln, lt, &lazyCount)
 	}
 
-	inviteStart := time.Now()
-	backoff := reconnectBase
-	for {
-		// In lazy mode, sleep until a local connection needs a tunnel.
-		if lt != nil {
-			select {
-			case <-lt.wake:
-			case <-ctx.Done():
-				return nil
-			}
-		}
-
-		// Prefer a stored session (reconnect): use its secret as the rendezvous
-		// token and pin the partner key it recorded. Otherwise pair with the
-		// invite/legacy token; an ephemeral invite stores a session on success.
-		att, aerr := nextAttempt(cfg)
-		if aerr != nil {
-			return aerr
-		}
-		// A one-time invite is only valid for a limited window of first pairing.
-		if cfg.Ephemeral && att.firstPairing && time.Since(inviteStart) > cfg.InviteTimeout {
-			return fmt.Errorf("invite token expired after %s without pairing — run --invite again for a fresh one", cfg.InviteTimeout)
-		}
-
-		runStart := time.Now()
-		if err := buddyRun(ctx, cfg, att, nd, lt); err != nil && ctx.Err() == nil {
-			// An unconfirmed SAS (mismatch or timeout) is a deliberate "do not
-			// trust" — retrying would just re-prompt forever, so stop instead of
-			// reconnecting.
-			if errors.Is(err, ErrSASRejected) || errors.Is(err, ErrSASTimeout) {
-				return fmt.Errorf("aborted: %w", err)
-			}
-			log.Printf("tunnel error: %v", err)
-		}
-		if ctx.Err() != nil {
-			return nil
-		}
-		// A run that lasted longer than the cap means a real tunnel was up; reset
-		// the backoff so a single long-lived session always reconnects promptly.
-		// A run that failed fast (server/network flapping) grows the delay, with
-		// jitter, so many buddies don't reconnect in lockstep (thundering herd).
-		if time.Since(runStart) > reconnectMax {
-			backoff = reconnectBase
-		}
-		wait := jitter(backoff)
-		log.Printf("reconnecting in %s...", wait.Round(100*time.Millisecond))
-		select {
-		case <-ctx.Done():
-			return nil
-		case <-time.After(wait):
-		}
-		if backoff *= 2; backoff > reconnectMax {
-			backoff = reconnectMax
-		}
-	}
+	// Single-peer / first-pairing path: one reconnect loop. nextAttempt prefers a
+	// stored session (reconnect, pinning the recorded key) and otherwise pairs with
+	// the invite/legacy token; an ephemeral invite stores a session on success.
+	return peerLoop(ctx, cfg, nd, lt, func() (attempt, error) { return nextAttempt(cfg) }, time.Now())
 }
 
 // Reconnect backoff bounds: start at reconnectBase, double up to reconnectMax,

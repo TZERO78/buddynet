@@ -126,6 +126,95 @@ All tests passed.
 | Repo path | `/data/repo` |
 | SSH host key | persisted in `kopia-b-key` volume; published to `/data/kopia-b-hostkey.pub` on startup |
 
+## VIP-routing test (Phase 1.3: Loopback-VIP-Bind)
+
+The overlay `docker-compose.vip.yml` validates `--vip-listen`: a buddy binds its
+connected partner's virtual IP (`10.66.X.Y`) on its own loopback interface (via a
+raw netlink `RTM_NEWADDR`, no `ip`/root subprocess) and routes connections to it
+through the tunnel. Unlike `-L` (one fixed local port → one peer), this is the
+per-buddy routing path that scales to many buddies.
+
+```
+vip-a  --forward 127.0.0.1:7777   ──BuddyNet──►  vip-b  --vip-listen 7777
+(alice, httpd :7777)                              (bob binds alice's VIP on lo)
+
+inside vip-b:  curl http://alice.buddy:7777  →  alice's httpd, via the tunnel
+```
+
+`vip-b` runs with `cap_add: [NET_ADMIN]` for the loopback address bind (without
+it the feature degrades gracefully — a `WARNING` and no VIP route, tunnel still up).
+
+```bash
+cd lab
+docker compose -f docker-compose.yml -f docker-compose.vip.yml up -d --build
+./test-vip.sh
+```
+
+`test-vip.sh` checks, in sequence:
+
+1. Both tunnels come up (`CONNECTED`).
+2. `vip-b` bound alice's VIP on `lo` and is listening on it (also confirmed via `ip addr`).
+3. `curl http://<alice-vip>:7777` inside `vip-b` reaches alice's httpd through the tunnel.
+4. `curl http://alice.buddy:7777` works (name → VIP via the stub resolver → tunnel).
+5. **No over-binding**: a VIP that is not a connected buddy is unbound and unreachable.
+
+```
+  [PASS] vip-b bound 10.66.X.Y on lo and is listening on :7777
+  [PASS] ip addr confirms 10.66.X.Y/32 on vip-b's lo
+  [PASS] HTTP over VIP routing (vip-b → alice:7777 via tunnel) works
+  [PASS] alice.buddy resolves to 10.66.X.Y on vip-b's stub
+  [PASS] HTTP via name alice.buddy:7777 works end to end
+  [PASS] unrelated VIP 10.66.200.201 is not bound/reachable (no over-binding)
+
+  Results: 6 passed, 0 failed
+```
+
+## BuddyParty test (Phase 1.4: multi-peer, 3–5 buddies)
+
+The overlay `docker-compose.party.yml` runs one **hub** that holds **five tunnels
+at once** and routes to each buddy by name — the end-to-end proof of the
+multi-peer supervisor (`--peers-file`) plus VIP routing (`--vip-listen`).
+
+```
+party-{beta,gamma,delta,epsilon,zeta} (each httpd)  ──BuddyNet──►  party-hub
+                                                              --vip-listen 8080
+                                                       (--peers-file lists all 5)
+
+inside party-hub:  curl http://beta.buddy:8080 … zeta.buddy:8080  → each buddy's httpd
+```
+
+Every node is pinned by key (Model A) and pairs via a per-pair bootstrap token.
+`setup-party.sh` bootstraps an identity key for each node, then writes the
+manifests (`lab/party/*.peers`, git-ignored — they hold keys + tokens):
+
+```bash
+cd lab
+./setup-party.sh          # build, extract keys, write manifests, start 6 containers
+./test-party.sh           # verify all 5 tunnels + isolation when one buddy fails
+```
+
+`test-party.sh` checks:
+
+1. The hub binds all 5 buddy VIPs on `lo` (5 simultaneous tunnels).
+2. `curl <name>.buddy:8080` on the hub reaches the **correct** buddy (each serves
+   a page naming itself, so routing is verified per buddy).
+3. **Isolation**: stopping one buddy (`zeta`) leaves the other four reachable and
+   releases only its VIP — one failing worker never affects the others.
+
+```
+  [PASS] hub is listening on 5 buddy VIPs
+  [PASS] beta.buddy:8080 → beta's httpd …  (×5)
+  [PASS] beta/gamma/delta/epsilon still reachable after zeta went down
+  [PASS] zeta unreachable after stop (its VIP released)
+
+  Results: 11 passed, 0 failed
+```
+
+To run with fewer buddies (3–4), trim the `BUDDIES` list in `setup-party.sh` /
+`test-party.sh` and remove the matching `party-<name>` services from
+`docker-compose.party.yml`. Live add/remove on the hub works too — edit
+`party/hub.peers` (or use `buddynet … peers add/remove`) and `kill -HUP` the hub.
+
 ## Observing the tunnels
 
 ```bash
