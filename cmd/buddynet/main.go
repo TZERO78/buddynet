@@ -70,6 +70,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "buddy: do NOT verify the buddy's identity (unsafe; testing only)")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
+	peersFile := flag.String("peers-file", "", "buddy: multi-buddy manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
 	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
 	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
@@ -172,7 +173,7 @@ func main() {
 	bArgs := buddyArgs{
 		server: *server, serverKey: *serverKey, token: *token, peerKey: *peerKey,
 		knownPeers: *knownPeers, insecure: *insecure, code: *code, keyPath: *keyPath,
-		peersPath: *peersPath, localListen: *localListen, forward: *forward, vipListen: *vipListen,
+		peersPath: *peersPath, peersFile: *peersFile, localListen: *localListen, forward: *forward, vipListen: *vipListen,
 		punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
 		// Interactive only when not explicitly disabled AND a human is at the
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
@@ -319,6 +320,7 @@ func orDefault(v, def string) string {
 
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
+	peersFile                                                               string
 	localListen, forward, vipListen, name                                   string
 	insecure, status, interactive, ephemeral, quic, dns, lazy               bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
@@ -329,7 +331,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 	return role.BuddyConfig{
 		Server: a.server, ServerKey: a.serverKey, Token: a.token,
 		PeerKey: a.peerKey, KnownPeers: a.knownPeers, Insecure: a.insecure,
-		Code: a.code, KeyPath: a.keyPath, PeersPath: a.peersPath,
+		Code: a.code, KeyPath: a.keyPath, PeersPath: a.peersPath, PeersFile: a.peersFile,
 		LocalListen: a.localListen, Forward: a.forward, VIPListen: a.vipListen,
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
@@ -360,6 +362,21 @@ func (a buddyArgs) validate() {
 	if a.vipListen != "" {
 		if _, err := net.LookupPort("tcp", a.vipListen); err != nil {
 			fmt.Fprintf(os.Stderr, "error: --vip-listen %q is not a valid TCP port\n", a.vipListen)
+			os.Exit(2)
+		}
+	}
+	// --peers-file is the multi-buddy manifest path; it owns pairing for every
+	// listed buddy, so it cannot be combined with the single-peer pairing modes.
+	if a.peersFile != "" {
+		switch {
+		case a.token != "" || a.peerKey != "":
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --token/--peer-key (the manifest pins and pairs each buddy)")
+			os.Exit(2)
+		case a.ephemeral:
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --invite/--join (use a bootstrap token per line in the manifest)")
+			os.Exit(2)
+		case a.lazy:
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --lazy")
 			os.Exit(2)
 		}
 	}

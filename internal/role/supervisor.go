@@ -2,7 +2,6 @@ package role
 
 import (
 	"context"
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"log"
@@ -81,20 +80,22 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 	}
 }
 
-// superviseReconnect runs one peerLoop per stored session concurrently — the
-// multi-peer core. A worker that stops (revoked session, or an unconfirmed SAS)
-// takes down ONLY its own buddy; the others keep running. It returns when ctx is
-// cancelled and every worker has drained (no goroutine leak).
-func superviseReconnect(ctx context.Context, cfg BuddyConfig, nd *node, sessions []storedSession) error {
-	log.Printf("multi-peer: supervising %d paired buddies", len(sessions))
+// supervise runs one peerLoop per peer spec concurrently — the multi-peer core.
+// Each worker bootstraps (first pairing via its token) or reconnects (via a
+// stored session), independently. A worker that stops (revoked session and no
+// token, or an unconfirmed SAS) takes down ONLY its own buddy; the others keep
+// running. It returns when ctx is cancelled and every worker has drained (no
+// goroutine leak).
+func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec) error {
+	log.Printf("SUPERVISOR: action=start buddies=%d", len(specs))
 	var wg sync.WaitGroup
-	for _, s := range sessions {
-		pin := s.pin
+	for _, s := range specs {
+		s := s
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := peerLoop(ctx, cfg, nd, nil, reconnectSource(cfg, pin), time.Time{}); err != nil {
-				log.Printf("peer %s stopped: %v", keyTag(bcrypto.PubKeyB64(pin)), err)
+			if err := peerLoop(ctx, cfg, nd, nil, peerSource(cfg, s), time.Time{}); err != nil {
+				log.Printf("SUPERVISOR: action=peer-stopped key=%s detail=%q", keyTag(bcrypto.PubKeyB64(s.pin)), err.Error())
 			}
 		}()
 	}
@@ -102,19 +103,27 @@ func superviseReconnect(ctx context.Context, cfg BuddyConfig, nd *node, sessions
 	return nil
 }
 
-// reconnectSource is one peer worker's attempt source: it reloads THIS peer's
-// session secret each round (so a re-pair is picked up, and a session removed
-// from the store ends the worker via errSessionRevoked) and pins the recorded
-// partner key — never an unauthenticated, publicly computable rendezvous.
-func reconnectSource(cfg BuddyConfig, pin ed25519.PublicKey) nextAttemptFn {
+// peerSource is one worker's attempt source. It reloads THIS peer's stored
+// session each round: if a session exists, reconnect with its secret (pinning the
+// recorded key — never an unauthenticated, publicly computable rendezvous); a
+// re-pair is thus picked up automatically. With no session yet, fall back to the
+// one-time bootstrap token (first pairing, pinned, storing a session on success).
+// With neither, the worker stops via errSessionRevoked (a paired peer whose
+// session was removed = revoked; a manifest peer without a token has no path).
+func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
 	return func() (attempt, error) {
-		secret, ok, err := loadSessionFor(cfg.KnownPeers, pin)
+		secret, ok, err := loadSessionFor(cfg.KnownPeers, spec.pin)
 		if err != nil {
 			return attempt{}, fmt.Errorf("session store %s: %w", cfg.KnownPeers, err)
 		}
-		if !ok {
+		if ok {
+			return attempt{rendezvous: secret, pin: spec.pin}, nil
+		}
+		if spec.token == "" {
 			return attempt{}, errSessionRevoked
 		}
-		return attempt{rendezvous: secret, pin: pin}, nil
+		// First pairing: meet at the shared bootstrap token, pin the manifest key
+		// (so no SAS prompt — Model A), and store a session secret on success.
+		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true}, nil
 	}
 }

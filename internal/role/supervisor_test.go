@@ -12,10 +12,10 @@ import (
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 )
 
-// reconnectSource must hand a worker its own pinned partner key and the stored
-// secret for it, and signal revocation when that peer's session is gone — never a
-// blank or cross-peer attempt.
-func TestReconnectSource(t *testing.T) {
+// peerSource must reconnect via a stored session when one exists, bootstrap via
+// the token when none does yet, and revoke (stop) when there is neither — always
+// pinning the right partner, never a blank or cross-peer attempt.
+func TestPeerSource(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known_peers")
 	a, _, _ := ed25519.GenerateKey(rand.Reader)
 	b, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -24,20 +24,33 @@ func TestReconnectSource(t *testing.T) {
 	}
 	cfg := BuddyConfig{KnownPeers: path}
 
-	att, err := reconnectSource(cfg, a)()
+	// a has a stored session → reconnect attempt with the secret, pinned.
+	att, err := peerSource(cfg, peerSpec{pin: a, token: "boot-a"})()
 	if err != nil {
 		t.Fatalf("present session: %v", err)
 	}
-	if att.rendezvous != "secret-a" {
-		t.Fatalf("rendezvous = %q, want secret-a", att.rendezvous)
+	if att.rendezvous != "secret-a" || att.firstPairing {
+		t.Fatalf("want reconnect via secret, got rendezvous=%q firstPairing=%v", att.rendezvous, att.firstPairing)
 	}
 	if !att.pin.Equal(a) {
 		t.Fatal("attempt must pin partner a")
 	}
 
-	// A peer with no stored session is revoked — the worker exits cleanly.
-	if _, err := reconnectSource(cfg, b)(); !errors.Is(err, errSessionRevoked) {
-		t.Fatalf("absent session: want errSessionRevoked, got %v", err)
+	// b has no session but a token → bootstrap attempt (first pairing, pinned).
+	att, err = peerSource(cfg, peerSpec{pin: b, token: "boot-b"})()
+	if err != nil {
+		t.Fatalf("bootstrap: %v", err)
+	}
+	if att.rendezvous != "boot-b" || att.inviteToken != "boot-b" || !att.firstPairing {
+		t.Fatalf("want bootstrap via token, got %+v", att)
+	}
+	if !att.pin.Equal(b) {
+		t.Fatal("bootstrap must pin partner b")
+	}
+
+	// b with neither session nor token → revoked (worker stops cleanly).
+	if _, err := peerSource(cfg, peerSpec{pin: b})(); !errors.Is(err, errSessionRevoked) {
+		t.Fatalf("no session/token: want errSessionRevoked, got %v", err)
 	}
 }
 
@@ -60,28 +73,28 @@ func TestPeerLoopReturnsSourceError(t *testing.T) {
 	}
 }
 
-// superviseReconnect starts one isolated worker per session and drains them all.
-// With every session unresolvable (no secret stored), each worker exits via
+// supervise starts one isolated worker per spec and drains them all. With every
+// spec unresolvable (no session, no token), each worker exits via
 // errSessionRevoked independently and the supervisor returns without hanging —
 // the isolation property: one peer ending never blocks the others.
-func TestSuperviseReconnectIsolatedDrain(t *testing.T) {
+func TestSuperviseIsolatedDrain(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known_peers") // no session lines written
-	var sessions []storedSession
+	var specs []peerSpec
 	for i := 0; i < 3; i++ {
 		pub, _, _ := ed25519.GenerateKey(rand.Reader)
-		sessions = append(sessions, storedSession{pin: pub})
+		specs = append(specs, peerSpec{pin: pub})
 	}
 	cfg := BuddyConfig{KnownPeers: path}
 
 	done := make(chan error, 1)
-	go func() { done <- superviseReconnect(context.Background(), cfg, &node{}, sessions) }()
+	go func() { done <- supervise(context.Background(), cfg, &node{}, specs) }()
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("superviseReconnect: %v", err)
+			t.Fatalf("supervise: %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("superviseReconnect hung — a stopped peer must not block the others")
+		t.Fatal("supervise hung — a stopped peer must not block the others")
 	}
 }
 

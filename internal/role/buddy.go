@@ -28,10 +28,19 @@ type BuddyConfig struct {
 
 	PeerKey    string // pin the partner's key (strongest)
 	KnownPeers string // TOFU trust store path
-	Insecure   bool   // disable partner verification (testing only)
-	Code       string // enrollment code for an allowlist server
-	KeyPath    string // this node's identity key (created if missing; "" = ephemeral)
-	PeersPath  string // offline peer cache (peers.json); "" = none
+
+	// PeersFile is a multi-buddy manifest (--peers-file): one line per buddy,
+	// "<peer-pubkey-b64> [bootstrap-token]". When set, the supervisor maintains a
+	// tunnel to every listed buddy at once (plus any previously paired peers from
+	// the session store). Each buddy is pinned by key (Model A) and pairs via its
+	// own token; once paired, reconnects use a stored per-peer session secret.
+	// Incompatible with the single-peer pairing modes (--invite/--join/--token)
+	// and --lazy; use --vip-listen (not -L) to route to more than one buddy.
+	PeersFile string
+	Insecure  bool   // disable partner verification (testing only)
+	Code      string // enrollment code for an allowlist server
+	KeyPath   string // this node's identity key (created if missing; "" = ephemeral)
+	PeersPath string // offline peer cache (peers.json); "" = none
 
 	LocalListen string // -L: expose local TCP/unix and forward to the peer
 	Forward     string // -forward: dial this local service for incoming streams
@@ -206,15 +215,35 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		return buddyProbe(ctx, cfg, nd)
 	}
 
-	// Multi-peer: when more than one buddy is already paired (a stored session
-	// each), supervise one isolated reconnect worker per buddy. -L and --lazy bind
-	// a single local port and have no per-peer routing yet (Phase 1.3 VIP routing),
-	// so the multi-peer data plane is the -forward serve side only; reject -L here.
+	// Multi-peer (--peers-file): supervise one isolated worker per listed buddy
+	// (bootstrap or reconnect), plus any previously paired peers. A single -L port
+	// cannot route to N buddies, so >1 buddy needs --vip-listen instead.
+	if cfg.PeersFile != "" {
+		specs, serr := assemblePeers(cfg)
+		if serr != nil {
+			return serr
+		}
+		if len(specs) == 0 {
+			return fmt.Errorf("--peers-file %s lists no buddies (and no stored sessions)", cfg.PeersFile)
+		}
+		if len(specs) > 1 && cfg.LocalListen != "" {
+			return fmt.Errorf("multi-peer (%d buddies) with -L cannot route to N buddies: use --vip-listen instead", len(specs))
+		}
+		return supervise(ctx, cfg, nd, specs)
+	}
+
+	// Multi-peer without a manifest: more than one buddy already paired (a stored
+	// session each), e.g. accumulated via repeated --invite runs. Supervise one
+	// isolated reconnect worker per session.
 	if sessions, serr := loadSessions(cfg.KnownPeers); serr == nil && len(sessions) > 1 {
 		if cfg.LocalListen != "" {
-			return fmt.Errorf("multi-peer (%d buddies) with -L is not supported yet: one -L port cannot route to N buddies (Phase 1.3). Use -forward to serve a local service to all buddies", len(sessions))
+			return fmt.Errorf("multi-peer (%d buddies) with -L cannot route to N buddies: use --vip-listen instead", len(sessions))
 		}
-		return superviseReconnect(ctx, cfg, nd, sessions)
+		specs := make([]peerSpec, len(sessions))
+		for i, s := range sessions {
+			specs[i] = peerSpec{pin: s.pin}
+		}
+		return supervise(ctx, cfg, nd, specs)
 	}
 
 	// --lazy: bind the -L listener immediately so clients never see ECONNREFUSED,
