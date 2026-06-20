@@ -38,8 +38,13 @@ const (
 
 	// maxAuthorizedKeys bounds how many entries the allowlist file can build into
 	// an in-memory map at startup/reload, so a huge (accidental or hostile, but
-	// necessarily local) file cannot exhaust memory.
-	maxAuthorizedKeys = 100_000
+	// necessarily local) file cannot exhaust memory. BuddyNet supports at most
+	// MaxBuddies simultaneous peers per node; the allowlist may hold more than that
+	// (rotated/revoked keys are kept for history), but a list far larger than this
+	// is almost certainly a misconfiguration. Generous headroom over MaxBuddies for
+	// key rotation, sized to the threat model rather than left effectively
+	// unbounded.
+	maxAuthorizedKeys = 1024
 )
 
 // tightenPerms enforces 0600 on a sensitive allowlist/pending file: if it is

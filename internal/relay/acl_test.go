@@ -26,7 +26,7 @@ func TestRelayCIDRGate(t *testing.T) {
 	// Denied: loopback is not in 10.0.0.0/8.
 	denyConn := mustListen(t)
 	defer denyConn.Close()
-	go NewServer(2*time.Second, mustPrefixes(t, "10.0.0.0/8")).Run(denyConn)
+	go NewServer(2*time.Second, mustPrefixes(t, "10.0.0.0/8"), 0, 0).Run(denyConn)
 	denyDial := &net.UDPAddr{IP: net.IPv6loopback, Port: denyConn.LocalAddr().(*net.UDPAddr).Port}
 
 	c := mustListen(t)
@@ -38,7 +38,7 @@ func TestRelayCIDRGate(t *testing.T) {
 	// Allowed: loopback is explicitly listed.
 	allowConn := mustListen(t)
 	defer allowConn.Close()
-	go NewServer(2*time.Second, mustPrefixes(t, "::1/128", "127.0.0.1/32")).Run(allowConn)
+	go NewServer(2*time.Second, mustPrefixes(t, "::1/128", "127.0.0.1/32"), 0, 0).Run(allowConn)
 	allowDial := &net.UDPAddr{IP: net.IPv6loopback, Port: allowConn.LocalAddr().(*net.UDPAddr).Port}
 
 	c2 := mustListen(t)
@@ -50,7 +50,7 @@ func TestRelayCIDRGate(t *testing.T) {
 
 // An empty allowlist keeps the relay open to all (default behaviour).
 func TestRelayOpenByDefault(t *testing.T) {
-	s := NewServer(2*time.Second, nil)
+	s := NewServer(2*time.Second, nil, 0, 0)
 	if !s.cidrAllowed(net.IPv6loopback) || !s.cidrAllowed(net.ParseIP("8.8.8.8")) {
 		t.Fatal("with no allowlist every source must be allowed")
 	}

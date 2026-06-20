@@ -102,6 +102,13 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 // drops (the server is not in the path); --reauth-interval bounds how long that
 // can be, the same caveat as any revocation on a direct tunnel.
 func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec) error {
+	// Defensive belt-and-suspenders: callers (assemblePeers / the session path)
+	// already enforce the cap, so reaching here over the limit is an internal bug.
+	if len(specs) > MaxBuddies {
+		return fmt.Errorf("internal: supervise called with %d specs (max %d)", len(specs), MaxBuddies)
+	}
+	log.Printf("BUDDY: action=supervise peers=%d/%d", len(specs), MaxBuddies)
+
 	// running, gen and the loop below all live in THIS goroutine only, so the map
 	// needs no lock. Each worker carries a generation so a stale exit from an old,
 	// already-replaced instance can't clobber a freshly started one for the same key.

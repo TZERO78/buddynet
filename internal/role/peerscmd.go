@@ -140,6 +140,10 @@ func PeersAdd(peersFile, key, token string) error {
 			return nil
 		}
 	}
+	// Refuse to grow past the design limit (a new key would make len+1).
+	if len(existing) >= MaxBuddies {
+		return errTooManyBuddies(len(existing) + 1)
+	}
 
 	if err := os.MkdirAll(filepath.Dir(peersFile), 0o700); err != nil {
 		return err

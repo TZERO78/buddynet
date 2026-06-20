@@ -12,7 +12,7 @@ import (
 // peer under s.mu. The race detector proves the sync.Map + atomic access pattern
 // is correct; the test just has to exercise it.
 func TestRelayForwardConcurrentLockFree(t *testing.T) {
-	s := NewServer(time.Minute, nil)
+	s := NewServer(time.Minute, nil, 0, 0)
 	conn := mustListen(t)
 	defer conn.Close()
 
