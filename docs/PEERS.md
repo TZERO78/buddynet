@@ -67,16 +67,24 @@ Curate your own list without editing the file by hand. These run and exit:
 ```bash
 # Show your buddies and whether each is paired yet:
 buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers peers list
-# ALICE_KEY...  paired    token-set  (manifest)
-# BOB_KEY...    unpaired  token-set  (manifest)
-# CAROL_KEY...  paired    no-token   (session only)
+# VIP            NAME   STATUS    KEY     TOKEN      SOURCE
+# 10.66.18.240   alice  paired    m2x9Kp  token-set  manifest
+# 10.66.7.13     —      unpaired  q8Lm2A  token-set  manifest
+# 10.66.44.2     bob    paired    Zk1pQ9  —          session-only
 
 # Add a buddy (pinned key + optional bootstrap token):
 buddynet --peers-file /var/lib/buddynet/peers peers add DAVE_KEY shared-token-with-dave
 
-# Remove (revoke) a buddy:
-buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers peers remove DAVE_KEY
+# Remove (revoke) a buddy — the short 6-char KEY from `peers list` is enough:
+buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers peers remove Zk1pQ9
 ```
+
+The `KEY` column is the first 6 characters of the buddy's identity key — a
+human-friendly handle, not the full key. `peers remove` accepts it (or any unique
+prefix, or the full key) and refuses an ambiguous one. `NAME` is the buddy's
+self-asserted `.buddy` name; it is best-effort from the offline cache
+(`--peers` / peers.json) and shows `—` until the buddy has been seen via the
+server. `VIP` is derived deterministically from the key, so it is always shown.
 
 `peers remove` is a **full local revocation**: it drops the manifest line **and**
 the stored session secret. Both are required — removing only the manifest line

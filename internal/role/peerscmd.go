@@ -1,12 +1,16 @@
 package role
 
 import (
+	"crypto/ed25519"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"text/tabwriter"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/peer"
 )
 
 // This file holds the `peers` subcommands a node uses to curate its OWN list of
@@ -21,7 +25,7 @@ import (
 // stored session). Buddies with a stored session but no manifest line — e.g.
 // peers paired before the manifest existed — are listed too, marked accordingly,
 // since the supervisor maintains them as well.
-func PeersList(peersFile, knownPeers string) error {
+func PeersList(peersFile, knownPeers, peersPath string) error {
 	specs, err := loadPeersFile(peersFile)
 	if err != nil {
 		return err
@@ -34,9 +38,25 @@ func PeersList(peersFile, knownPeers string) error {
 	for _, s := range sessions {
 		paired[bcrypto.PubKeyB64(s.pin)] = true
 	}
+	names := loadPeerNames(peersPath) // best-effort; empty until a buddy is seen
+
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	rows := 0
+	emit := func(pin ed25519.PublicKey, status, tok, source string) {
+		keyB64 := bcrypto.PubKeyB64(pin)
+		name := names[keyB64]
+		if name == "" {
+			name = "—"
+		}
+		if rows == 0 {
+			fmt.Fprintln(w, "VIP\tNAME\tSTATUS\tKEY\tTOKEN\tSOURCE")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
+			bcrypto.VirtualIPString(pin), name, status, shortKeyTag(keyB64), tok, source)
+		rows++
+	}
 
 	inManifest := map[string]bool{}
-	count := 0
 	for _, s := range specs {
 		keyB64 := bcrypto.PubKeyB64(s.pin)
 		inManifest[keyB64] = true
@@ -48,21 +68,49 @@ func PeersList(peersFile, knownPeers string) error {
 		if s.token != "" {
 			tok = "token-set"
 		}
-		fmt.Printf("%s  %-8s  %-9s  %s\n", keyB64, status, tok, "(manifest)")
-		count++
+		emit(s.pin, status, tok, "manifest")
 	}
 	for _, s := range sessions {
 		keyB64 := bcrypto.PubKeyB64(s.pin)
 		if inManifest[keyB64] {
 			continue
 		}
-		fmt.Printf("%s  %-8s  %-9s  %s\n", keyB64, "paired", "no-token", "(session only)")
-		count++
+		emit(s.pin, "paired", "—", "session-only")
 	}
-	if count == 0 {
+	if rows == 0 {
 		fmt.Println("(no buddies configured yet)")
+		return nil
 	}
-	return nil
+	return w.Flush()
+}
+
+// shortKeyTag is the 6-char form of a base64 pubkey shown in `peers list`. It is
+// a human-friendly handle, not a unique identifier — `peers remove` resolves it
+// back to a full key (and rejects an ambiguous prefix).
+func shortKeyTag(keyB64 string) string {
+	if len(keyB64) < 6 {
+		return keyB64
+	}
+	return keyB64[:6]
+}
+
+// loadPeerNames best-effort resolves pubkey -> self-asserted name from the
+// offline peer cache (peers.json). Names aren't kept in the manifest or the
+// session store; they're learned via the server's PEER_LIST and cached here, so
+// the map is empty until a buddy has been seen. A missing/unreadable cache is
+// not an error — the name column just shows "—".
+func loadPeerNames(peersPath string) map[string]string {
+	names := map[string]string{}
+	reg, err := peer.Open(peersPath)
+	if err != nil {
+		return names
+	}
+	for _, p := range reg.List() {
+		if p.Name != "" {
+			names[p.PubKey] = p.Name
+		}
+	}
+	return names
 }
 
 // PeersAdd appends a buddy to the manifest: a pinned key and an optional one-time
@@ -118,11 +166,10 @@ func PeersAdd(peersFile, key, token string) error {
 // supervisor reconnecting via the stored session. Other buddies are untouched
 // (the design is decentralised: distrusting one peer never affects the rest).
 func PeersRemove(peersFile, knownPeers, key string) error {
-	pin, err := bcrypto.DecodePubKey(key)
+	keyB64, err := resolveKeyRef(peersFile, knownPeers, key)
 	if err != nil {
-		return fmt.Errorf("bad peer key: %w", err)
+		return err
 	}
-	keyB64 := bcrypto.PubKeyB64(pin)
 
 	manifestRemoved, err := removeManifestLine(peersFile, keyB64)
 	if err != nil {
@@ -140,6 +187,49 @@ func PeersRemove(peersFile, knownPeers, key string) error {
 	fmt.Println("note: a running buddy applies this on SIGHUP (kill -HUP <pid>) or restart;")
 	fmt.Println("      an already-established direct tunnel persists until it drops (see --reauth-interval).")
 	return nil
+}
+
+// resolveKeyRef turns a user-supplied key reference into a full base64 pubkey.
+// A complete, valid key is used as-is (so removing an unknown full key stays a
+// no-op, not an error). Otherwise the reference is treated as a prefix of the
+// base64 key — e.g. the 6-char form shown by `peers list` — and matched against
+// this node's known buddies (manifest + sessions). An unknown or ambiguous
+// prefix is an error so a typo never silently removes the wrong buddy.
+func resolveKeyRef(peersFile, knownPeers, ref string) (string, error) {
+	if pin, err := bcrypto.DecodePubKey(ref); err == nil {
+		return bcrypto.PubKeyB64(pin), nil
+	}
+	known := map[string]struct{}{}
+	specs, err := loadPeersFile(peersFile)
+	if err != nil {
+		return "", err
+	}
+	for _, s := range specs {
+		known[bcrypto.PubKeyB64(s.pin)] = struct{}{}
+	}
+	sessions, err := loadSessions(knownPeers)
+	if err != nil {
+		return "", err
+	}
+	for _, s := range sessions {
+		known[bcrypto.PubKeyB64(s.pin)] = struct{}{}
+	}
+
+	var matches []string
+	for k := range known {
+		if strings.HasPrefix(k, ref) {
+			matches = append(matches, k)
+		}
+	}
+	sort.Strings(matches)
+	switch len(matches) {
+	case 1:
+		return matches[0], nil
+	case 0:
+		return "", fmt.Errorf("no buddy matches %q — use the KEY shown by `peers list`, or the full key", ref)
+	default:
+		return "", fmt.Errorf("key %q is ambiguous (matches %d buddies) — use more characters or the full key", ref, len(matches))
+	}
 }
 
 // removeManifestLine drops every manifest line whose pinned key matches keyB64,

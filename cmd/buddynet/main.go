@@ -155,7 +155,7 @@ func main() {
 	// + --known-peers for revocation) and exit: `peers <list|add|remove> [args]`.
 	// Self-management only — there is no admin authority over other nodes.
 	if flag.Arg(0) == "peers" {
-		os.Exit(runPeersCmd(*peersFile, *knownPeers, flag.Args()[1:]))
+		os.Exit(runPeersCmd(*peersFile, *knownPeers, *peersPath, flag.Args()[1:]))
 	}
 
 	// Env fallbacks (handy for systemd; keeps the secret token out of argv/ps).
@@ -508,7 +508,7 @@ func printIdentity(keyPath string) {
 
 // runPeersCmd dispatches `peers <list|add|remove>` against the --peers-file
 // manifest (and --known-peers for revocation), then exits.
-func runPeersCmd(peersFile, knownPeers string, args []string) int {
+func runPeersCmd(peersFile, knownPeers, peersPath string, args []string) int {
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers <list|add|remove> [args]")
 		return 2
@@ -516,7 +516,7 @@ func runPeersCmd(peersFile, knownPeers string, args []string) int {
 	var err error
 	switch args[0] {
 	case "list":
-		err = role.PeersList(peersFile, knownPeers)
+		err = role.PeersList(peersFile, knownPeers, peersPath)
 	case "add":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers add <peer-pubkey> [bootstrap-token]")

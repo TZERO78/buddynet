@@ -88,11 +88,59 @@ func TestPeersListSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Should not error with a manifest present and no sessions.
-	if err := PeersList(peers, known); err != nil {
+	if err := PeersList(peers, known, ""); err != nil {
 		t.Fatalf("list: %v", err)
 	}
 	// Should not error when nothing exists yet.
-	if err := PeersList(filepath.Join(dir, "absent"), filepath.Join(dir, "absent2")); err != nil {
+	if err := PeersList(filepath.Join(dir, "absent"), filepath.Join(dir, "absent2"), ""); err != nil {
 		t.Fatalf("list empty: %v", err)
+	}
+}
+
+// PeersRemove must accept the short 6-char KEY shown by `peers list` (a unique
+// prefix), reject an ambiguous one, and keep an unknown full key a no-op.
+func TestPeersRemoveByShortKey(t *testing.T) {
+	a, _, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := bcrypto.PubKeyB64(a)
+	dir := t.TempDir()
+	peers := filepath.Join(dir, "peers")
+	known := filepath.Join(dir, "known_peers")
+	if err := PeersAdd(peers, aB64, "tok"); err != nil {
+		t.Fatalf("add: %v", err)
+	}
+
+	// An unknown short prefix is an error (typo must not silently no-op).
+	if err := PeersRemove(peers, known, "zzz999"); err == nil {
+		t.Fatal("remove of unknown prefix should error")
+	}
+
+	// The 6-char form resolves back to the full key and removes it.
+	if err := PeersRemove(peers, known, aB64[:6]); err != nil {
+		t.Fatalf("remove by short key: %v", err)
+	}
+	if specs, _ := loadPeersFile(peers); len(specs) != 0 {
+		t.Fatalf("manifest not emptied by short-key remove: %+v", specs)
+	}
+}
+
+// An ambiguous prefix (two buddies sharing leading base64 chars) must error
+// rather than remove the wrong buddy. We synthesise the collision by matching on
+// the empty prefix, which matches every known buddy.
+func TestPeersRemoveAmbiguousPrefix(t *testing.T) {
+	a, _, _ := ed25519.GenerateKey(rand.Reader)
+	b, _, _ := ed25519.GenerateKey(rand.Reader)
+	dir := t.TempDir()
+	peers := filepath.Join(dir, "peers")
+	known := filepath.Join(dir, "known_peers")
+	for _, k := range []string{bcrypto.PubKeyB64(a), bcrypto.PubKeyB64(b)} {
+		if err := PeersAdd(peers, k, "tok"); err != nil {
+			t.Fatalf("add: %v", err)
+		}
+	}
+	if err := PeersRemove(peers, known, ""); err == nil {
+		t.Fatal("empty/ambiguous prefix should error, not remove a buddy")
+	}
+	if specs, _ := loadPeersFile(peers); len(specs) != 2 {
+		t.Fatalf("ambiguous remove must change nothing, got %d specs", len(specs))
 	}
 }
