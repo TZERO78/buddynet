@@ -74,6 +74,47 @@ func TestAssignReleaseRoundTrip(t *testing.T) {
 	}
 }
 
+// ReconcileStale must remove a leaked overlay VIP that is NOT in the keep set
+// while leaving a kept one (and any non-overlay loopback address) alone.
+func TestReconcileStale(t *testing.T) {
+	stale := netip.MustParseAddr("10.66.222.111") // simulated leak from a SIGKILLed run
+	keep := netip.MustParseAddr("10.66.222.112")  // a VIP this run still manages
+
+	for _, ip := range []netip.Addr{stale, keep} {
+		if loHasAddr(t, ip) {
+			t.Skipf("%s already on lo; skipping", ip)
+		}
+	}
+	r1, err := Assign(stale)
+	if err != nil {
+		if errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EACCES) {
+			t.Skipf("no NET_ADMIN: %v", err)
+		}
+		t.Fatalf("assign stale: %v", err)
+	}
+	r2, err := Assign(keep)
+	if err != nil {
+		r1()
+		t.Fatalf("assign keep: %v", err)
+	}
+	// Belt-and-braces cleanup in case the assertions fail mid-way.
+	defer func() { r1(); r2() }()
+
+	removed, err := ReconcileStale([]netip.Addr{keep})
+	if err != nil {
+		t.Fatalf("ReconcileStale: %v", err)
+	}
+	if removed < 1 {
+		t.Fatalf("expected the stale VIP to be removed, removed=%d", removed)
+	}
+	if loHasAddr(t, stale) {
+		t.Fatalf("stale VIP %s was not removed", stale)
+	}
+	if !loHasAddr(t, keep) {
+		t.Fatalf("kept VIP %s was wrongly removed", keep)
+	}
+}
+
 func TestAssignRejectsIPv6(t *testing.T) {
 	if _, err := Assign(netip.MustParseAddr("fd00::1")); err == nil {
 		t.Fatal("Assign must reject a non-IPv4 VIP")
