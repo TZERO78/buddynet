@@ -39,6 +39,29 @@ all three roles; in a buddy the relay and handshake code sit dormant as fallback
 | Unraid plugin | ✅ | ✅ | ❌ | ❌ |
 | Live pentest results | ✅ [in repo](lab/pentest/README.md) | ❌ | ❌ | N/A |
 
+## What you need
+
+BuddyNet needs **one publicly reachable node** to do the matchmaking (the
+`handshake` role) and to act as a blind `relay` when a direct P2P path can't be
+punched. That node needs a **stable, public IP address** — IPv4, IPv6, or both —
+so the buddies can always find it.
+
+You have two ways to provide it:
+
+- **A small VPS** with a fixed public IP. The usual setup: run
+  `--role=handshake,relay` on a cheap VPS *you* own. It coordinates and relays
+  ciphertext only — it never sees your traffic. This is the
+  [Quickstart](#quickstart-two-sites-one-vps) below.
+- **Your own connection, if it has a fixed public IP** (no CGNAT). Then you don't
+  need a VPS at all — the machine on that line takes the `handshake` and `relay`
+  roles itself, and your other buddies connect to it.
+
+The **buddies** themselves can sit behind ordinary NAT — that's the whole point.
+Only the coordinating node needs to be reachable. If your line is behind
+**CGNAT** or only has a dynamic address, a VPS is the simpler option. (Dynamic
+public IPs can work with a DNS name that tracks the address, but that's on you to
+keep current.)
+
 ## Quickstart (two sites, one VPS)
 
 **1 — On the VPS,** run the bootstrap server with `--quic-handshake` and grab the
