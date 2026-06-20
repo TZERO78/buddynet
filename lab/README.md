@@ -169,7 +169,7 @@ docker compose -f docker-compose.yml -f docker-compose.vip.yml up -d --build
   Results: 6 passed, 0 failed
 ```
 
-## BuddyParty test (Phase 1.4: multi-peer, 3–5 buddies)
+## MultiPeer test (Phase 1.4: 3–5 buddies)
 
 The overlay `docker-compose.party.yml` runs one **hub** that holds **five tunnels
 at once** and routes to each buddy by name — the end-to-end proof of the

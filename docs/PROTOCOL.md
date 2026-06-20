@@ -59,8 +59,10 @@ REGISTER + cookie ─▶ server ──validate──▶ pair, then PEER_LIST
 
 ## PEER_LIST  (handshake → peer)
 
-Sent only after a token pairs two distinct peers, and only to the sender. In
-2-peer (BuddyPeer) mode it carries exactly the one partner.
+Sent only after a token pairs two distinct peers, and only to the sender — so the
+roster carries exactly the one partner. (MultiPeer changes nothing here: it uses a
+separate token per buddy, each still pairing exactly two, so every roster names a
+single partner.)
 
 | Field | Meaning |
 |---|---|
