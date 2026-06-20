@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.3.0] — 2026-06-20
+
 ### Security
 
 - `--insecure` renamed to `--lab`; env guard renamed to `BUDDYNET_LAB=1`.
@@ -14,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Internal `BuddyConfig.Insecure` field unchanged (no protocol/API impact).
   **Breaking:** `--insecure` and `BUDDYNET_ALLOW_INSECURE` are removed with no
   alias — old lab scripts fail loudly instead of silently running wrong.
+- **Key file refused if it is a symlink.** `LoadOrCreateKey` no longer follows a
+  symlinked key path (it used `os.Stat`/`os.Chmod`/`os.WriteFile`, all of which
+  follow links), so a key path pointing at e.g. `/etc/shadow` could chmod or
+  clobber the target — now refused fail-closed via `os.Lstat`.
 
 ### Changed
 
@@ -34,6 +40,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Relay abuse ceilings are now configurable** via `--relay-max-sessions` and
   `--relay-max-legs-per-ip` (0 = previous defaults 4096 / 64), so a small private
   relay can tighten them further.
+
+### Tests
+
+- **Lab pentest probe expanded to 17 scenarios**: VIP-collision (identity ≠ VIP),
+  enrollment-flood boundedness, relay 3rd-leg rejection (a known token can't join
+  an active pair), and a token-squat slot-DoS check (the per-token slot is capped
+  at 2; the rest are squat-rejected). See `lab/pentest/`.
 
 ## [v2.2.1] — 2026-06-20
 
