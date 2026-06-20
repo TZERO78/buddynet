@@ -1,7 +1,13 @@
 # BuddyNet
 
-**One binary, three roles. A zero-config, end-to-end-encrypted overlay between
-machines behind NAT — no port forwarding, no router config.**
+[![CI](https://github.com/TZERO78/buddynet/actions/workflows/ci.yml/badge.svg)](https://github.com/TZERO78/buddynet/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
+[![Latest release](https://img.shields.io/github/v/release/TZERO78/buddynet?sort=semver)](https://github.com/TZERO78/buddynet/releases)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Pentest: 14/14 defenses hold](https://img.shields.io/badge/pentest-14%2F14%20defenses%20hold-brightgreen)](lab/pentest/README.md)
+
+> **Self-hosted P2P overlay. One binary. Your VPS coordinates — but never sees —
+> your traffic. No Tailscale account needed.**
 
 BuddyNet gives every node a stable identity and a deterministic virtual IP, finds
 peers through a tiny bootstrap server, and brings up a direct (hole-punched)
@@ -9,8 +15,7 @@ encrypted tunnel — falling back to a blind relay only when a direct path is
 impossible. Point `rsync`, `borg`, or `ssh` at a local socket and it travels
 straight to your buddy — and a single node can hold **many tunnels at once**
 ([MultiPeer](docs/PEERS.md)), routing to each buddy by name. The coordination
-server is a VPS *you* own, and it never sees your traffic. Your MultiPeer is
-ready for the party.
+server is a VPS *you* own, and it never sees your traffic.
 
 ```
 buddynet --role=buddy       # ordinary peer; NAT is fine
@@ -21,10 +26,23 @@ buddynet --role=handshake   # bootstrap/matchmaking server on a VPS
 There is **no auto-detection** — you always set `--role`. Every binary carries
 all three roles; in a buddy the relay and handshake code sit dormant as fallback.
 
+## Why BuddyNet?
+
+| | BuddyNet | Tailscale | Netbird | WireGuard |
+|---|---|---|---|---|
+| Coordination server | **Your VPS** | Tailscale Inc. | Self-hostable | None |
+| Traffic through server | ❌ Never | ❌ Never | ❌ Never | ❌ Never |
+| Zero-config NAT traversal | ✅ | ✅ | ✅ | ❌ Manual |
+| One binary, all roles | ✅ | ❌ | ❌ | ✅ |
+| Sealed token on wire | ✅ v2.2 | N/A | N/A | N/A |
+| Supply chain (cosign+SBOM) | ✅ | ✅ | ❌ | N/A |
+| Unraid plugin | ✅ | ✅ | ❌ | ❌ |
+| Live pentest results | ✅ [in repo](lab/pentest/README.md) | ❌ | ❌ | N/A |
+
 ## Quickstart (two sites, one VPS)
 
-**1 — On the VPS,** run the bootstrap server with `--quic-handshake` and grab
-the key to pin:
+**1 — On the VPS,** run the bootstrap server with `--quic-handshake` and grab the
+key to pin:
 
 ```bash
 buddynet --role=handshake,relay \
@@ -42,8 +60,7 @@ buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake \
-    --invite --forward 127.0.0.1:873
+    --quic-handshake --invite --forward 127.0.0.1:873
 # prints a one-time TOKEN, then waits for your buddy to join
 ```
 
@@ -51,8 +68,7 @@ buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake \
-    --join=TOKEN -L 127.0.0.1:9000 &
+    --quic-handshake --join=TOKEN -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
@@ -87,20 +103,6 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
 See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 **[docs/PROTOCOL.md](docs/PROTOCOL.md)**.
 
-## Documentation
-
-| Doc | What it covers |
-|-----|---------------|
-| [docs/TWO-BUDDIES.md](docs/TWO-BUDDIES.md) | The two-buddy setup, end to end |
-| [docs/PEERS.md](docs/PEERS.md) | **MultiPeer** (many buddies): `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
-| [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
-| [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
-| [docs/BUDDYDNS.md](docs/BUDDYDNS.md) | `.buddy` names and the stub resolver |
-| [docs/OPERATIONS.md](docs/OPERATIONS.md) | QUIC, IP allowlists, relay setup, lazy tunnel, log schema |
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and package map |
-| [docs/PROTOCOL.md](docs/PROTOCOL.md) | Wire format and message types |
-| [SECURITY.md](SECURITY.md) | Threat model and trust hierarchy |
-
 ## Security
 
 - Pin the server with `--server-key` and your buddy with `--peer-key` (each
@@ -130,6 +132,26 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 
 The full threat model — what BuddyNet protects against, the trust hierarchy, and
 its honest limits — is in **[SECURITY.md](SECURITY.md)**.
+
+> **Live-pentested.** The repository includes a
+> [structural attack tool and full results](lab/pentest/README.md) — 14/14
+> defenses verified against a live lab instance. No critical or high findings. One
+> known low-severity cosmetic issue (stale VIP after `kill -9`, fixed in v2.2.0).
+
+## Documentation
+
+| Doc | What it covers |
+|-----|---------------|
+| [docs/TWO-BUDDIES.md](docs/TWO-BUDDIES.md) | The two-buddy setup, end to end |
+| [docs/PEERS.md](docs/PEERS.md) | **MultiPeer** (many buddies): `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
+| [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
+| [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
+| [docs/BUDDYDNS.md](docs/BUDDYDNS.md) | `.buddy` names and the stub resolver |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | QUIC, IP allowlists, relay setup, lazy tunnel, log schema |
+| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System design and package map |
+| [docs/PROTOCOL.md](docs/PROTOCOL.md) | Wire format and message types |
+| [SECURITY.md](SECURITY.md) | Threat model and trust hierarchy |
+| [lab/pentest/README.md](lab/pentest/README.md) | Red-team playbook + dated pentest report |
 
 ## Build & run
 
@@ -168,13 +190,20 @@ Each release also carries an SPDX SBOM (`buddynet-<tag>-sbom.spdx.json`).
 (Releases up to v1.1.0 used separate `.sig`/`.pem` files; v1.1.2 onward uses the
 single `.bundle`.)
 
-## Status
+## Status & Roadmap
 
 The two-buddy setup is implemented and tested end to end. **MultiPeer** (many
 buddies at once — `--peers-file`, per-buddy VIP routing, live reload) is built
 and lab-validated for the v2.1 line. Peer-to-peer gossip and the WireGuard
 transport remain on the v2 roadmap — all additive on the v1 wire format, virtual
 IPs, and fallback chain.
+
+**Security posture**
+
+- **v2.2.0: Live pentested — 14/14 defenses hold.** Full report:
+  [lab/pentest/README.md](lab/pentest/README.md).
+- `govulncheck` in CI, Dependabot for dependency updates.
+- cosign keyless signing + SPDX SBOM on every release.
 
 ## License
 

@@ -1,0 +1,23 @@
+# GitHub repository topics for TZERO78/buddynet.
+# Applied to the repo "About" sidebar. Keep in sync with the live settings:
+#   gh api -X PUT repos/TZERO78/buddynet/topics \
+#     -f names[]=vpn -f names[]=p2p ...   (see the list below)
+description: >-
+  Zero-config E2E-encrypted P2P overlay. One binary — buddy, relay, or
+  handshake server. Your VPS coordinates; never sees your traffic.
+topics:
+  - vpn
+  - p2p
+  - nat-traversal
+  - self-hosted
+  - homelab
+  - backup
+  - tunnel
+  - go
+  - golang
+  - unraid
+  - wireguard
+  - security
+  - quic
+  - overlay-network
+  - raspberry-pi
