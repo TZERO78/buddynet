@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v2.2.1] — 2026-06-20
+
+### Fixed
+
+- **Re-pair deadlock on one-sided session loss.** A MultiPeer worker only ever
+  registered under its session-derived rendezvous token once a session existed,
+  with no fallback. If the two sides' session state desynced — a one-sided
+  restore-from-backup, or a `peers remove` + `peers add` re-invite on the far end
+  — they registered under different tokens and the matchmaking server parked both
+  forever. A stale session now falls back to the manifest bootstrap token after a
+  few failed rounds (key stays pinned, so no impersonation; never under
+  `--insecure`), and re-pairing self-heals.
+
+### Changed
+
+- **Readable `peers list`** — header row + aligned `VIP / NAME / STATUS / KEY /
+  TOKEN / SOURCE` columns, 6-char key handles; `peers remove` accepts the short
+  key.
+- **Connection lifecycle is now in the log schema** — the previously prefix-less
+  bring-up/retry lines are structured `CONNECT: action=…` / `RECONNECT: action=…`
+  (`key=value`), documented in `docs/OPERATIONS.md`.
+
+### Security
+
+- **Allowlist (approval-mode) hardening**: file-permission tightening, a cap on
+  authorized keys, and `flock`-guarded approve/revoke.
+
+### Docs
+
+- Two recorded terminal demos in the README (deployment walkthrough as the hero;
+  a dedicated MultiPeer section), reproducible from `lab/`.
+
 ## [v2.2.0] — 2026-06-20
 
 ### Security
