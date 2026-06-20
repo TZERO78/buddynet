@@ -31,13 +31,36 @@ all three roles; in a buddy the relay and handshake code sit dormant as fallback
 | | BuddyNet | Tailscale | Netbird | WireGuard |
 |---|---|---|---|---|
 | Coordination server | **Your VPS** | Tailscale Inc. | Self-hostable | None |
-| Traffic through server | ❌ Never | ❌ Never | ❌ Never | ❌ Never |
+| Traffic through server | ❌ Never | ❌ Never | ❌ Never | N/A (no server) |
 | Zero-config NAT traversal | ✅ | ✅ | ✅ | ❌ Manual |
 | One binary, all roles | ✅ | ❌ | ❌ | ✅ |
 | Sealed token on wire | ✅ v2.2 | N/A | N/A | N/A |
 | Supply chain (cosign+SBOM) | ✅ | ✅ | ❌ | N/A |
 | Unraid plugin | ✅ | ✅ | ❌ | ❌ |
 | Live pentest results | ✅ [in repo](lab/pentest/README.md) | ❌ | ❌ | N/A |
+
+## What you need
+
+BuddyNet needs **one publicly reachable node** to do the matchmaking (the
+`handshake` role) and to act as a blind `relay` when a direct P2P path can't be
+punched. That node needs a **stable, public IP address** — IPv4, IPv6, or both —
+so the buddies can always find it.
+
+You have two ways to provide it:
+
+- **A small VPS** with a fixed public IP. The usual setup: run
+  `--role=handshake,relay` on a cheap VPS *you* own. It coordinates and relays
+  ciphertext only — it never sees your traffic. This is the
+  [Quickstart](#quickstart-two-sites-one-vps) below.
+- **Your own connection, if it has a fixed public IP** (no CGNAT). Then you don't
+  need a VPS at all — the machine on that line takes the `handshake` and `relay`
+  roles itself, and your other buddies connect to it.
+
+The **buddies** themselves can sit behind ordinary NAT — that's the whole point.
+Only the coordinating node needs to be reachable. If your line is behind
+**CGNAT** or only has a dynamic address, a VPS is the simpler option. (Dynamic
+public IPs can work with a DNS name that tracks the address, but that's on you to
+keep current.)
 
 ## Quickstart (two sites, one VPS)
 
@@ -133,10 +156,12 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 The full threat model — what BuddyNet protects against, the trust hierarchy, and
 its honest limits — is in **[SECURITY.md](SECURITY.md)**.
 
-> **Live-pentested.** The repository includes a
-> [structural attack tool and full results](lab/pentest/README.md) — 14/14
-> defenses verified against a live lab instance. No critical or high findings. One
-> known low-severity cosmetic issue (stale VIP after `kill -9`, fixed in v2.2.0).
+> **Live-pentested (by us).** The repository includes a
+> [structural attack tool and full results](lab/pentest/README.md) — 16 tests, 14
+> defenses verified against a live lab instance, 1 N/A, 1 low finding (stale VIP
+> after `kill -9`, fixed in v2.2.0). No critical or high findings. This is our own
+> structural testing, **not** an independent third-party audit — bugs can always
+> remain. Found one? Please open an issue; we're grateful for every report.
 
 ## Documentation
 
@@ -200,8 +225,9 @@ IPs, and fallback chain.
 
 **Security posture**
 
-- **v2.2.0: Live pentested — 14/14 defenses hold.** Full report:
-  [lab/pentest/README.md](lab/pentest/README.md).
+- **v2.2.0: live pentested by us — 14/14 applicable defenses verified, no
+  critical/high findings** (our own structural testing, not an independent audit).
+  Full report: [lab/pentest/README.md](lab/pentest/README.md).
 - `govulncheck` in CI, Dependabot for dependency updates.
 - cosign keyless signing + SPDX SBOM on every release.
 
