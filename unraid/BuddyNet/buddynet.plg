@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.06.20.2">
+<!ENTITY version   "2026.06.20.3">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,17 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.06.20.3
+- Pinned to buddynet **v2.3.0**. Adds a **hard limit of 48 buddies per node** (a
+  deliberate design limit for a personal overlay — over-limit manifests are
+  refused fail-closed, never silently truncated) plus VIP-collision rejection at
+  peer assembly. Hardening: the key file is **refused if it is a symlink** (no
+  follow on stat/chmod/write). Relay abuse ceilings are now configurable
+  (`--relay-max-sessions` / `--relay-max-legs-per-ip`). The lab-only `--insecure`
+  flag was renamed to `--lab` (the plugin never used it; production is unaffected).
+  No settings-page or protocol change from v2.2.1. Checksum gate set to the v2.3.0
+  `buddynet-linux-amd64` sha256.
 
 ###2026.06.20.2
 - Pinned to buddynet **v2.2.1** — bug-fix release. Fixes a **re-pair deadlock on
@@ -454,12 +465,12 @@ mkdir -p "$PLG"
 # NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
 # version and URL are hard-coded here on purpose.
 # MAINTAINER: bump both together on each new release (tag -> release.yml build).
-BINVER="v2.2.1"
+BINVER="v2.3.0"
 BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
 # SHA256 of the release binary; verified on every install so a corrupted or
 # tampered download is never installed. Matches buddynet-linux-amd64.sha256 of
 # the BINVER release — bump both together on each new release.
-BINSHA="b8a8da2e915cbedb3aef85d841586092282569228cb4b3098ad87532a57ed1d0"
+BINSHA="f20f7e5ec9fb01ff5dd363c95998e4c02a3a0b8d546e94924a28bbab3fa58530"
 verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
 
 # Download the buddynet binary to flash (only if missing or its checksum is wrong).
