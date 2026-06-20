@@ -3,6 +3,9 @@ package crypto
 import (
 	"crypto/ed25519"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,5 +78,55 @@ func TestSealOpenCode(t *testing.T) {
 	_, otherPriv, _ := ed25519.GenerateKey(nil)
 	if _, err := OpenCode(enc, otherPriv); err == nil {
 		t.Fatal("expected wrong-key decryption to fail")
+	}
+}
+
+// A key path that is a symlink must be refused outright. os.ReadFile/Stat/Chmod
+// and os.WriteFile all follow symlinks, so honoring one would read, chmod, or
+// clobber the LINK TARGET (e.g. a key path pointing at /etc/shadow). The target
+// must be left completely untouched.
+func TestLoadOrCreateKeyRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, []byte("not a key"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "key.symlink")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+
+	_, _, err := LoadOrCreateKey(link)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("a symlinked key path must be refused, got err=%v", err)
+	}
+
+	// The target must be untouched: perms NOT tightened to 0600, content intact.
+	info, serr := os.Stat(target)
+	if serr != nil {
+		t.Fatal(serr)
+	}
+	if info.Mode().Perm() != 0o644 {
+		t.Fatalf("symlink target was chmod'd to %v — it must be left alone", info.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(target); string(b) != "not a key" {
+		t.Fatal("symlink target content changed — it must be left alone")
+	}
+}
+
+// A DANGLING symlink (target does not exist) must also be refused — otherwise
+// os.WriteFile on the create path would follow it and create the target.
+func TestLoadOrCreateKeyRefusesDanglingSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "does-not-exist")
+	link := filepath.Join(dir, "key.symlink")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlinks unavailable on this platform: %v", err)
+	}
+	if _, _, err := LoadOrCreateKey(link); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("a dangling symlinked key path must be refused, got err=%v", err)
+	}
+	if _, serr := os.Stat(target); !os.IsNotExist(serr) {
+		t.Fatal("dangling symlink target was created — write followed the link")
 	}
 }

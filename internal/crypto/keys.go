@@ -84,6 +84,16 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 		_, priv, err = ed25519.GenerateKey(rand.Reader)
 		return priv, true, err
 	}
+	// A key file must be a REAL file, never a symlink. os.ReadFile/Stat/Chmod and
+	// os.WriteFile all FOLLOW symlinks, so honoring a symlinked path would read,
+	// chmod, or clobber the LINK TARGET (e.g. a key path pointing at /etc/shadow —
+	// as root that would chmod the target to 0600). Refuse it up front, fail-closed.
+	// Lstat catches a live OR dangling symlink (the create path would follow a
+	// dangling one into its target on write); a non-existent path returns an error
+	// here and falls through to normal creation.
+	if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("key %s is a symlink; refusing (a key file must be a real file, not a link to one)", path)
+	}
 	data, rerr := os.ReadFile(path)
 	switch {
 	case rerr == nil:
