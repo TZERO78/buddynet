@@ -168,6 +168,24 @@ CONNECTED:    role=buddy partner=… key=… vip=… via=… remote=…   # tunn
 DISCONNECTED: role=buddy partner=… key=… reason=… duration=… streams=N
 ```
 
+### Connection lifecycle — `CONNECT:` (bring-up) / `RECONNECT:` (retry loop)
+
+```
+CONNECT: action=partner-verified id=… key=… vip=… cands=N   # roster checked, not online yet
+CONNECT: action=path-try         path=… role=server|client [endpoint=…]   # trying a fallback path
+CONNECT: action=path-failed      path=… detail=…            # that path did not come up; try the next
+CONNECT: action=session-stored   store=… detail=…           # first pairing done; session secret saved
+CONNECT: action=cached           id=… vip=… detail="server offline"   # using the offline peer cache
+CONNECT: action=server-unreachable server=… detail=…        # handshake server down; falling back to cache
+CONNECT: action=reauth           interval=… detail=…         # --reauth-interval fired, re-checking trust
+
+RECONNECT: action=waiting          detail="no peer with this token yet"   # registered, awaiting partner
+RECONNECT: action=error            detail=…                  # the attempt failed; will retry
+RECONNECT: action=retry            delay=…                   # backing off before the next attempt
+RECONNECT: action=session-fallback key=… failures=N detail=…  # stale session presumed; probing the
+                                                              # bootstrap token to recover (key stays pinned)
+```
+
 ### Server lifecycle — `HANDSHAKE:` / `RELAY:`
 
 ```

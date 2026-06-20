@@ -60,7 +60,7 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 			if errors.Is(err, ErrSASRejected) || errors.Is(err, ErrSASTimeout) {
 				return fmt.Errorf("aborted: %w", err)
 			}
-			log.Printf("tunnel error: %v", err)
+			log.Printf("RECONNECT: action=error detail=%q", err.Error())
 		}
 		if ctx.Err() != nil {
 			return nil
@@ -78,7 +78,7 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 			failures++
 		}
 		wait := jitter(backoff)
-		log.Printf("reconnecting in %s...", wait.Round(100*time.Millisecond))
+		log.Printf("RECONNECT: action=retry delay=%s", wait.Round(100*time.Millisecond))
 		select {
 		case <-ctx.Done():
 			return nil
@@ -230,8 +230,9 @@ func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
 			// (always true in manifest mode; never fall back under --insecure). Past
 			// the threshold, alternate so we also keep trying the real session.
 			if spec.token != "" && !cfg.Insecure && failures >= sessionFallbackAfter && failures%2 == 1 {
-				log.Printf("WARNING: peer %s — session re-pair has failed %d times; the partner may have lost its session (one-sided restore, or a remove+re-add). Probing the bootstrap token to recover; the key stays pinned. If this repeats indefinitely, check the partner's state.",
-					keyTag(bcrypto.PubKeyB64(spec.pin)), failures)
+				log.Printf("RECONNECT: action=session-fallback key=%s failures=%d detail=%q",
+					keyTag(bcrypto.PubKeyB64(spec.pin)), failures,
+					"session presumed stale (partner may have lost its copy); probing bootstrap token, key stays pinned")
 				return bootstrap(), nil
 			}
 			return attempt{rendezvous: secret, pin: spec.pin}, nil

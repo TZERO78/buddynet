@@ -57,7 +57,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 			}
 			next = time.Now().Add(time.Second)
 			if time.Since(lastLog) >= 5*time.Second {
-				log.Print("waiting for buddy to come online (no peer with this token yet)...")
+				log.Print("RECONNECT: action=waiting detail=\"no peer with this token yet\"")
 				lastLog = time.Now()
 			}
 		}
@@ -174,7 +174,7 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 			}
 		}
 		if time.Since(lastLog) >= 5*time.Second {
-			log.Print("waiting for buddy to come online (no peer with this token yet)...")
+			log.Print("RECONNECT: action=waiting detail=\"no peer with this token yet\"")
 			lastLog = time.Now()
 		}
 		select {
