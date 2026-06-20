@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/tzero78/buddynet/internal/safe"
 	"github.com/tzero78/buddynet/internal/tunnel"
 )
 
@@ -133,18 +134,20 @@ func lazyForward(ctx context.Context, ln net.Listener, lt *lazyTunnel, count *at
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
-			sess, err := lt.get(ctx)
-			if err != nil {
-				c.Close()
-				return
-			}
-			st, err := sess.OpenStream(ctx)
-			if err != nil {
-				c.Close()
-				return
-			}
-			count.Add(1)
-			splice(c, st)
+			safe.Do("dataplane.lazy", func() {
+				sess, err := lt.get(ctx)
+				if err != nil {
+					c.Close()
+					return
+				}
+				st, err := sess.OpenStream(ctx)
+				if err != nil {
+					c.Close()
+					return
+				}
+				count.Add(1)
+				splice(c, st)
+			})
 		}()
 	}
 }

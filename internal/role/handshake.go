@@ -23,6 +23,7 @@ import (
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	"github.com/tzero78/buddynet/internal/ratelimit"
+	"github.com/tzero78/buddynet/internal/safe"
 	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
@@ -422,7 +423,11 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		}
 		raw := make([]byte, n)
 		copy(raw, buf[:n])
-		handleRegister(conn, reg, priv, authz, cfg.RelayEndpoint, src, raw)
+		// One malformed datagram must drop that packet, never the read loop /
+		// process (panic isolation for a 24/7 public server).
+		safe.Do("handshake.register", func() {
+			handleRegister(conn, reg, priv, authz, cfg.RelayEndpoint, src, raw)
+		})
 	}
 }
 
@@ -446,7 +451,9 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 			}
 			return err
 		}
-		go handleControlReq(req, reg, priv, authz, relayEndpoint, rl, allowed)
+		safe.Go("handshake.control", func() {
+			handleControlReq(req, reg, priv, authz, relayEndpoint, rl, allowed)
+		})
 	}
 }
 

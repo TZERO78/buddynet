@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/tzero78/buddynet/internal/ratelimit"
+	"github.com/tzero78/buddynet/internal/safe"
 )
 
 // The relay is intentionally UNAUTHENTICATED: anyone who can reach it may pair
@@ -229,11 +230,14 @@ func (s *Server) Run(conn *net.UDPConn) {
 			return // socket closed on shutdown
 		}
 		pkt := buf[:n]
-		if b, ok := ParseBind(pkt); ok {
-			s.bind(conn, b, src)
-			continue
-		}
-		s.forward(conn, src, pkt)
+		// Isolate a panic to the single datagram, never the read loop / process.
+		safe.Do("relay.packet", func() {
+			if b, ok := ParseBind(pkt); ok {
+				s.bind(conn, b, src)
+				return
+			}
+			s.forward(conn, src, pkt)
+		})
 	}
 }
 

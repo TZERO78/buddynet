@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/tzero78/buddynet/internal/safe"
 	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/internal/vip"
 )
@@ -108,13 +109,18 @@ func acceptAndForward(ctx context.Context, sess tunnel.Session, ln net.Listener,
 		sem <- struct{}{} // backpressure on Accept when full
 		go func() {
 			defer func() { <-sem }()
-			st, err := sess.OpenStream(ctx)
-			if err != nil {
-				c.Close()
-				return
-			}
-			count.Add(1)
-			splice(c, st)
+			// A panic on this peer's stream must drop only this connection, never
+			// crash the daemon (transport-agnostic: protects QUIC today, a future
+			// WireGuard data plane behind the same Session/Stream seam tomorrow).
+			safe.Do("dataplane.local", func() {
+				st, err := sess.OpenStream(ctx)
+				if err != nil {
+					c.Close()
+					return
+				}
+				count.Add(1)
+				splice(c, st)
+			})
 		}()
 	}
 }
@@ -129,13 +135,15 @@ func serveStreams(ctx context.Context, sess tunnel.Session, addr string, count *
 		}
 		count.Add(1)
 		go func() {
-			c, err := dialLocal(addr)
-			if err != nil {
-				log.Printf("-forward dial %s: %v (closing peer stream)", addr, err)
-				st.Close()
-				return
-			}
-			splice(c, st)
+			safe.Do("dataplane.forward", func() {
+				c, err := dialLocal(addr)
+				if err != nil {
+					log.Printf("-forward dial %s: %v (closing peer stream)", addr, err)
+					st.Close()
+					return
+				}
+				splice(c, st)
+			})
 		}()
 	}
 }

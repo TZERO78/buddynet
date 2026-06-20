@@ -141,6 +141,7 @@ Always logged. Never rate-limited or silenced.
 | `SECURITY: event=vip-mismatch key=… detail=…` | The handshake server's `PEER_LIST` claims a VIP inconsistent with the key. Hostile or buggy server. |
 | `SECURITY: event=replay-detected token=… src=… key=… id=…` | A `REGISTER` signature was seen twice within the replay window. |
 | `SECURITY: event=leg-cap-hit src=… detail=…` | One source IP holds the maximum number of relay legs — possible session hoarding. |
+| `SECURITY: event=panic-recovered component=… detail=…` | A request/connection handler panicked and was contained (the request was dropped, the process kept running). A repeat is a bug or a panic-triggering input worth investigating; the line is throttled per component. |
 
 ### Trust events — `TRUST:`
 
