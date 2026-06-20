@@ -25,7 +25,7 @@ func TestPeerSource(t *testing.T) {
 	cfg := BuddyConfig{KnownPeers: path}
 
 	// a has a stored session → reconnect attempt with the secret, pinned.
-	att, err := peerSource(cfg, peerSpec{pin: a, token: "boot-a"})()
+	att, err := peerSource(cfg, peerSpec{pin: a, token: "boot-a"})(0)
 	if err != nil {
 		t.Fatalf("present session: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestPeerSource(t *testing.T) {
 	}
 
 	// b has no session but a token → bootstrap attempt (first pairing, pinned).
-	att, err = peerSource(cfg, peerSpec{pin: b, token: "boot-b"})()
+	att, err = peerSource(cfg, peerSpec{pin: b, token: "boot-b"})(0)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -49,8 +49,58 @@ func TestPeerSource(t *testing.T) {
 	}
 
 	// b with neither session nor token → revoked (worker stops cleanly).
-	if _, err := peerSource(cfg, peerSpec{pin: b})(); !errors.Is(err, errSessionRevoked) {
+	if _, err := peerSource(cfg, peerSpec{pin: b})(0); !errors.Is(err, errSessionRevoked) {
 		t.Fatalf("no session/token: want errSessionRevoked, got %v", err)
+	}
+}
+
+// A stored session that keeps failing to pair is presumed stale (the partner lost
+// ITS copy after a one-sided restore or a remove+re-add): past the failure
+// threshold the worker probes the manifest bootstrap token to recover the
+// rendezvous, while STILL pinning the partner key — so the fallback cannot be
+// abused to impersonate the partner. It must never fall back without a token (no
+// common rendezvous), nor under --insecure (the pin is what keeps it safe).
+func TestPeerSourceStaleSessionFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "known_peers")
+	a, _, _ := ed25519.GenerateKey(rand.Reader)
+	if err := saveSession(path, "tok-a", bcrypto.PubKeyB64(a), "secret-a"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	cfg := BuddyConfig{KnownPeers: path}
+	src := peerSource(cfg, peerSpec{pin: a, token: "boot-a"})
+
+	// Below the threshold: always the real session, never the token.
+	for _, f := range []int{0, 1, 2} {
+		if att, _ := src(f); att.rendezvous != "secret-a" || att.firstPairing {
+			t.Fatalf("failures=%d: want session rendezvous, got %+v", f, att)
+		}
+	}
+	// Past the threshold it alternates: an odd streak probes the bootstrap token
+	// (pinned, first-pairing) so it can meet a partner that fell back to it...
+	att, _ := src(3)
+	if att.rendezvous != "boot-a" || att.inviteToken != "boot-a" || !att.firstPairing {
+		t.Fatalf("stale session, odd streak: want bootstrap fallback, got %+v", att)
+	}
+	if !att.pin.Equal(a) {
+		t.Fatal("fallback MUST still pin the partner key (no impersonation)")
+	}
+	// ...while an even streak keeps trying the real session (so a transient miss
+	// that still has a live session on the other end recovers too).
+	if att, _ := src(4); att.rendezvous != "secret-a" {
+		t.Fatalf("stale session, even streak: want session retry, got %+v", att)
+	}
+
+	// No bootstrap token in the manifest → no common rendezvous to fall back to;
+	// the session is the only option no matter how long it fails.
+	noTok := peerSource(cfg, peerSpec{pin: a})
+	if att, _ := noTok(9); att.rendezvous != "secret-a" {
+		t.Fatalf("no token: must never fall back, got %+v", att)
+	}
+
+	// --insecure → the pin no longer protects us, so the fallback is disabled.
+	insecure := peerSource(BuddyConfig{KnownPeers: path, Insecure: true}, peerSpec{pin: a, token: "boot-a"})
+	if att, _ := insecure(9); att.rendezvous != "secret-a" {
+		t.Fatalf("insecure: must not fall back to a public token, got %+v", att)
 	}
 }
 
@@ -61,7 +111,7 @@ func TestPeerLoopReturnsSourceError(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- peerLoop(context.Background(), BuddyConfig{}, &node{}, nil,
-			func() (attempt, error) { return attempt{}, boom }, time.Time{})
+			func(int) (attempt, error) { return attempt{}, boom }, time.Time{})
 	}()
 	select {
 	case err := <-done:
@@ -120,7 +170,7 @@ func TestPeerLoopHonoursCancel(t *testing.T) {
 		// next() returns the revocation sentinel so the loop never enters buddyRun;
 		// we only assert it does not spin or hang under a dead context.
 		done <- peerLoop(ctx, BuddyConfig{}, &node{}, nil,
-			func() (attempt, error) { return attempt{}, errSessionRevoked }, time.Time{})
+			func(int) (attempt, error) { return attempt{}, errSessionRevoked }, time.Time{})
 	}()
 	select {
 	case <-done:
