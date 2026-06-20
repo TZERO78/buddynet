@@ -90,6 +90,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 | Doc | What it covers |
 |-----|---------------|
 | [docs/BUDDYPEER.md](docs/BUDDYPEER.md) | The two-peer use case end to end |
+| [docs/PEERS.md](docs/PEERS.md) | Multi-buddy: `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
 | [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
 | [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
 | [docs/BUDDYDNS.md](docs/BUDDYDNS.md) | `.buddy` names and the stub resolver |

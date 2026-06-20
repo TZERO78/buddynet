@@ -2,6 +2,7 @@ package role
 
 import (
 	"context"
+	"log"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -50,8 +51,10 @@ func (lt *lazyTunnel) get(ctx context.Context) (tunnel.Session, error) {
 	}
 	// Transition to WAKING on first waiter; subsequent callers share the same
 	// ready channel.
+	firstWake := false
 	if !lt.waking {
 		lt.waking = true
+		firstWake = true
 		select {
 		case lt.wake <- struct{}{}:
 		default: // already queued; 1-buffered guarantees at most one pending wake
@@ -59,6 +62,12 @@ func (lt *lazyTunnel) get(ctx context.Context) (tunnel.Session, error) {
 	}
 	ready := lt.ready
 	lt.mu.Unlock()
+
+	// Log the wake outside the lock; the tunnel coming up is then reported by the
+	// usual CONNECTED: line, so an operator sees the full lazy timeline.
+	if firstWake {
+		log.Printf("LAZY: action=waking detail=%q", "local connection arrived, dialing tunnel")
+	}
 
 	select {
 	case <-ready:

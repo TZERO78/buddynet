@@ -256,7 +256,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 			return fmt.Errorf("lazy -L %s: %w", cfg.LocalListen, lerr)
 		}
 		go func() { <-ctx.Done(); ln.Close() }()
-		log.Printf("lazy -L: listening on %s (tunnel starts on first connection)", cfg.LocalListen)
+		log.Printf("LAZY: action=listening addr=%s detail=%q", cfg.LocalListen, "tunnel deferred until first connection")
 		lt = newLazyTunnel()
 		go lazyForward(ctx, ln, lt, &lazyCount)
 	}

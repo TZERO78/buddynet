@@ -41,6 +41,9 @@ func Run(ctx context.Context, reg *peer.Registry, selfName string, selfIP netip.
 
 	udpSrv := &dns.Server{Addr: stubAddr, Net: "udp", Handler: mux}
 	tcpSrv := &dns.Server{Addr: stubAddr, Net: "tcp", Handler: mux}
+	// Report the successful bind in the structured schema (the failure case is the
+	// WARNING below); fires once the UDP listener is actually up.
+	udpSrv.NotifyStartedFunc = func() { log.Printf("BUDDYDNS: action=listening addr=%s", stubAddr) }
 
 	udpErr := make(chan error, 1)
 	tcpErr := make(chan error, 1)

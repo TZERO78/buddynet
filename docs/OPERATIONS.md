@@ -167,6 +167,33 @@ CONNECTED:    role=buddy partner=… key=… vip=… via=… remote=…   # tunn
 DISCONNECTED: role=buddy partner=… key=… reason=… duration=… streams=N
 ```
 
+### Multi-buddy supervisor — `SUPERVISOR:` (`--peers-file`)
+
+```
+SUPERVISOR: action=start        buddies=N          # supervising N buddies (SIGHUP reloads the manifest)
+SUPERVISOR: action=peer-stopped key=… detail=…     # one buddy's worker stopped (others unaffected)
+SUPERVISOR: action=reload-start key=…              # SIGHUP: a newly listed buddy started
+SUPERVISOR: action=reload-stop  key=…              # SIGHUP: a removed buddy stopped (revoked)
+SUPERVISOR: action=reload       buddies=N          # reconcile complete, N buddies now running
+SUPERVISOR: action=reload-failed detail=…          # the manifest could not be re-read
+```
+
+### Lazy tunnel — `LAZY:` (`--lazy`)
+
+```
+LAZY: action=listening addr=… detail="tunnel deferred until first connection"
+LAZY: action=waking    detail="local connection arrived, dialing tunnel"   # a CONNECTED: line follows
+```
+
+### BuddyDNS — `BUDDYDNS:` (`--dns`)
+
+```
+BUDDYDNS: action=listening           addr=127.0.0.153:53        # stub resolver bound
+BUDDYDNS: action=resolver-registered addr=127.0.0.153 detail="*.buddy routed via resolvectl"
+```
+
+(The bind-failure and resolvectl-skip cases are logged as `WARNING:`/`NOTE:` — see below.)
+
 The `via=` field in `CONNECTED` tells you which path the tunnel used:
 
 | Value | Meaning |
