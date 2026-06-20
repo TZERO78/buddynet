@@ -373,7 +373,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	} else {
 		log.Print("approval mode OFF: any client that knows a token may pair. A token-holder can " +
 			"thereby harvest the partner's endpoints from the signed PEER_LIST, and (only against a buddy " +
-			"run with --insecure) MITM it. Restrict with --authorized, and/or use --quic-handshake so the " +
+			"run with --lab) MITM it. Restrict with --authorized, and/or use --quic-handshake so the " +
 			"token never travels in cleartext; always pin buddies with --peer-key.")
 	}
 
@@ -395,7 +395,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	}
 	log.Print("handshake control plane: UDP (source address validated by cookie)")
 	log.Print("WARNING: on plain UDP the REGISTER (incl. the pairing token) travels in CLEARTEXT — " +
-		"an on-path observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --insecure). " +
+		"an on-path observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --lab). " +
 		"Pass --quic-handshake on the server AND every buddy to encrypt the control plane; always pin buddies with --peer-key.")
 
 	buf := make([]byte, 1500)

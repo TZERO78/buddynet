@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- `--insecure` renamed to `--lab`; env guard renamed to `BUDDYNET_LAB=1`.
+  Semantically clearer: production configs never mention an "insecure" flag.
+  Internal `BuddyConfig.Insecure` field unchanged (no protocol/API impact).
+  **Breaking:** `--insecure` and `BUDDYNET_ALLOW_INSECURE` are removed with no
+  alias — old lab scripts fail loudly instead of silently running wrong.
+
 ## [v2.2.1] — 2026-06-20
 
 ### Fixed

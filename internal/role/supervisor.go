@@ -227,7 +227,7 @@ func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
 		if ok {
 			// Stale-session recovery: a token must still be in the manifest (the
 			// only rendezvous both sides can re-agree on) and the key must be pinned
-			// (always true in manifest mode; never fall back under --insecure). Past
+			// (always true in manifest mode; never fall back under --lab). Past
 			// the threshold, alternate so we also keep trying the real session.
 			if spec.token != "" && !cfg.Insecure && failures >= sessionFallbackAfter && failures%2 == 1 {
 				log.Printf("RECONNECT: action=session-fallback key=%s failures=%d detail=%q",

@@ -66,13 +66,13 @@ services:
       - --forward
       - "127.0.0.1:7777"
       - --no-interactive
-      - --insecure
+      - --lab
     environment:
       # Server address (Docker service name resolves inside the lab network)
       BUDDYNET_SERVER: "server:51820"
       # Server public key — populated by setup.sh
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
-      BUDDYNET_ALLOW_INSECURE: "1"
+      BUDDYNET_LAB: "1"
       # Shared pairing token — same on both buddies
       BUDDYNET_TOKEN: "lab-test-token-42"
     depends_on:
@@ -97,11 +97,11 @@ services:
       - --L
       - "0.0.0.0:7070"
       - --no-interactive
-      - --insecure
+      - --lab
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
-      BUDDYNET_ALLOW_INSECURE: "1"
+      BUDDYNET_LAB: "1"
       BUDDYNET_TOKEN: "lab-test-token-42"
     depends_on:
       - server

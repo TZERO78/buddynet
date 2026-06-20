@@ -78,7 +78,7 @@ partner." BuddyNet closes this with a trust hierarchy (strongest first):
    > human actually compares it. Reflexively pressing `y` defeats it. For
    > unattended links, use `--peer-key` instead.
 
-3. **`--insecure`** — no verification at all. Must be set explicitly, logged
+3. **`--lab`** — no verification at all. Must be set explicitly, logged
    loudly, **testing only.** Never use it on a daemon or a server-side host.
 
 For daemons/Unraid there is no human to compare a SAS: run with

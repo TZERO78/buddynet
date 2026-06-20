@@ -39,7 +39,7 @@ type BuddyConfig struct {
 	// Incompatible with the single-peer pairing modes (--invite/--join/--token)
 	// and --lazy; use --vip-listen (not -L) to route to more than one buddy.
 	PeersFile string
-	Insecure  bool   // disable partner verification (testing only)
+	Insecure  bool   // disable partner verification (testing only); set only when --lab is passed
 	Code      string // enrollment code for an allowlist server
 	KeyPath   string // this node's identity key (created if missing; "" = ephemeral)
 	PeersPath string // offline peer cache (peers.json); "" = none
@@ -182,11 +182,11 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		log.Print("!!! Anyone who can answer with this token can impersonate your buddy (MITM).")
 		log.Print("!!! Use --peer-key (or default trust-on-first-use with SAS) instead. Testing only.")
 		if !cfg.Interactive {
-			log.Print("!!! --insecure on an unattended/daemon node is especially dangerous — there is")
+			log.Print("!!! --lab on an unattended/daemon node is especially dangerous — there is")
 			log.Print("!!! no human to catch an impostor. Pin the buddy with --peer-key.")
 		}
 	case cfg.KnownPeers == "":
-		return errors.New("no trust source: set --peer-key, or --known-peers <path> for trust-on-first-use, or --insecure")
+		return errors.New("no trust source: set --peer-key, or --known-peers <path> for trust-on-first-use, or --lab")
 	default:
 		log.Printf("trust-on-first-use: buddy identity recorded in %s on first connect (pin with --peer-key)", cfg.KnownPeers)
 	}

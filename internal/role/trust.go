@@ -18,7 +18,7 @@ import (
 // vouched for, applying a hierarchy of decreasing strength:
 //
 //  1. pinned (--peer-key): the partner key MUST equal it, else refuse. Strongest.
-//  2. insecure (--insecure): accept anything, no verification. Loud, opt-in only.
+//  2. insecure (--lab): accept anything, no verification. Loud, opt-in only.
 //  3. otherwise TOFU: record the key on first connect for a token and trust it;
 //     on later connects require it to match (a change is refused, SSH-style).
 type trustPolicy struct {
@@ -30,7 +30,7 @@ type trustPolicy struct {
 // decide evaluates whether to trust the partner identity, WITHOUT learning a new
 // one. needSAS is true only in the trust-on-first-use case where the key is not
 // yet known: the caller must then bring up the tunnel, have the human verify the
-// SAS, and call confirm to persist it. For a pinned key, --insecure, or an
+// SAS, and call confirm to persist it. For a pinned key, --lab, or an
 // already-known matching key it returns needSAS=false. A known key that CHANGED
 // is refused with an error (possible MITM).
 func (t *trustPolicy) decide(token string, partnerPub ed25519.PublicKey) (needSAS bool, err error) {
@@ -48,7 +48,7 @@ func (t *trustPolicy) decide(token string, partnerPub ed25519.PublicKey) (needSA
 		log.Printf("TRUST: action=pinned-ok key=%s token=%s", keyTag(partnerB64), tokenTag(token))
 		return false, nil
 	case t.insecure:
-		log.Printf("TRUST: action=insecure key=%s token=%s detail=%q", keyTag(partnerB64), tokenTag(token), "identity NOT verified (--insecure)")
+		log.Printf("TRUST: action=insecure key=%s token=%s detail=%q", keyTag(partnerB64), tokenTag(token), "identity NOT verified (--lab)")
 		return false, nil
 	default:
 		known, err := loadKnownPeer(t.storePath, token)

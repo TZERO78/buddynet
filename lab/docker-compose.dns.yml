@@ -29,7 +29,7 @@ services:
       - --forward
       - "127.0.0.1:7777"
       - --no-interactive
-      - --insecure
+      - --lab
       - --idle-timeout=10m
       - --name
       - alice
@@ -37,7 +37,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
-      BUDDYNET_ALLOW_INSECURE: "1"
+      BUDDYNET_LAB: "1"
       BUDDYNET_TOKEN: "lab-dns-token"
     depends_on:
       - server
@@ -62,7 +62,7 @@ services:
       - --L
       - "0.0.0.0:7080"
       - --no-interactive
-      - --insecure
+      - --lab
       - --idle-timeout=10m
       - --name
       - bob
@@ -70,7 +70,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
-      BUDDYNET_ALLOW_INSECURE: "1"
+      BUDDYNET_LAB: "1"
       BUDDYNET_TOKEN: "lab-dns-token"
     depends_on:
       - server
