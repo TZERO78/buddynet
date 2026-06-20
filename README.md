@@ -68,6 +68,10 @@ keep current.)
 
 ## Quickstart (two sites, one VPS)
 
+![BuddyNet deployment walkthrough — VPS runs the coordinator, machine A mints a one-time invite, machine B joins behind its own NAT, and a direct hole-punched tunnel comes up](media/deploy-demo.gif)
+
+<sup>The three steps below, live: the VPS coordinates, two NATed machines pair through a one-time invite, and the tunnel is `via="direct P2P"` — hole-punched, no port-forwarding, no traffic through the server. Reproduce: `lab/demo-deploy.sh`.</sup>
+
 **1 — On the VPS,** run the bootstrap server with `--quic-handshake` and grab the
 key to pin:
 
