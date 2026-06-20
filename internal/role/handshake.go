@@ -475,6 +475,11 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		req.Reply(nil)
 		return
 	}
+	if !resolveToken(&m, priv) {
+		hsStats.dropped.Add(1)
+		req.Reply(nil)
+		return
+	}
 	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
 	if !ok {
 		req.Reply(nil)
@@ -548,6 +553,11 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 		hsDebugf("drop invalid datagram from %s", src)
 		return
 	}
+	if !resolveToken(&m, priv) {
+		hsStats.dropped.Add(1)
+		hsDebugf("drop register with undecryptable sealed token from %s", src)
+		return
+	}
 	// A REGISTER without a valid cookie gets only a (smaller) challenge and no
 	// further work. A spoofed source never receives the cookie, so it can never
 	// complete this step — closing reflection before any crypto or PEER_LIST.
@@ -573,14 +583,43 @@ func parseRegister(raw []byte) (protocol.Message, bool) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return m, false
 	}
-	if m.Type != protocol.TypeRegister || !validField(m.Token) || !validField(m.ID) ||
+	if m.Type != protocol.TypeRegister || !validField(m.ID) ||
 		len(m.PubKey) > protocol.MaxFieldLen || len(m.CodeEnc) > maxCodeEncLen {
+		return m, false
+	}
+	// The pairing token arrives sealed (TokenEnc, preferred — keeps it off a
+	// cleartext UDP wire) or plaintext (Token, legacy). Require exactly one and
+	// bound the sealed blob; resolveToken unseals and re-validates it before use.
+	switch {
+	case m.TokenEnc != "":
+		if m.Token != "" || len(m.TokenEnc) > maxCodeEncLen {
+			return m, false
+		}
+	case !validField(m.Token):
 		return m, false
 	}
 	if m.Ver != protocol.Version {
 		return m, false
 	}
 	return m, true
+}
+
+// resolveToken unseals a sealed pairing token (TokenEnc) into m.Token using the
+// server's identity key, so all downstream logic (cookie, signature, bucket key)
+// works on the cleartext value exactly as before. A plaintext Token (legacy
+// buddy) passes through untouched. Returns false if the sealed token does not
+// decrypt or is malformed.
+func resolveToken(m *protocol.Message, priv ed25519.PrivateKey) bool {
+	if m.TokenEnc == "" {
+		return true // plaintext Token already validated in parseRegister
+	}
+	tok, err := bcrypto.OpenCode(m.TokenEnc, priv)
+	if err != nil || !validField(tok) {
+		return false
+	}
+	m.Token = tok
+	m.TokenEnc = ""
+	return true
 }
 
 // pairRegister runs the transport-independent core: approval-mode checks, then

@@ -44,6 +44,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_ALLOW_INSECURE: "1"
       BUDDYNET_TOKEN: "lab-vip-token"
     depends_on:
       - server
@@ -78,6 +79,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_ALLOW_INSECURE: "1"
       BUDDYNET_TOKEN: "lab-vip-token"
     depends_on:
       - server

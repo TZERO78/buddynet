@@ -43,10 +43,21 @@ const (
 )
 
 // leg is one bound end of a session: the source address a buddy's datagrams
-// arrive from, and when we last heard from it.
+// arrive from, plus its lock-free forwarding record.
 type leg struct {
 	addr *net.UDPAddr
-	seen time.Time
+	fwd  *fwd
+}
+
+// fwd is a leg's forwarding state, read on the data HOT PATH without taking
+// s.mu: peer is the other leg's address (nil until paired, and again once the
+// partner leaves), seen is this leg's last-activity time (unix nanos). Both are
+// written under s.mu on the slow paths (bind/reap) and read/updated atomically by
+// forward, so a relayed datagram never contends on the global lock — one busy
+// session can no longer stall every other.
+type fwd struct {
+	peer atomic.Pointer[net.UDPAddr]
+	seen atomic.Int64
 }
 
 // session is the pair of legs sharing a token. Once both are bound, data from
@@ -67,9 +78,13 @@ type Server struct {
 	cookieKey []byte         // keys the address-validation HMAC (random per process)
 
 	mu        sync.Mutex
-	sessions  map[string]*session // token -> session
-	byAddr    map[string]*session // src addr string -> its session (fast forward)
-	legsPerIP map[string]int      // source IP -> legs it holds (abuse ceiling)
+	sessions  map[string]*session // token -> session (under mu)
+	legsPerIP map[string]int      // source IP -> legs it holds (abuse ceiling, under mu)
+
+	// byAddr maps a leg's source-address string -> *fwd. It is a sync.Map so the
+	// data hot path (forward) can look up the destination without taking mu;
+	// entries are added/removed under mu by bind/reap.
+	byAddr sync.Map
 
 	done      chan struct{} // closed when Run returns, so reap stops with it
 	closeOnce sync.Once
@@ -152,7 +167,6 @@ func NewServer(ttl time.Duration, allowed []netip.Prefix) *Server {
 		allowed:     allowed,
 		cookieKey:   key,
 		sessions:    map[string]*session{},
-		byAddr:      map[string]*session{},
 		legsPerIP:   map[string]int{},
 		hoardWarned: map[string]time.Time{},
 		done:        make(chan struct{}),
@@ -302,17 +316,20 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 			s.mu.Unlock()
 			return // one source is hoarding sessions: refuse further legs
 		}
-		found = &leg{addr: src}
+		found = &leg{addr: src, fwd: &fwd{}}
 		ses.legs = append(ses.legs, found)
-		s.byAddr[key] = ses
+		s.byAddr.Store(key, found.fwd)
 		s.legsPerIP[ip]++
 		if len(ses.legs) == 2 {
 			ses.paired = true
 			s.statPaired.Add(1)
+			// Publish each leg's partner so forward() can route lock-free.
+			ses.legs[0].fwd.peer.Store(ses.legs[1].addr)
+			ses.legs[1].fwd.peer.Store(ses.legs[0].addr)
 			log.Printf("RELAY: action=session-paired a=%s b=%s", ses.legs[0].addr, ses.legs[1].addr)
 		}
 	}
-	found.seen = time.Now()
+	found.fwd.seen.Store(time.Now().UnixNano())
 	s.mu.Unlock()
 
 	// Ack the bind from the relay address so the buddy knows its leg is live and
@@ -325,21 +342,17 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 // never originates traffic to an address it has not heard a bind from, so it
 // cannot be turned into a reflector.
 func (s *Server) forward(conn *net.UDPConn, src *net.UDPAddr, pkt []byte) {
-	s.mu.Lock()
-	ses := s.byAddr[src.String()]
-	var dst *net.UDPAddr
-	if ses != nil {
-		key := src.String()
-		for _, l := range ses.legs {
-			if l.addr.String() == key {
-				l.seen = time.Now()
-			} else {
-				dst = l.addr
-			}
-		}
+	// Hot path: a single sync.Map lookup and two atomic ops, no global lock — so
+	// one high-rate session can never serialise (or stall) all the others. An
+	// unbound source has no entry and is dropped, so the relay never originates to
+	// an address it has not heard a bind from (anti-reflection, unchanged).
+	v, ok := s.byAddr.Load(src.String())
+	if !ok {
+		return
 	}
-	s.mu.Unlock()
-	if dst != nil {
+	f := v.(*fwd)
+	f.seen.Store(time.Now().UnixNano())
+	if dst := f.peer.Load(); dst != nil {
 		conn.WriteToUDP(pkt, dst)
 	}
 }
@@ -374,14 +387,19 @@ func (s *Server) reap() {
 		for token, ses := range s.sessions {
 			kept := ses.legs[:0]
 			for _, l := range ses.legs {
-				if now.Sub(l.seen) > s.ttl {
-					delete(s.byAddr, l.addr.String())
+				if now.UnixNano()-l.fwd.seen.Load() > int64(s.ttl) {
+					s.byAddr.Delete(l.addr.String())
 					s.releaseIPLocked(l.addr.IP.String())
 					continue
 				}
 				kept = append(kept, l)
 			}
 			ses.legs = kept
+			// A surviving lone leg must stop forwarding to its now-reaped partner
+			// until a fresh bind re-pairs them.
+			if len(ses.legs) == 1 {
+				ses.legs[0].fwd.peer.Store(nil)
+			}
 			if len(ses.legs) == 0 {
 				if ses.paired {
 					log.Printf("RELAY: action=session-closed detail=%q", fmt.Sprintf("idle > %s", s.ttl))

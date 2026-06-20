@@ -85,7 +85,8 @@ type Message struct {
 	Ver  int  `json:"ver"` // sender's protocol Version; mismatch is reported clearly
 
 	// Identity / pairing (REGISTER).
-	Token     string `json:"token,omitempty"`      // shared secret pairing two buddies
+	Token     string `json:"token,omitempty"`      // shared secret pairing two buddies (cleartext; legacy/fallback)
+	TokenEnc  string `json:"token_enc,omitempty"`  // the pairing token SEALED to the server's pinned key (preferred; keeps it off the wire on plain UDP). The server unseals it to the same value Token would carry.
 	Role      Role   `json:"role,omitempty"`       // sender's role
 	ID        string `json:"id,omitempty"`         // ephemeral per-run id
 	PubKey    string `json:"pubkey,omitempty"`     // base64 Ed25519 identity

@@ -29,7 +29,6 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 	m := protocol.Message{
 		Type:      protocol.TypeRegister,
 		Ver:       protocol.Version,
-		Token:     rendezvous,
 		Role:      protocol.RoleBuddy,
 		ID:        myID,
 		PubKey:    myPub,
@@ -37,6 +36,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		Name:      cfg.Name,
 		Ts:        ts,
 	}
+	setToken(&m, rendezvous, serverPub)
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
 	if cfg.Code != "" {
 		if enc, err := bcrypto.SealCode(cfg.Code, serverPub); err == nil {
@@ -115,7 +115,6 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 	m := protocol.Message{
 		Type:      protocol.TypeRegister,
 		Ver:       protocol.Version,
-		Token:     rendezvous,
 		Role:      protocol.RoleBuddy,
 		ID:        myID,
 		PubKey:    myPub,
@@ -123,6 +122,7 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 		Name:      cfg.Name,
 		Ts:        ts,
 	}
+	setToken(&m, rendezvous, serverPub)
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
 	if cfg.Code != "" {
 		if enc, err := bcrypto.SealCode(cfg.Code, serverPub); err == nil {
@@ -197,6 +197,19 @@ func noteSkew(d time.Duration, noted *bool) {
 	}
 	*noted = true
 	log.Printf("NOTE: server roster is signed but %s out of date — check the clock on this host and the server (NTP/time-sync); pairing needs them within ~60s", d.Round(time.Second))
+}
+
+// setToken puts the pairing rendezvous on a REGISTER, sealed to the server's
+// pinned identity key so it never travels in cleartext on the plain-UDP control
+// plane (an on-path observer sees only ciphertext). It falls back to the
+// plaintext field only if sealing is somehow unavailable; the signature is always
+// over the raw rendezvous, which the server recovers by unsealing.
+func setToken(m *protocol.Message, rendezvous string, serverPub ed25519.PublicKey) {
+	if enc, err := bcrypto.SealCode(rendezvous, serverPub); err == nil {
+		m.TokenEnc = enc
+		return
+	}
+	m.Token = rendezvous
 }
 
 // canonicalPeers returns the roster in the same ID-sorted order the server

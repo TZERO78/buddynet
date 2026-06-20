@@ -37,6 +37,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_ALLOW_INSECURE: "1"
       BUDDYNET_TOKEN: "lab-rsync-token"
     volumes:
       - rsync-a-key:/var/lib/buddynet
@@ -57,6 +58,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_ALLOW_INSECURE: "1"
       BUDDYNET_TOKEN: "lab-rsync-token"
     ports:
       - "8873:8873"
@@ -84,6 +86,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_ALLOW_INSECURE: "1"
       BUDDYNET_TOKEN: "lab-kopia-token"
     volumes:
       - kopia-a-key:/var/lib/buddynet
@@ -108,6 +111,7 @@ services:
     environment:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_ALLOW_INSECURE: "1"
       BUDDYNET_TOKEN: "lab-kopia-token"
     volumes:
       - kopia-b-key:/var/lib/buddynet

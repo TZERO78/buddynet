@@ -262,8 +262,12 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 		if err := writePending(a.pendDB, snapshot); err != nil {
 			log.Printf("pending write: %v", err)
 		}
-		log.Printf("AUTHZ: action=pending key=%s code=%q — approve with: buddynet --role=handshake --authorized %s allowclient %s",
-			keyTag(key), code, a.path, code)
+		// Do NOT log the cleartext enrollment code — it is a bearer secret and the
+		// log may be shipped off-box. The public key is a non-secret identifier, so
+		// approve by key; the code is also persisted in the 0600 .pending file for
+		// anyone who prefers code-based approval.
+		log.Printf("AUTHZ: action=pending key=%s code=%s — approve with: buddynet --role=handshake --authorized %s approve %s",
+			keyTag(key), shortHash(code), a.path, key)
 	}
 }
 

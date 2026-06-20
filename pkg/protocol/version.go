@@ -13,7 +13,12 @@ package protocol
 // v2, we speak v1 — update buddynet") instead of failing as an opaque signature
 // error. Bump it on ANY breaking change to the message format or to the bytes
 // covered by a signature.
-const Version = 5
+// v6: the pairing token may travel SEALED to the handshake server's pinned key
+// (Message.TokenEnc) instead of in cleartext (Message.Token), so an on-path
+// observer on the plain-UDP control plane can no longer read it. Servers accept
+// both (sealed preferred), but the strict version check means server and buddies
+// must be updated together.
+const Version = 6
 
 // MaxFieldLen bounds untrusted string fields (token, id, pubkey, virtual IP)
 // before they are used as map keys on a server that takes raw internet input.

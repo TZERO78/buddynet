@@ -31,6 +31,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -44,10 +45,50 @@ import (
 
 const appName = "buddynet"
 
-// version is overridable at build time:
-//
-//	go build -ldflags="-X main.version=1.2.3" ./cmd/buddynet
-var version = "0.1.0"
+// version is set ONLY by the release workflow, which injects the exact git tag
+// via ldflags (release.yml: -X main.version=${version}). It is intentionally
+// empty in source: a plain `go build`/`go install` derives a coherent version
+// from the embedded VCS/module info (appVersion) instead of a hand-maintained
+// constant that would drift from the GitHub releases.
+var version = ""
+
+// appVersion returns the release tag injected at build time, or — for an
+// un-injected local build — a version derived from the Go build info: the module
+// version (e.g. a `go install`ed tag) if present, otherwise a short VCS revision
+// marked -dirty when the tree had uncommitted changes.
+func appVersion() string {
+	if version != "" {
+		return version
+	}
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		return "dev"
+	}
+	// Prefer the VCS revision of THIS build (clean, unambiguous dev marker) over
+	// bi.Main.Version, which for a plain `go build` is a Go pseudo-version that
+	// can reference a stale base tag.
+	var rev, modified string
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			modified = s.Value
+		}
+	}
+	if rev != "" {
+		v := "dev-" + rev[:min(12, len(rev))]
+		if modified == "true" {
+			v += "-dirty"
+		}
+		return v
+	}
+	// No VCS info (e.g. `go install module@vX.Y.Z`): the module version is the tag.
+	if v := bi.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	return "dev"
+}
 
 func main() {
 	log.SetFlags(log.Ltime)
@@ -68,7 +109,7 @@ func main() {
 	token := flag.String("token", "", "buddy: legacy fixed pairing token, reused on every reconnect (--invite/--join instead use a one-time token + a stored session secret)")
 	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest)")
 	knownPeers := flag.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)")
-	insecure := flag.Bool("insecure", false, "buddy: do NOT verify the buddy's identity (unsafe; testing only)")
+	insecure := flag.Bool("insecure", false, "buddy: do NOT verify the buddy's identity (unsafe; testing only — requires BUDDYNET_ALLOW_INSECURE=1)")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
 	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
@@ -94,7 +135,7 @@ func main() {
 
 	switch {
 	case *showVersion || flag.Arg(0) == "version":
-		fmt.Printf("%s %s\n", appName, version)
+		fmt.Printf("%s %s\n", appName, appVersion())
 		return
 	case flag.Arg(0) == "help":
 		usage()
@@ -354,6 +395,14 @@ func (a buddyArgs) config() role.BuddyConfig {
 func (a buddyArgs) validate() {
 	if a.server == "" || a.serverKey == "" {
 		fmt.Fprintln(os.Stderr, "error: --role=buddy needs --server and --server-key")
+		os.Exit(2)
+	}
+	// --insecure turns off ALL buddy verification (no pin, no SAS) — a full MITM
+	// exposure that only belongs in throwaway test setups. Refuse it unless the
+	// operator opts in via the environment, so it can never be copy-pasted from a
+	// lab command into production by accident.
+	if a.insecure && os.Getenv("BUDDYNET_ALLOW_INSECURE") != "1" {
+		fmt.Fprintln(os.Stderr, "error: --insecure disables all buddy verification (MITM-exposed); refused unless BUDDYNET_ALLOW_INSECURE=1 is set. Pin with --peer-key instead.")
 		os.Exit(2)
 	}
 	// A token is needed for a first pairing (--invite/--join/--token) and for a
@@ -618,7 +667,7 @@ TRANSPORT
   protection via QUIC's built-in address validation, at the cost of a TLS cert.
 
 FLAGS
-`, appName, version)
+`, appName, appVersion())
 	flag.PrintDefaults()
 	fmt.Fprintf(w, "\nMore: docs/ARCHITECTURE.md, docs/PROTOCOL.md, SECURITY.md\n")
 }

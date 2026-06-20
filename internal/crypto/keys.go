@@ -87,8 +87,15 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 	data, rerr := os.ReadFile(path)
 	switch {
 	case rerr == nil:
-		if info, serr := os.Stat(path); serr == nil && info.Mode().Perm() != 0o600 {
-			log.Printf("WARNING: key file %s has permissions %v, expected 0600", path, info.Mode().Perm())
+		if info, serr := os.Stat(path); serr == nil && info.Mode().Perm()&0o077 != 0 {
+			// The identity key is also the TLS cert key and the seed of the virtual
+			// IP — it must not be group/other-accessible. Tighten it in place rather
+			// than run with an exposed key; if even that fails, refuse instead of
+			// continuing with a readable private key (fail-closed, like SSH).
+			log.Printf("WARNING: key file %s had permissions %v (group/other access); tightening to 0600", path, info.Mode().Perm())
+			if cerr := os.Chmod(path, 0o600); cerr != nil {
+				return nil, false, fmt.Errorf("key %s has permissions %v (must be 0600) and could not be tightened: %w", path, info.Mode().Perm(), cerr)
+			}
 		}
 		// Tolerate a trailing newline/whitespace so a key written with `echo` or an
 		// editor still loads (StdEncoding would otherwise reject the newline and the

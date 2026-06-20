@@ -187,7 +187,7 @@ An `ALERT:` segment, any `SECURITY:` line, or a sustained spike in
 | Active network MITM (not the server) | Cannot impersonate a peer — pinned mutual cert auth, and the SAS catches a first-contact substitution. **Safe.** |
 | Malicious/compromised **handshake server** | Cannot impersonate a buddy: a substituted key fails the SAS (or is refused by `--peer-key`). Can deny service. **Mitigated.** |
 | A **relay** in the data path | Sees only ciphertext; cannot read or inject (QUIC auth). **Safe.** |
-| Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. On the default UDP transport the token travels in cleartext, so an on-path observer can learn it; run `--quic-handshake` to encrypt the control plane and always pin with `--peer-key`. **Mitigated.** |
+| Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. The token (and the reconnect rendezvous secret) is **sealed to the server's pinned key** (`TokenEnc`) even on plain UDP, so an on-path observer sees only ciphertext, not the secret. Always pin with `--peer-key`. **Mitigated.** |
 | Spoofed-source flood / reflection on the handshake server | Source address validated first (UDP cookie or QUIC) before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier. **Mitigated.** |
 | Spoofed-source reflection / traffic-laundering through a **relay** | A bind binds no leg until the source echoes an address-validation cookie (reply smaller than the bind); a spoofed source can never validate, so attacker data can never be forwarded to a victim address. **Mitigated.** |
 | Local process on the same host | Reads the `0600` key / `known_peers`, or a TCP-loopback `-L`. Use a `unix:/path` socket and the systemd sandbox. **Mitigated.** |
@@ -230,14 +230,14 @@ Set the **same** transport on the server and every buddy (`--quic-handshake`, or
 `BUDDYNET_QUIC=1`); a mismatch simply fails to connect. On both transports the
 global + per-source rate limits and the bounded registry caps still apply.
 
-**Confidentiality differs, though.** Plain UDP `REGISTER`s are cleartext JSON, so
-the pairing token (and, on reconnect, the rendezvous secret) is visible to an
-on-path observer near either endpoint. That cannot break a tunnel — the partner
-is still pinned by key and verified by SAS — but it lets an observer squat/deny a
-pairing, and it enables a full MITM **only** against a buddy run with `--insecure`.
-`--quic-handshake` encrypts the whole exchange (the token never appears in
-cleartext on the wire). The server logs a `WARNING` at startup on the UDP path.
-Either way, treat the token as a bearer secret and pin buddies with `--peer-key`.
+**Confidentiality.** Plain UDP `REGISTER`s are otherwise cleartext JSON, but the
+one secret in them — the pairing token (and, on reconnect, the rendezvous secret)
+— is **sealed to the server's pinned identity key** (`TokenEnc`, a NaCl sealed
+box), so an on-path observer sees only ciphertext where the secret would be. The
+rest of a `REGISTER` (id, pubkey, virtual IP, name) is non-secret identity data.
+`--quic-handshake` additionally encrypts the *whole* exchange. Either way, the
+partner is still pinned by key and verified by SAS; treat the token as a bearer
+secret and pin buddies with `--peer-key`.
 
 ## Deliberately out of scope
 
@@ -250,11 +250,6 @@ Either way, treat the token as a bearer secret and pin buddies with `--peer-key`
   and back them up (see below). No passphrase. The systemd units set `LimitCORE=0`
   so the in-memory key cannot leak into a core dump, but the key is not `mlock`ed
   against swap — disable swap or encrypt it on sensitive hosts.
-- **Enrollment code in the server log (approval mode).** When a client enrolls
-  with `--code`, the handshake server logs the cleartext code so the operator can
-  `allowclient <code>`. The code is a one-time, low-entropy reference and only
-  grants *pending* status; approval still requires write access to the allowlist
-  file (which already implies operator trust), so log-read alone cannot escalate.
 - **Per-stream idle timeout.** Forwarded streams are bounded only by the session
   idle timeout (`--idle-timeout`) and the 256-stream cap, not by an independent
   per-stream deadline — an aggressive one would kill legitimately idle streams
