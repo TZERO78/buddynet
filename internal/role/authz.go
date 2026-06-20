@@ -35,7 +35,23 @@ const (
 	// of now, so a captured one is replayable over a 2*regSkew span; the replay
 	// cache must outlive that window to catch it.
 	regReplayWindow = 2 * regSkew
+
+	// maxAuthorizedKeys bounds how many entries the allowlist file can build into
+	// an in-memory map at startup/reload, so a huge (accidental or hostile, but
+	// necessarily local) file cannot exhaust memory.
+	maxAuthorizedKeys = 100_000
 )
+
+// tightenPerms enforces 0600 on a sensitive allowlist/pending file: if it is
+// group/other-accessible (e.g. a config-management edit dropped the mode), warn
+// and chmod it back — the same policy the identity key uses. fi is the stat of
+// the OPEN file, so this also avoids a path-based re-stat race.
+func tightenPerms(path string, fi os.FileInfo) {
+	if fi.Mode().Perm()&0o077 != 0 {
+		log.Printf("WARNING: %s had permissions %v (group/other access); tightening to 0600", path, fi.Mode().Perm())
+		_ = os.Chmod(path, 0o600)
+	}
+}
 
 // authorizer is the optional client allowlist (approval mode) for the handshake
 // server. It holds approved client public keys, loaded from an
@@ -77,7 +93,7 @@ func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error
 }
 
 func (a *authorizer) reload() error {
-	fi, err := os.Stat(a.path)
+	keys, mtime, err := readAuthorized(a.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			a.mu.Lock()
@@ -87,12 +103,8 @@ func (a *authorizer) reload() error {
 		}
 		return err
 	}
-	keys, err := readAuthorized(a.path)
-	if err != nil {
-		return err
-	}
 	a.mu.Lock()
-	a.keys, a.mtime = keys, fi.ModTime()
+	a.keys, a.mtime = keys, mtime
 	a.mu.Unlock()
 	return nil
 }
@@ -291,12 +303,17 @@ func clonePending(m map[string]pendingEntry) map[string]pendingEntry {
 
 // --- file helpers, shared by the approve/list/revoke subcommands ----------
 
-func readAuthorized(path string) (map[string]string, error) {
+func readAuthorized(path string) (map[string]string, time.Time, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, time.Time{}, err
 	}
 	defer f.Close()
+	fi, err := f.Stat() // fstat the OPEN fd: the mtime matches the bytes we read (no TOCTOU)
+	if err != nil {
+		return nil, time.Time{}, err
+	}
+	tightenPerms(path, fi)
 	keys := map[string]string{}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
@@ -310,8 +327,12 @@ func readAuthorized(path string) (map[string]string, error) {
 			continue
 		}
 		keys[key] = strings.Join(fields[1:], " ")
+		if len(keys) >= maxAuthorizedKeys {
+			log.Printf("WARNING: %s has more than %d keys; ignoring the rest", path, maxAuthorizedKeys)
+			break
+		}
 	}
-	return keys, sc.Err()
+	return keys, fi.ModTime(), sc.Err()
 }
 
 func validPubKey(b64 string) bool {
@@ -326,7 +347,8 @@ func ApproveKey(path, key, label string) error {
 	if !validPubKey(key) {
 		return fmt.Errorf("not a valid base64 Ed25519 public key: %q", key)
 	}
-	keys, err := readAuthorized(path)
+	defer lockAllowlist(path)() // serialise concurrent approve/revoke (lost-update guard)
+	keys, _, err := readAuthorized(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -351,7 +373,7 @@ func ApproveKey(path, key, label string) error {
 }
 
 func ListKeys(path string) error {
-	keys, err := readAuthorized(path)
+	keys, _, err := readAuthorized(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			fmt.Println("(no authorized clients yet)")
@@ -374,6 +396,7 @@ func ListKeys(path string) error {
 }
 
 func RevokeKey(path, key string) error {
+	defer lockAllowlist(path)() // serialise concurrent approve/revoke (lost-update guard)
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -425,6 +448,9 @@ func readPending(path string) (map[string]pendingEntry, error) {
 		return out, err
 	}
 	defer f.Close()
+	if fi, serr := f.Stat(); serr == nil {
+		tightenPerms(path, fi)
+	}
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		fields := strings.Fields(sc.Text())
@@ -437,6 +463,10 @@ func readPending(path string) (map[string]pendingEntry, error) {
 			continue
 		}
 		out[fields[0]] = pendingEntry{Key: fields[1], Seen: seen}
+		if len(out) >= maxPending {
+			log.Printf("WARNING: %s has more than %d pending entries; ignoring the rest", path, maxPending)
+			break
+		}
 	}
 	return out, sc.Err()
 }
@@ -467,7 +497,10 @@ func AllowClient(authorizedPath, code string) error {
 	if !ok {
 		return fmt.Errorf("no pending client with code %q (not registered yet, or code expired)", code)
 	}
-	if err := ApproveKey(authorizedPath, e.Key, "code:"+code); err != nil {
+	// Label the approval with a NON-reversible code tag, never the cleartext
+	// enrollment code — the allowlist file may end up in config management
+	// (Ansible/Chef), and the code is a bearer secret that must not persist.
+	if err := ApproveKey(authorizedPath, e.Key, "code:"+shortHash(code)); err != nil {
 		return err
 	}
 	delete(pend, h)
