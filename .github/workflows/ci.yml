@@ -59,6 +59,10 @@ jobs:
       #   G115 int64->uint64 of a positive cookie epoch — provably non-negative.
       #   G104 unchecked best-effort writes (conn.WriteToUDP), G304 file opens from
       #        config-supplied paths — pervasive in net/CLI code, not vulnerabilities.
+      #   G703 path traversal via taint analysis — the taint-analysis sibling of
+      #        G304: every file path here is the node operator's OWN CLI/config path
+      #        (--peers-file/--known-peers/--authorized), never attacker input. Same
+      #        non-vulnerability as G304; excluded for consistency.
       # Every other rule (exec, SQL, weak crypto, etc.) stays blocking. Installed
       # and run with the runner's Go (setup-go above), not the dockerized action —
       # that image bundles an older Go that GOTOOLCHAIN=local rejects against our
@@ -66,4 +70,4 @@ jobs:
       - name: gosec
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@latest
-          gosec -severity medium -exclude=G104,G115,G117,G123,G304,G402 ./...
+          gosec -severity medium -exclude=G104,G115,G117,G123,G304,G402,G703 ./...
