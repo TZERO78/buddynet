@@ -9,6 +9,10 @@
 > **Self-hosted P2P overlay. One binary. Your VPS coordinates — but never sees —
 > your traffic. No Tailscale account needed.**
 
+![BuddyNet MultiPeer demo — one hub holding five buddy tunnels: list them, reach them by name via BuddyDNS, revoke one, the rest keep tunneling](media/multipeer-demo.gif)
+
+<sup>One hub, five buddies (`bob alice steven markus sandra`) — `peers list`, reach a buddy by name (BuddyDNS), revoke one, and the other four keep tunneling. Self-sovereign: no central authority. Reproduce: `lab/demo.sh`.</sup>
+
 BuddyNet gives every node a stable identity and a deterministic virtual IP, finds
 peers through a tiny bootstrap server, and brings up a direct (hole-punched)
 encrypted tunnel — falling back to a blind relay only when a direct path is
