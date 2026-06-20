@@ -9,9 +9,9 @@
 > **Self-hosted P2P overlay. One binary. Your VPS coordinates — but never sees —
 > your traffic. No Tailscale account needed.**
 
-![BuddyNet MultiPeer demo — one hub holding five buddy tunnels: list them, reach them by name via BuddyDNS, revoke one, the rest keep tunneling](media/multipeer-demo.gif)
+![BuddyNet deployment walkthrough — the VPS runs the coordinator, machine A mints a one-time invite, machine B joins behind its own NAT, and a direct hole-punched tunnel comes up](media/deploy-demo.gif)
 
-<sup>One hub, five buddies (`bob alice steven markus sandra`) — `peers list`, reach a buddy by name (BuddyDNS), revoke one, and the other four keep tunneling. Self-sovereign: no central authority. Reproduce: `lab/demo.sh`.</sup>
+<sup>Stand it up in three steps, live: the VPS runs the coordinator (`--role=handshake,relay`), machine A mints a one-time invite, machine B joins behind its own NAT, and the tunnel is `via="direct P2P"` — hole-punched, no port-forwarding, no traffic through the server. Reproduce: `lab/demo-deploy.sh`.</sup>
 
 BuddyNet gives every node a stable identity and a deterministic virtual IP, finds
 peers through a tiny bootstrap server, and brings up a direct (hole-punched)
@@ -103,6 +103,18 @@ That's it — an end-to-end-encrypted, NAT-traversed tunnel carrying plain rsync
 Check the link any time with `--status` — it exits `0` reachable, `3`
 unreachable, `4` offline, `5` untrusted, `1` local error (see
 [docs/TWO-BUDDIES.md](docs/TWO-BUDDIES.md#checking-the-link)).
+
+## MultiPeer — one hub, many buddies
+
+One node can hold **many tunnels at once** ([`--peers-file`](docs/PEERS.md)):
+each buddy is pinned by key, reachable by name via BuddyDNS (`<name>.buddy →
+10.66.X.Y`), and self-managed with the `peers` CLI — `list`, `add` (invite), and
+`remove` (revoke, drops the manifest entry **and** the session). No central
+authority: throw one buddy out and the rest keep tunneling, untouched.
+
+![BuddyNet MultiPeer demo — one hub holding five buddy tunnels: list them, reach them by name via BuddyDNS, revoke one, the rest keep tunneling](media/multipeer-demo.gif)
+
+<sup>One hub, five buddies (`bob alice steven markus sandra`) — `peers list`, reach a buddy by name (BuddyDNS), revoke one, and the other four keep tunneling. Reproduce: `lab/demo.sh`.</sup>
 
 ## How it works
 
