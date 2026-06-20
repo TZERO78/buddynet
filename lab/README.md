@@ -169,6 +169,52 @@ docker compose -f docker-compose.yml -f docker-compose.vip.yml up -d --build
   Results: 6 passed, 0 failed
 ```
 
+## BuddyParty test (Phase 1.4: multi-peer, 3–5 buddies)
+
+The overlay `docker-compose.party.yml` runs one **hub** that holds **five tunnels
+at once** and routes to each buddy by name — the end-to-end proof of the
+multi-peer supervisor (`--peers-file`) plus VIP routing (`--vip-listen`).
+
+```
+party-{beta,gamma,delta,epsilon,zeta} (each httpd)  ──BuddyNet──►  party-hub
+                                                              --vip-listen 8080
+                                                       (--peers-file lists all 5)
+
+inside party-hub:  curl http://beta.buddy:8080 … zeta.buddy:8080  → each buddy's httpd
+```
+
+Every node is pinned by key (Model A) and pairs via a per-pair bootstrap token.
+`setup-party.sh` bootstraps an identity key for each node, then writes the
+manifests (`lab/party/*.peers`, git-ignored — they hold keys + tokens):
+
+```bash
+cd lab
+./setup-party.sh          # build, extract keys, write manifests, start 6 containers
+./test-party.sh           # verify all 5 tunnels + isolation when one buddy fails
+```
+
+`test-party.sh` checks:
+
+1. The hub binds all 5 buddy VIPs on `lo` (5 simultaneous tunnels).
+2. `curl <name>.buddy:8080` on the hub reaches the **correct** buddy (each serves
+   a page naming itself, so routing is verified per buddy).
+3. **Isolation**: stopping one buddy (`zeta`) leaves the other four reachable and
+   releases only its VIP — one failing worker never affects the others.
+
+```
+  [PASS] hub is listening on 5 buddy VIPs
+  [PASS] beta.buddy:8080 → beta's httpd …  (×5)
+  [PASS] beta/gamma/delta/epsilon still reachable after zeta went down
+  [PASS] zeta unreachable after stop (its VIP released)
+
+  Results: 11 passed, 0 failed
+```
+
+To run with fewer buddies (3–4), trim the `BUDDIES` list in `setup-party.sh` /
+`test-party.sh` and remove the matching `party-<name>` services from
+`docker-compose.party.yml`. Live add/remove on the hub works too — edit
+`party/hub.peers` (or use `buddynet … peers add/remove`) and `kill -HUP` the hub.
+
 ## Observing the tunnels
 
 ```bash

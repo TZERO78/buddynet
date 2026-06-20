@@ -11,6 +11,9 @@ known_peers
 
 # Lab test environment — .env contains the generated server key, not for commit
 /lab/.env
+# Generated BuddyParty manifests — contain node keys + bootstrap tokens (re-created
+# by setup-party.sh from the persistent key volumes), not for commit
+/lab/party/
 
 # Editor / OS
 .DS_Store
