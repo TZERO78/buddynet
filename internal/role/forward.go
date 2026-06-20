@@ -128,13 +128,21 @@ func acceptAndForward(ctx context.Context, sess tunnel.Session, ln net.Listener,
 // serveStreams accepts incoming streams and forwards each to the local service.
 func serveStreams(ctx context.Context, sess tunnel.Session, addr string, count *atomic.Int64) {
 	log.Printf("-forward: incoming streams go to %s", addr)
+	// Bound concurrent forwards like the -L side does. The QUIC transport already
+	// caps a peer to maxConcurrentStreams incoming streams, but the explicit
+	// semaphore makes the ceiling transport-independent (a future WireGuard data
+	// plane inherits it) and applies backpressure on Accept instead of spawning an
+	// unbounded number of splice goroutines.
+	sem := make(chan struct{}, maxConcurrentStreams)
 	for {
 		st, err := sess.AcceptStream(ctx)
 		if err != nil {
 			return
 		}
+		sem <- struct{}{}
 		count.Add(1)
 		go func() {
+			defer func() { <-sem }()
 			safe.Do("dataplane.forward", func() {
 				c, err := dialLocal(addr)
 				if err != nil {

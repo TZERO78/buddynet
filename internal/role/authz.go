@@ -402,7 +402,14 @@ func RevokeKey(path, key string) error {
 	if out != "" {
 		out += "\n"
 	}
-	if err := os.WriteFile(path, []byte(out), 0o600); err != nil {
+	// Atomic replace (tmp + rename) so the inotify reload never observes a
+	// truncated allowlist mid-rewrite: a concurrent reader sees either the old or
+	// the new file, never a torn one.
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, []byte(out), 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
 	fmt.Printf("revoked %d entr(y/ies): %s\n", removed, key)
