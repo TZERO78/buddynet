@@ -144,7 +144,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 
 	// First contact (trust-on-first-use): verify the partner identity with a SAS
 	// over the now-established, channel-bound session BEFORE trusting/persisting
-	// it. Only reached when not pinned and not --insecure.
+	// it. Only reached when not pinned and not --lab.
 	if needSAS {
 		if !cfg.Interactive {
 			return fmt.Errorf("first contact with an unknown buddy key (%s) but no way to verify it: running non-interactively. Pin it with --peer-key, or run once interactively to confirm the SAS", partner.PubKey)

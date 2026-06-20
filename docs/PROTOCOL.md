@@ -76,7 +76,7 @@ key, check `ts` is within ±60 s, then apply the trust policy to the partner's
 identity and confirm its `virtual_ip` matches `SHA-256(pubkey)[0]`. The trust
 policy is, strongest first: `--peer-key` (strict pin) → trust-on-first-use, where
 on the **first** contact both ends compare a Short Authentication String (below)
-before the key is trusted → `--insecure` (none). A reconnect via a stored session
+before the key is trusted → `--lab` (none). A reconnect via a stored session
 pins the key recorded at pairing and skips the SAS.
 
 ## SAS — first-contact verification

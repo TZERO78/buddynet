@@ -85,7 +85,7 @@ func TestOpenModeProofOfPossession(t *testing.T) {
 // proof-of-possession check (it really owns that key), so in OPEN mode it pairs
 // and receives buddy-a's signed PEER_LIST — the documented, inherent residual of
 // a bearer-token rendezvous (the impersonation is still stopped downstream by
-// --peer-key/TOFU+SAS; only --insecure turns it into a MITM). APPROVAL mode
+// --peer-key/TOFU+SAS; only --lab turns it into a MITM). APPROVAL mode
 // closes the squat entirely: the attacker key is not allowlisted, so there is no
 // pairing and no roster/endpoint leak.
 func TestTokenSquatResidualAndApprovalModeBlock(t *testing.T) {

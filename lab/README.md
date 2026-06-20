@@ -262,9 +262,9 @@ In production you would:
 - Run `server` on a VPS with a real public IP (see `deployments/docker-compose.yml`)
 - Run buddies on separate machines behind NAT
 - Use `--invite` / `--join` instead of a shared `--token` for one-time pairing
-- Remove `--insecure` and pin `--peer-key` or use the TOFU/SAS flow
+- Remove `--lab` and pin `--peer-key` or use the TOFU/SAS flow
 
-The lab uses `--insecure` and a fixed shared token to avoid interactive prompts.
+The lab uses `--lab` and a fixed shared token to avoid interactive prompts.
 Everything else — the handshake protocol, PEER_LIST signing, QUIC tunnel, relay fallback — is identical to production.
 
 ## Security model (what this lab exercises)
@@ -272,4 +272,4 @@ Everything else — the handshake protocol, PEER_LIST signing, QUIC tunnel, rela
 - **Signed `PEER_LIST`**: buddies reject any peer list not signed by the pinned server key.
 - **Blind relay**: when the relay is used, the server sees only encrypted QUIC packets, never plaintext.
 - **Relay fallback timing**: with `--idle-timeout=20s` (lab setting), BuddyNet detects a dead P2P path and reconnects via relay within ~5 seconds.
-- **Buddy identity**: `--insecure` in the lab skips peer key verification; in production use `--peer-key`.
+- **Buddy identity**: `--lab` in the lab skips peer key verification; in production use `--peer-key`.

@@ -149,7 +149,7 @@ Always logged. Never rate-limited or silenced.
 TRUST: action=tofu-new    key=… token=… store=… detail=…   # first contact, SAS confirmed, key recorded
 TRUST: action=tofu-match  key=… token=…                    # reconnect, key matches stored
 TRUST: action=pinned-ok   key=… token=…                    # --peer-key check passed
-TRUST: action=insecure    key=… token=… detail=…           # --insecure, no verification
+TRUST: action=insecure    key=… token=… detail=…           # --lab, no verification
 ```
 
 ### Authorization events — `AUTHZ:` (approval mode only)

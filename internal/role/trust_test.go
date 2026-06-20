@@ -70,7 +70,7 @@ func TestTrustPinAndChangeRejected(t *testing.T) {
 	}
 }
 
-// --insecure accepts anything without SAS, and TOFU keys are tracked per token
+// --lab accepts anything without SAS, and TOFU keys are tracked per token
 // (a different token learns independently rather than clashing).
 func TestTrustInsecureAndIndependentToken(t *testing.T) {
 	a, _, _ := ed25519.GenerateKey(rand.Reader)

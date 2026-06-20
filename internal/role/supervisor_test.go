@@ -59,7 +59,7 @@ func TestPeerSource(t *testing.T) {
 // threshold the worker probes the manifest bootstrap token to recover the
 // rendezvous, while STILL pinning the partner key — so the fallback cannot be
 // abused to impersonate the partner. It must never fall back without a token (no
-// common rendezvous), nor under --insecure (the pin is what keeps it safe).
+// common rendezvous), nor under --lab (the pin is what keeps it safe).
 func TestPeerSourceStaleSessionFallback(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "known_peers")
 	a, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -97,7 +97,7 @@ func TestPeerSourceStaleSessionFallback(t *testing.T) {
 		t.Fatalf("no token: must never fall back, got %+v", att)
 	}
 
-	// --insecure → the pin no longer protects us, so the fallback is disabled.
+	// --lab → the pin no longer protects us, so the fallback is disabled.
 	insecure := peerSource(BuddyConfig{KnownPeers: path, Insecure: true}, peerSpec{pin: a, token: "boot-a"})
 	if att, _ := insecure(9); att.rendezvous != "secret-a" {
 		t.Fatalf("insecure: must not fall back to a public token, got %+v", att)

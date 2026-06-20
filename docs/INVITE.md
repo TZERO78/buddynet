@@ -95,7 +95,7 @@ TRUST: action=tofu-new — recorded; pin with --peer-key to skip the SAS next ti
 A key change on a known token is refused outright (`SECURITY: event=key-changed`).
 To legitimately rekey, remove the old entry from `--known-peers` and re-run SAS.
 
-### 3. Insecure (`--insecure`)
+### 3. Lab mode (`--lab`)
 
 Disables identity verification entirely. **Use only in isolated test environments.**
 The tunnel is still encrypted but you cannot know who is at the other end.
