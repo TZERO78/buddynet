@@ -20,6 +20,11 @@ type RelayConfig struct {
 	// (it stays unauthenticated by design — this is a coarse access control for a
 	// private relay). Empty keeps it open to all.
 	AllowCIDRs []netip.Prefix
+	// MaxSessions / MaxLegsPerIP override the relay's abuse ceilings; 0 uses the
+	// defaults. A private relay for a small group may lower them to tighten the
+	// ceiling further (e.g. 256 / 16).
+	MaxSessions  int
+	MaxLegsPerIP int
 }
 
 // Relay runs the blind forwarder until ctx is cancelled. It is the same dormant
@@ -47,7 +52,7 @@ func Relay(ctx context.Context, cfg RelayConfig) error {
 	}
 	go func() { <-ctx.Done(); conn.Close() }()
 
-	relay.NewServer(cfg.TTL, cfg.AllowCIDRs).Run(conn)
+	relay.NewServer(cfg.TTL, cfg.AllowCIDRs, cfg.MaxSessions, cfg.MaxLegsPerIP).Run(conn)
 	if ctx.Err() != nil {
 		log.Print("shutting down")
 	}

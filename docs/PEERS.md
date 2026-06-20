@@ -9,6 +9,15 @@ This is decentralised and **self-sovereign**: your manifest is *your* list of wh
 *you* talk to. There is no group, no admin, no shared roster — removing a buddy
 is a purely local decision that never touches the other peers.
 
+> **A node maintains at most 48 buddies.** This is a deliberate design limit, not
+> a performance one — BuddyNet is a personal overlay for small, trusted groups,
+> and there is no flag to raise it. It is enforced fail-closed: a manifest (or a
+> `peers add`) over the limit is refused with a clear error, not silently
+> truncated; an over-large *session* store is capped with a warning instead. The
+> assembler also rejects a virtual-IP collision between two keys outright rather
+> than routing ambiguously. If you need more than 48 simultaneous peers, use a
+> solution designed for large-scale meshes — that is not what BuddyNet aims to be.
+
 ## Quick start
 
 Two machines, each maintaining the other (and any further buddies you add):

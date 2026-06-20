@@ -43,6 +43,11 @@ all three roles; in a buddy the relay and handshake code sit dormant as fallback
 | Unraid plugin | ✅ | ✅ | ❌ | ❌ |
 | Live pentest results | ✅ [in repo](lab/pentest/README.md) | ❌ | ❌ | N/A |
 
+> **BuddyNet is not a mesh VPN.**
+> It is built for small, trusted groups of up to **48 peers**. If you need more
+> than 48 simultaneous connections, use a solution designed for large-scale
+> meshes — that is deliberately not what BuddyNet aims to be.
+
 ## What you need
 
 BuddyNet needs **one publicly reachable node** to do the matchmaking (the
@@ -111,6 +116,10 @@ each buddy is pinned by key, reachable by name via BuddyDNS (`<name>.buddy →
 10.66.X.Y`), and self-managed with the `peers` CLI — `list`, `add` (invite), and
 `remove` (revoke, drops the manifest entry **and** the session). No central
 authority: throw one buddy out and the rest keep tunneling, untouched.
+
+A node maintains **up to 48 buddies** — a deliberate design limit for a personal
+overlay, enforced fail-closed (see [docs/PEERS.md](docs/PEERS.md)). For a larger
+mesh, use a solution built for that.
 
 ![BuddyNet MultiPeer demo — one hub holding five buddy tunnels: list them, reach them by name via BuddyDNS, revoke one, the rest keep tunneling](media/multipeer-demo.gif)
 

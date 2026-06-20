@@ -15,6 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **Breaking:** `--insecure` and `BUDDYNET_ALLOW_INSECURE` are removed with no
   alias — old lab scripts fail loudly instead of silently running wrong.
 
+### Changed
+
+- **Hard limit of 48 simultaneous peers per node (`MaxBuddies`).** BuddyNet is a
+  personal overlay for small, trusted groups, not a large-scale mesh VPN — this is
+  a deliberate design limit, not a performance one, with no flag to raise it.
+  Enforced fail-closed at peer assembly and `peers add` (a manifest over the limit
+  is refused, never silently truncated); an over-large session store is capped
+  with a warning instead of bricking startup. Over-limit errors point to using a
+  scalable solution without naming any product — operators choose their own.
+- **VIP collision detection at peer assembly.** Two keys whose deterministic
+  virtual IPs collide are now rejected with an explicit error instead of producing
+  silent per-buddy routing ambiguity (the VIP is an address, never an auth
+  boundary).
+- **`maxAuthorizedKeys` lowered from 100,000 to 1,024** to match the threat model:
+  generous headroom over `MaxBuddies` for key rotation, no longer effectively
+  unbounded.
+- **Relay abuse ceilings are now configurable** via `--relay-max-sessions` and
+  `--relay-max-legs-per-ip` (0 = previous defaults 4096 / 64), so a small private
+  relay can tighten them further.
+
 ## [v2.2.1] — 2026-06-20
 
 ### Fixed

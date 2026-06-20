@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"crypto/ed25519"
 	"fmt"
+	"net/netip"
 	"os"
 	"strings"
 
@@ -101,6 +102,28 @@ func assemblePeers(cfg BuddyConfig) ([]peerSpec, error) {
 			continue // already covered by the manifest (session resolved at runtime)
 		}
 		specs = append(specs, peerSpec{pin: s.pin}) // reconnect-only
+	}
+
+	// Hard cap: BuddyNet is a personal overlay for small trusted groups, not a
+	// large-scale mesh. Above MaxBuddies, refuse fail-closed rather than run
+	// degraded — the error names no product, operators pick their own scaler.
+	if len(specs) > MaxBuddies {
+		return nil, errTooManyBuddies(len(specs))
+	}
+
+	// VIP collision: two distinct keys whose SHA-256 maps to the same 10.66.X.Y
+	// would make per-buddy routing ambiguous. Reject explicitly here instead of
+	// silently misrouting — the VIP is an address, never an auth boundary.
+	vips := make(map[netip.Addr]string, len(specs))
+	for _, s := range specs {
+		v := bcrypto.VirtualIP(s.pin)
+		keyB64 := bcrypto.PubKeyB64(s.pin)
+		if existing, collision := vips[v]; collision {
+			return nil, fmt.Errorf(
+				"VIP collision: keys %s and %s both map to %s — cannot maintain both "+
+					"(use a different key, or report a bug)", keyTag(existing), keyTag(keyB64), v)
+		}
+		vips[v] = keyB64
 	}
 	return specs, nil
 }

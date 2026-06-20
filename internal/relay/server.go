@@ -24,13 +24,21 @@ import (
 // only ever writes to an address a bind was already heard from — but it is open
 // bandwidth, so the caps below are abuse ceilings, not access control. Operators
 // who want a private relay should firewall it or run it only for known buddies.
+//
+// The session/leg ceilings default high for an open/public relay. For a private
+// BuddyNet relay serving a small group (BuddyNet caps a node at 48 buddies), an
+// operator may lower them with --relay-max-sessions and --relay-max-legs-per-ip
+// (e.g. 256 / 16) to tighten the abuse ceiling further; the defaults below apply
+// when those flags are 0.
 
-// Hard caps bound memory even under spoofed source addresses (the only defense
-// that works against address spoofing, since the source itself is forgeable).
+// Default hard caps bound memory even under spoofed source addresses (the only
+// defense that works against address spoofing, since the source itself is
+// forgeable). maxSessions/maxLegsPerIP are overridable per server (see NewServer);
+// maxLegsPerSes is fixed — a session is exactly two buddies.
 const (
-	maxSessions   = 4096 // concurrent relayed sessions
-	maxLegsPerSes = 2    // exactly two buddies per session; reject a third
-	maxLegsPerIP  = 64   // legs one source address may hold (bounds session hoarding)
+	defaultMaxSessions  = 4096 // concurrent relayed sessions (override: --relay-max-sessions)
+	maxLegsPerSes       = 2    // exactly two buddies per session; reject a third (fixed)
+	defaultMaxLegsPerIP = 64   // legs one source address may hold (override: --relay-max-legs-per-ip)
 )
 
 // Rate-limit ceilings for bind CONTROL packets only — data forwarding is the
@@ -72,10 +80,12 @@ type session struct {
 // session and never inspects, decrypts, or stores payload — it sees only
 // encrypted QUIC packets between two NAT-bound addresses.
 type Server struct {
-	ttl       time.Duration
-	bindRL    *ratelimit.Limiter
-	allowed   []netip.Prefix // if non-empty, only these source nets may bind a leg
-	cookieKey []byte         // keys the address-validation HMAC (random per process)
+	ttl          time.Duration
+	bindRL       *ratelimit.Limiter
+	allowed      []netip.Prefix // if non-empty, only these source nets may bind a leg
+	cookieKey    []byte         // keys the address-validation HMAC (random per process)
+	maxSessions  int            // concurrent session ceiling (abuse bound)
+	maxLegsPerIP int            // per-source leg ceiling (session-hoarding bound)
 
 	mu        sync.Mutex
 	sessions  map[string]*session // token -> session (under mu)
@@ -135,13 +145,13 @@ func (s *Server) warnHoardLocked(ip string) {
 	if last, ok := s.hoardWarned[ip]; ok && now.Sub(last) < statsInterval {
 		return
 	}
-	if len(s.hoardWarned) >= maxSessions {
+	if len(s.hoardWarned) >= s.maxSessions {
 		for k, t := range s.hoardWarned {
 			if now.Sub(t) >= statsInterval {
 				delete(s.hoardWarned, k)
 			}
 		}
-		if len(s.hoardWarned) >= maxSessions {
+		if len(s.hoardWarned) >= s.maxSessions {
 			return // bounded: skip the line under extreme spread (stats still fire)
 		}
 	}
@@ -152,8 +162,16 @@ func (s *Server) warnHoardLocked(ip string) {
 // NewServer returns a relay whose bindings expire after ttl with no traffic. If
 // allowed is non-empty the relay is no longer open: only sources inside one of
 // those CIDRs may bind a leg (optional access control for a private relay); an
-// empty allowed keeps the default open-to-all behaviour.
-func NewServer(ttl time.Duration, allowed []netip.Prefix) *Server {
+// empty allowed keeps the default open-to-all behaviour. maxSessions and
+// maxLegsPerIP are the abuse ceilings; pass 0 for either to use the defaults
+// (defaultMaxSessions / defaultMaxLegsPerIP).
+func NewServer(ttl time.Duration, allowed []netip.Prefix, maxSessions, maxLegsPerIP int) *Server {
+	if maxSessions <= 0 {
+		maxSessions = defaultMaxSessions
+	}
+	if maxLegsPerIP <= 0 {
+		maxLegsPerIP = defaultMaxLegsPerIP
+	}
 	// The relay holds no identity key, so the cookie HMAC is keyed by a random
 	// secret minted per process: it need only be unforgeable and stable for this
 	// run (a restart just re-challenges live binds, a sub-second cost). 32 bytes
@@ -162,14 +180,16 @@ func NewServer(ttl time.Duration, allowed []netip.Prefix) *Server {
 	key := make([]byte, 32)
 	_, _ = rand.Read(key)
 	return &Server{
-		ttl:         ttl,
-		bindRL:      ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),
-		allowed:     allowed,
-		cookieKey:   key,
-		sessions:    map[string]*session{},
-		legsPerIP:   map[string]int{},
-		hoardWarned: map[string]time.Time{},
-		done:        make(chan struct{}),
+		ttl:          ttl,
+		bindRL:       ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),
+		allowed:      allowed,
+		cookieKey:    key,
+		maxSessions:  maxSessions,
+		maxLegsPerIP: maxLegsPerIP,
+		sessions:     map[string]*session{},
+		legsPerIP:    map[string]int{},
+		hoardWarned:  map[string]time.Time{},
+		done:         make(chan struct{}),
 	}
 }
 
@@ -286,7 +306,7 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 	s.mu.Lock()
 	ses := s.sessions[token]
 	if ses == nil {
-		if len(s.sessions) >= maxSessions {
+		if len(s.sessions) >= s.maxSessions {
 			s.statRejected.Add(1)
 			s.mu.Unlock()
 			return // global capacity reached: drop silently
@@ -309,7 +329,7 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 			s.mu.Unlock()
 			return // a third party tried to join this session
 		}
-		if s.legsPerIP[ip] >= maxLegsPerIP {
+		if s.legsPerIP[ip] >= s.maxLegsPerIP {
 			s.statRejected.Add(1)
 			s.statHoard.Add(1)
 			s.warnHoardLocked(ip)

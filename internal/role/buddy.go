@@ -263,6 +263,16 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		if cfg.LocalListen != "" {
 			return fmt.Errorf("multi-peer (%d buddies) with -L cannot route to N buddies: use --vip-listen instead", len(sessions))
 		}
+		// An accumulated session store (e.g. many repeated --invite runs) can drift
+		// past the design limit. Here, unlike the manifest path, cap rather than
+		// fail-closed: these are already-paired buddies, so don't brick startup —
+		// keep the first MaxBuddies and tell the operator to trim the store.
+		if len(sessions) > MaxBuddies {
+			log.Printf("WARNING: session store has %d peers; capping at %d (BuddyNet limit). "+
+				"Remove excess sessions from %s, or use a solution designed for large-scale meshes.",
+				len(sessions), MaxBuddies, cfg.KnownPeers)
+			sessions = sessions[:MaxBuddies]
+		}
 		specs := make([]peerSpec, len(sessions))
 		for i, s := range sessions {
 			specs[i] = peerSpec{pin: s.pin}
