@@ -30,7 +30,7 @@ three roles; in a buddy the relay and handshake code sit dormant as fallback.
 
 | Role | Needs | Job |
 |---|---|---|
-| `buddy` | nothing (NAT is fine) | Find the partner, bring up the tunnel along the fallback chain, forward TCP. |
+| `buddy` | nothing (NAT is fine) | Find each partner, bring up a tunnel along the fallback chain (one per buddy), forward TCP. |
 | `relay` | public IP | Blindly forward encrypted datagrams between two session legs. |
 | `handshake` | public IP | Learn peer endpoints, pair peers by token, hand back a **signed** `PEER_LIST`. No data flows through it. |
 
@@ -76,6 +76,20 @@ A buddy tries paths in order, cheapest and most private first
 4. **Cached peer** — the partner's last-known endpoints from `peers.json`,
    tried when the handshake server was unreachable, so a pair that has met
    before can reconnect with **no server in the loop**.
+
+## Many buddies at once (MultiPeer)
+
+The fallback chain above brings up **one** tunnel to **one** partner. A buddy can
+hold **many at the same time**: list each buddy's pinned key in a manifest
+(`--peers-file`) and a supervisor
+([`internal/role/supervisor.go`](../internal/role/supervisor.go)) runs one
+independent worker per buddy — each with its own fallback chain, its own
+reconnect/backoff, and its own per-peer rendezvous session secret. One buddy
+failing, being revoked (`peers remove`), or reconnecting never touches the
+others. `--vip-listen` then binds each connected buddy's virtual IP on the
+loopback interface ([`internal/vip`](../internal/vip), via netlink) so
+`name.buddy:port` routes to the right buddy's tunnel. The manifest is reconciled
+live on `SIGHUP`. See [PEERS.md](PEERS.md).
 
 ## Transport seam (QUIC now, WireGuard later)
 

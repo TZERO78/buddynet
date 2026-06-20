@@ -158,4 +158,4 @@ Subcommands: `peers list`, `peers add <key> [token]`, `peers remove <key>`.
   is local-only and not used for outbound source selection.
 
 The full threat model is in [SECURITY.md](../SECURITY.md); the two-buddy basics in
-[BUDDYPEER.md](BUDDYPEER.md).
+[Two Buddies](TWO-BUDDIES.md).

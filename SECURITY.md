@@ -292,6 +292,11 @@ hub-and-spoke VPN. What actually revokes access:
   revoked key is then refused on the next connect.
 - **Token rotation.** Re-invite (`--invite`) to mint a fresh token and retire the
   old session secret; the old credential stops working for new connects.
+- **`peers remove <key>` (MultiPeer).** When you maintain buddies in a
+  `--peers-file`, removing one drops **both** its manifest line and its stored
+  session secret, so it can no longer re-pair. This is a purely local,
+  self-sovereign decision: it revokes that buddy from *your* node only and never
+  affects your other buddies. A running daemon applies it on `SIGHUP` (or restart).
 
 To **bound** how long an established tunnel can outlive a revocation, run the
 buddy with **`--reauth-interval`** (off by default). It rebuilds the tunnel on

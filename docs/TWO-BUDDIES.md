@@ -1,12 +1,13 @@
-# BuddyPeer — the two-peer use case of BuddyNet
+# Two Buddies — the point-to-point setup
 
-**BuddyPeer is BuddyNet with exactly two buddies and one handshake server.** It
-is the v1 milestone: a zero-config, end-to-end-encrypted, NAT-traversing tunnel
-between two sites — point `rsync`, `borg`, `ssh`, or any TCP service at a local
-socket and it travels straight to your buddy.
+**The simplest BuddyNet setup: exactly two buddies and one handshake server.** A
+zero-config, end-to-end-encrypted, NAT-traversing tunnel between two sites — point
+`rsync`, `borg`, `ssh`, or any TCP service at a local socket and it travels
+straight to your buddy.
 
-Everything in [ARCHITECTURE.md](ARCHITECTURE.md) applies; BuddyPeer just never
-has a third buddy on the token, so a `PEER_LIST` always names a single partner.
+Everything in [ARCHITECTURE.md](ARCHITECTURE.md) applies; with two buddies a
+`PEER_LIST` simply names a single partner. To hold tunnels to **more than one**
+buddy at once, see [MultiPeer](PEERS.md).
 
 ## One-time setup (the VPS)
 
@@ -121,14 +122,18 @@ can branch on the outcome without parsing the text:
 | `5` | registered but identity not trusted (possible hijack) | `… identity is NOT trusted …` |
 | `1` | local error (cannot open socket / resolve the server) | logged to stderr |
 
-## How it differs from "real" BuddyNet (v2+)
+## Beyond two buddies
 
-| | BuddyPeer (v1) | BuddyNet (v2+) |
-|---|---|---|
-| Peers per token | 2 | many (mesh) |
-| Roster | the one partner | full gossiped roster |
-| Discovery | handshake server | peer-to-peer gossip overlay |
-| Transport | QUIC | QUIC **or** WireGuard (same seam) |
+The same binary scales up — see **[MultiPeer](PEERS.md)**: list many buddies in a
+manifest (`--peers-file`), hold a tunnel to each at once, and route to them by
+name (`--vip-listen`), all under one supervisor where one buddy failing never
+affects the others.
 
-The wire format, virtual IPs, and fallback chain are already the BuddyNet ones,
-so growing past two peers is additive, not a rewrite.
+| | Two buddies | MultiPeer (shipping) | Still on the roadmap |
+|---|---|---|---|
+| Buddies | the one partner | many, each pinned in a manifest | — |
+| Discovery | handshake server | handshake server (per buddy) | peer-to-peer gossip overlay |
+| Transport | QUIC | QUIC | QUIC **or** WireGuard (same seam) |
+
+The wire format, virtual IPs, and fallback chain are unchanged, so each step is
+additive — never a rewrite.

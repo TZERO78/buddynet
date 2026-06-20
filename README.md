@@ -59,7 +59,7 @@ rsync -a /data/ rsync://localhost:9000/backup/
 That's it — an end-to-end-encrypted, NAT-traversed tunnel carrying plain rsync.
 Check the link any time with `--status` — it exits `0` reachable, `3`
 unreachable, `4` offline, `5` untrusted, `1` local error (see
-[docs/BUDDYPEER.md](docs/BUDDYPEER.md#checking-the-link)).
+[docs/TWO-BUDDIES.md](docs/TWO-BUDDIES.md#checking-the-link)).
 
 ## How it works
 
@@ -91,7 +91,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 
 | Doc | What it covers |
 |-----|---------------|
-| [docs/BUDDYPEER.md](docs/BUDDYPEER.md) | The two-buddy setup, end to end |
+| [docs/TWO-BUDDIES.md](docs/TWO-BUDDIES.md) | The two-buddy setup, end to end |
 | [docs/PEERS.md](docs/PEERS.md) | **MultiPeer** (many buddies): `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
 | [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
 | [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
