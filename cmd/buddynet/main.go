@@ -577,10 +577,21 @@ QUICK START — connect two machines (BuddyPeer)
        %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
             --join=TOKEN -L 127.0.0.1:9000
 
+MANY BUDDIES (BuddyParty) — one node, several tunnels at once
+
+  List each buddy's pinned key (+ a one-time bootstrap token) in a manifest, then
+  hold a tunnel to every one of them and route by name:
+       %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
+            --peers-file /var/lib/%[1]s/peers --vip-listen 8080 --dns
+  Now  curl http://alice.buddy:8080  reaches that buddy through its own tunnel.
+  Curate the list with the peers subcommands below; one failing buddy never
+  affects the others.
+
 COMMANDS
   %[1]s gen-token                            mint a strong shared token
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
+  %[1]s --peers-file PATH peers list|add|remove   manage your BuddyParty buddies
   %[1]s version
 
 SECURITY — please read
