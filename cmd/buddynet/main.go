@@ -6,8 +6,9 @@
 //	buddynet --role=handshake  # bootstrap/matchmaking server on a VPS
 //
 // Every binary carries all three roles; a buddy contains the relay and
-// handshake code as dormant fallback. BuddyPeer — two buddies and one handshake
-// server — is just the two-peer case of BuddyNet:
+// handshake code as dormant fallback. Two buddies and one handshake server is
+// just the two-peer case; the same binary scales to many buddies at once
+// (MultiPeer):
 //
 //	buddynet --role=buddy --invite            # mint a token, wait for the buddy
 //	buddynet --role=buddy --join=TOKEN ...     # join with that token
@@ -70,7 +71,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "buddy: do NOT verify the buddy's identity (unsafe; testing only)")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
-	peersFile := flag.String("peers-file", "", "buddy: BuddyParty manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
+	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
 	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
 	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
@@ -562,7 +563,7 @@ One binary, three roles (always chosen explicitly with --role):
   relay      a public-IP node that blindly forwards encrypted sessions (fallback)
   handshake  the bootstrap/matchmaking server on a VPS (pairs two buddies)
 
-QUICK START — connect two machines (BuddyPeer)
+QUICK START — connect two machines
 
   1) On a VPS with a public IP, run the bootstrap server and print its key:
        %[1]s --role=handshake --key /var/lib/%[1]s/id.key
@@ -577,7 +578,7 @@ QUICK START — connect two machines (BuddyPeer)
        %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
             --join=TOKEN -L 127.0.0.1:9000
 
-MANY BUDDIES (BuddyParty) — one node, several tunnels at once
+MANY BUDDIES (MultiPeer) — one node, several tunnels at once
 
   List each buddy's pinned key (+ a one-time bootstrap token) in a manifest, then
   hold a tunnel to every one of them and route by name:
@@ -600,7 +601,7 @@ COMMANDS
   %[1]s gen-token                            mint a strong shared token
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
-  %[1]s --peers-file PATH peers list|add|remove   manage your BuddyParty buddies
+  %[1]s --peers-file PATH peers list|add|remove   manage your buddies (MultiPeer)
   %[1]s --authorized FILE approve|allowclient|list|revoke   server allowlist (approval mode)
   %[1]s version
 

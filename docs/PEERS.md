@@ -1,10 +1,9 @@
-# BuddyParty — Many Tunnels at Once
+# MultiPeer — Many Tunnels at Once
 
-BuddyNet started as **BuddyPeer**: exactly two buddies, one tunnel. **BuddyParty**
-lets a single node hold **N tunnels to N buddies at the same time**, each pinned
-and verified independently — your own **private, self-hosted mini-Tailscale**. You
-list your buddies in a manifest, route to each by name or virtual IP, and add or
-remove them while the daemon runs.
+A single BuddyNet node can hold **N tunnels to N buddies at the same time**, each
+pinned and verified independently — that's **MultiPeer**. You list your buddies in
+a manifest, route to each by name or virtual IP, and add or remove them while the
+daemon runs. (Two buddies is just the one-line case; the manifest scales it up.)
 
 This is decentralised and **self-sovereign**: your manifest is *your* list of who
 *you* talk to. There is no group, no admin, no shared roster — removing a buddy
