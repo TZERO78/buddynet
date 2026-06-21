@@ -137,9 +137,9 @@ func TestPeerAttrNumbers(t *testing.T) {
 		t.Fatalf("WGPEER_A_* numbers drifted from kernel uapi: pub=%d flags=%d ep=%d ka=%d aip=%d (want 1,3,4,5,9)",
 			wgPeerAPublicKey, wgPeerAFlags, wgPeerAEndpoint, wgPeerAPersistentKeepaliveInterval, wgPeerAAllowedips)
 	}
-	// WGPEER_F_REPLACE_ALLOWEDIPS is 1<<1; 1<<0 is WGPEER_F_REMOVE_ME.
-	if wgPeerFReplaceAllowedips != 2 {
-		t.Fatalf("WGPEER_F_REPLACE_ALLOWEDIPS = %d, want 2 (1 would REMOVE the peer)", wgPeerFReplaceAllowedips)
+	// WGPEER_F_REMOVE_ME is 1<<0, WGPEER_F_REPLACE_ALLOWEDIPS is 1<<1.
+	if wgPeerFRemoveMe != 1 || wgPeerFReplaceAllowedips != 2 {
+		t.Fatalf("WGPEER flags drifted: remove_me=%d replace_allowedips=%d (want 1,2)", wgPeerFRemoveMe, wgPeerFReplaceAllowedips)
 	}
 	// Device-level numbers (verified against `wg`): ifindex=1, privkey=3,
 	// flags=5, listenport=6, peers=8; allowed-ip: family=1, addr=2, cidr=3.
@@ -149,6 +149,59 @@ func TestPeerAttrNumbers(t *testing.T) {
 	}
 	if wgAllowedipAFamily != 1 || wgAllowedipAIpaddr != 2 || wgAllowedipACidrMask != 3 {
 		t.Fatalf("WGALLOWEDIP_A_* numbers drifted from kernel uapi")
+	}
+}
+
+// AddPeer must NOT carry WGDEVICE_F_REPLACE_PEERS (else it would wipe the
+// device's other peers) and must carry the peer with its public key.
+func TestBuildAddPeerAttrs(t *testing.T) {
+	p := Peer{PublicKey: [32]byte{7}, AllowedIPs: []netip.Prefix{netip.MustParsePrefix("10.66.1.2/32")}}
+	var hasDeviceFlags, hasPeers bool
+	attrWalk(buildAddPeerAttrs(3, p), func(typ uint16, val []byte) {
+		switch typ {
+		case wgDeviceAFlags:
+			hasDeviceFlags = true
+		case wgDeviceAPeers:
+			hasPeers = true
+		}
+	})
+	if hasDeviceFlags {
+		t.Fatal("AddPeer must not set WGDEVICE_A_FLAGS (would replace all peers)")
+	}
+	if !hasPeers {
+		t.Fatal("AddPeer missing WGDEVICE_A_PEERS")
+	}
+}
+
+// RemovePeer must carry exactly the public key + WGPEER_F_REMOVE_ME and nothing
+// that would re-add the peer (no endpoint/allowed-ips).
+func TestBuildRemovePeerAttrs(t *testing.T) {
+	var peers []byte
+	attrWalk(buildRemovePeerAttrs(3, [32]byte{9}), func(typ uint16, val []byte) {
+		if typ == wgDeviceAPeers {
+			peers = val
+		}
+	})
+	if peers == nil {
+		t.Fatal("RemovePeer missing WGDEVICE_A_PEERS")
+	}
+	var flags uint32
+	var sawPub bool
+	attrWalk(peers, func(_ uint16, entry []byte) { // index 0 → peer attrs
+		attrWalk(entry, func(pt uint16, pv []byte) {
+			switch pt {
+			case wgPeerAPublicKey:
+				sawPub = len(pv) == 32 && pv[0] == 9
+			case wgPeerAFlags:
+				flags = nativeEndian.Uint32(pv)
+			}
+		})
+	})
+	if !sawPub {
+		t.Fatal("RemovePeer missing the 32-byte public key")
+	}
+	if flags&wgPeerFRemoveMe == 0 {
+		t.Fatalf("RemovePeer must set WGPEER_F_REMOVE_ME, flags=%d", flags)
 	}
 }
 

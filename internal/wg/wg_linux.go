@@ -34,7 +34,8 @@ const (
 	wgPeerAPersistentKeepaliveInterval = 5
 	wgPeerAAllowedips                  = 9
 
-	wgPeerFReplaceAllowedips = 2 // 1<<1; (1<<0 is WGPEER_F_REMOVE_ME)
+	wgPeerFRemoveMe          = 1 // 1<<0 — drop this peer from the device
+	wgPeerFReplaceAllowedips = 2 // 1<<1
 
 	wgAllowedipAFamily   = 1
 	wgAllowedipAIpaddr   = 2
@@ -160,6 +161,25 @@ func buildSetDeviceAttrs(ifindex int, cfg Config) []byte {
 		out = append(out, nlAttrU16(wgDeviceAListenPort, uint16(cfg.ListenPort))...)
 	}
 	out = append(out, nlNested(wgDeviceAPeers, nlNested(0, buildPeer(cfg.Peer)))...)
+	return out
+}
+
+// buildAddPeerAttrs encodes a WG_CMD_SET_DEVICE body that ADDS/updates one peer
+// WITHOUT WGDEVICE_F_REPLACE_PEERS — so the device's other peers stay intact
+// (the bnet0 adapter model: one device, one peer per buddy).
+func buildAddPeerAttrs(ifindex int, p Peer) []byte {
+	out := nlAttrU32(wgDeviceAIfindex, uint32(ifindex))
+	out = append(out, nlNested(wgDeviceAPeers, nlNested(0, buildPeer(p)))...)
+	return out
+}
+
+// buildRemovePeerAttrs encodes a WG_CMD_SET_DEVICE body that removes one peer by
+// public key (WGPEER_F_REMOVE_ME), leaving the device's other peers intact.
+func buildRemovePeerAttrs(ifindex int, pub [32]byte) []byte {
+	peer := nlAttr(wgPeerAPublicKey, pub[:])
+	peer = append(peer, nlAttrU32(wgPeerAFlags, wgPeerFRemoveMe)...)
+	out := nlAttrU32(wgDeviceAIfindex, uint32(ifindex))
+	out = append(out, nlNested(wgDeviceAPeers, nlNested(0, peer))...)
 	return out
 }
 
@@ -352,13 +372,55 @@ func resolveFamily(name string) (uint16, error) {
 }
 
 func setDevice(family uint16, ifindex int, cfg Config) error {
-	attrs := buildSetDeviceAttrs(ifindex, cfg)
+	return sendSetDevice(family, buildSetDeviceAttrs(ifindex, cfg))
+}
+
+// sendSetDevice issues one WG_CMD_SET_DEVICE with the given attribute body.
+func sendSetDevice(family uint16, attrs []byte) error {
 	req := genlMessage(family, reqAck, 1, wgCmdSetDevice, wgGenlVersion, attrs)
 	resp, err := roundtrip(syscall.NETLINK_GENERIC, req)
 	if err != nil {
 		return err
 	}
 	return expectAck(resp, "set device")
+}
+
+// resolveDevice looks up the wireguard genl family and the index of an existing
+// interface by name.
+func resolveDevice(ifName string) (family uint16, ifindex int, err error) {
+	iface, err := net.InterfaceByName(ifName)
+	if err != nil {
+		return 0, 0, fmt.Errorf("wg: device %q not found: %w", ifName, err)
+	}
+	family, err = resolveFamily(wgGenlName)
+	if err != nil {
+		return 0, 0, err
+	}
+	return family, iface.Index, nil
+}
+
+// AddPeer adds or updates a single peer on an existing device, leaving the
+// device's other peers intact (the bnet0 adapter model — one device, one peer per
+// buddy). Re-adding the same public key updates that peer's endpoint/allowed-ips.
+func AddPeer(ifName string, p Peer) error {
+	if p.PublicKey == ([32]byte{}) {
+		return errors.New("wg: AddPeer: zero PublicKey")
+	}
+	family, ifindex, err := resolveDevice(ifName)
+	if err != nil {
+		return err
+	}
+	return sendSetDevice(family, buildAddPeerAttrs(ifindex, p))
+}
+
+// RemovePeer removes a single peer by its public key, leaving other peers intact.
+// Removing an unknown peer is a no-op (the kernel does not error).
+func RemovePeer(ifName string, pub [32]byte) error {
+	family, ifindex, err := resolveDevice(ifName)
+	if err != nil {
+		return err
+	}
+	return sendSetDevice(family, buildRemovePeerAttrs(ifindex, pub))
 }
 
 // --- orchestration ----------------------------------------------------------
