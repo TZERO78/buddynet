@@ -94,26 +94,14 @@ func cmdUp(args []string) {
 		log.Fatalf("--peer-endpoint: %v", err)
 	}
 
-	peerX, err := crypto.X25519FromEd25519Public(peerEd)
+	// Use the same Ed25519->WG-Config bridge connect.go will use.
+	cfg, err := wg.ConfigForPeer(*ifname, *listenPort, priv, peerEd, endpoint)
 	if err != nil {
-		log.Fatalf("derive peer X25519: %v", err)
+		log.Fatalf("config: %v", err)
 	}
-
+	cfg.Peer.Keepalive = uint16(*keepalive)
 	selfVIP := crypto.VirtualIP(pub)
 	peerVIP := crypto.VirtualIP(peerEd)
-
-	cfg := wg.Config{
-		IfName:     *ifname,
-		PrivateKey: crypto.X25519FromEd25519Private(priv),
-		ListenPort: *listenPort,
-		Address:    netip.PrefixFrom(selfVIP, 16), // connected route over the overlay
-		Peer: wg.Peer{
-			PublicKey:  peerX,
-			Endpoint:   endpoint,
-			AllowedIPs: []netip.Prefix{netip.PrefixFrom(peerVIP, 32)},
-			Keepalive:  uint16(*keepalive),
-		},
-	}
 
 	down, err := wg.Up(cfg)
 	if err != nil {

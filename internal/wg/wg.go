@@ -24,8 +24,12 @@
 package wg
 
 import (
+	"crypto/ed25519"
 	"errors"
+	"fmt"
 	"net/netip"
+
+	"github.com/tzero78/buddynet/internal/crypto"
 )
 
 // ErrUnsupported is returned by Up on platforms without kernel WireGuard support
@@ -88,4 +92,34 @@ func (c Config) validate() error {
 		return errors.New("wg: only IPv4 interface addresses are supported")
 	}
 	return nil
+}
+
+// ConfigForPeer builds a Config for a tunnel to one partner, deriving the
+// WireGuard (X25519) keys and the 10.66.X.Y virtual IPs from the long-term
+// Ed25519 identities. This is the single derivation (crypto.X25519From* +
+// crypto.VirtualIP) so identity=key=VIP carries onto the data plane with nothing
+// exchanged over the wire — the bridge connect.go uses after a hole punch.
+//
+// listenPort is the local UDP port to bind (the hole-punched port, reused so the
+// NAT mapping survives the socket→WG handoff); endpoint is the partner's reachable
+// UDP address. The interface gets this node's VIP as a /16 (so the kernel routes
+// the whole 10.66/16 overlay over it); the peer is allowed its VIP as a /32.
+func ConfigForPeer(ifName string, listenPort int, myPriv ed25519.PrivateKey, partnerPub ed25519.PublicKey, endpoint netip.AddrPort) (Config, error) {
+	peerX, err := crypto.X25519FromEd25519Public(partnerPub)
+	if err != nil {
+		return Config{}, fmt.Errorf("wg: derive partner X25519 key: %w", err)
+	}
+	myPub := myPriv.Public().(ed25519.PublicKey)
+	return Config{
+		IfName:     ifName,
+		PrivateKey: crypto.X25519FromEd25519Private(myPriv),
+		ListenPort: listenPort,
+		Address:    netip.PrefixFrom(crypto.VirtualIP(myPub), 16),
+		Peer: Peer{
+			PublicKey:  peerX,
+			Endpoint:   endpoint,
+			AllowedIPs: []netip.Prefix{netip.PrefixFrom(crypto.VirtualIP(partnerPub), 32)},
+			Keepalive:  25,
+		},
+	}, nil
 }
