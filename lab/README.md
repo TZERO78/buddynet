@@ -32,7 +32,6 @@ No VPS required: the containers simulate a full deployment — server, Peer A, a
 
 - Docker with Compose v2 (`docker compose version`)
 - Ports `51820/udp`, `51821/udp`, `7070/tcp` free on the host
-- For the application-tunnel tests: `rsync` installed on the host; `sudo` with `ebtables` for the relay-fallback test
 
 ## Quickstart
 
@@ -57,74 +56,6 @@ curl http://localhost:7070
 # Or from inside buddy-b:
 docker compose exec buddy-b curl http://localhost:7070
 ```
-
-## Application-tunnel tests (rsync + kopia)
-
-The overlay compose file `docker-compose.apps.yml` adds two additional peer pairs:
-
-| Pair | Token | What it tests |
-|------|-------|---------------|
-| `rsync-a` / `rsync-b` | `lab-rsync-token` | rsync daemon over BuddyNet (`--forward` + `-L`) |
-| `kopia-a` / `kopia-b` | `lab-kopia-token` | kopia SFTP repository backup over BuddyNet |
-
-```
-rsync-a  --forward 127.0.0.1:873  ──BuddyNet──►  rsync-b  -L 0.0.0.0:8873
-                                                    │
-                                               host port 8873
-                                        rsync://localhost:8873/share/
-
-kopia-a  -L 127.0.0.1:2222        ──BuddyNet──►  kopia-b  --forward 127.0.0.1:22
-                                                    │
-                                               sshd (SFTP, user=kopia pass=labpass)
-                                        kopia SFTP backend → /data/repo
-```
-
-### Start the apps stack
-
-```bash
-cd lab
-docker compose -f docker-compose.yml -f docker-compose.apps.yml build
-docker compose -f docker-compose.yml -f docker-compose.apps.yml up -d
-```
-
-### Run the integration tests
-
-```bash
-./test-apps.sh
-```
-
-`test-apps.sh` runs in sequence:
-
-1. **rsync** — lists the share, downloads 20 files, uploads a file back.
-2. **kopia SFTP** — initialises a kopia repository on kopia-b via SFTP through the tunnel, creates a snapshot of `/data/source`.
-3. **Relay fallback** — blocks direct P2P UDP between kopia-a and kopia-b with `ebtables`, waits for BuddyNet to reconnect via the relay (`handshake server as relay`), then creates a second snapshot to confirm data transfer still works over the relay path.
-
-Expected output (abbreviated):
-
-```
-  [PASS] rsync listing works
-  [PASS] rsync download: 20 files transferred
-  [PASS] rsync upload works
-  [PASS] SSH SFTP tunnel kopia-a → kopia-b (password auth)
-  [PASS] kopia SFTP repository ready on kopia-b
-  [PASS] kopia snapshot 1 (source, direct P2P)
-  [PASS] relay fallback: tunnel switched away from direct P2P
-  [PASS] kopia snapshot 2 (source, via relay)
-  [PASS] kopia snapshot list: 2 snapshot(s) on kopia-b
-
-  PASSED: 9   FAILED: 0
-All tests passed.
-```
-
-### kopia-b SFTP credentials (lab only)
-
-| Setting | Value |
-|---------|-------|
-| Host (from kopia-a) | `127.0.0.1:2222` (via BuddyNet tunnel) |
-| Username | `kopia` |
-| Password | `labpass` |
-| Repo path | `/data/repo` |
-| SSH host key | persisted in `kopia-b-key` volume; published to `/data/kopia-b-hostkey.pub` on startup |
 
 ## VIP-routing test (Phase 1.3: Loopback-VIP-Bind)
 
@@ -219,10 +150,10 @@ To run with fewer buddies (3–4), trim the `BUDDIES` list in `setup-party.sh` /
 
 ```bash
 # Follow all logs:
-docker compose -f docker-compose.yml -f docker-compose.apps.yml logs -f
+docker compose logs -f
 
 # Structured audit events only:
-docker compose -f docker-compose.yml -f docker-compose.apps.yml logs kopia-a kopia-b \
+docker compose logs buddy-a buddy-b \
     | grep -E "CONNECTED:|DISCONNECTED:|TRUST:|PAIRED:|SECURITY:"
 ```
 
@@ -246,11 +177,11 @@ Must match `BUDDYNET_SERVER_KEY` in `lab/.env`.
 ## Teardown
 
 ```bash
-# Stop — volumes (server key, kopia repo) persist:
-docker compose -f docker-compose.yml -f docker-compose.apps.yml down
+# Stop — volumes (server key) persist:
+docker compose down
 
 # Full reset — removes all keys and data:
-docker compose -f docker-compose.yml -f docker-compose.apps.yml down -v
+docker compose down -v
 rm -f .env
 ```
 
