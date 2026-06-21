@@ -52,7 +52,8 @@ type Peer struct {
 
 // Config describes the interface to bring up.
 type Config struct {
-	// IfName is the interface name (max 15 bytes), e.g. "bn-wg0".
+	// IfName is the interface name (max 15 bytes), e.g. "bnet0" — the BuddyNet
+	// adapter. One device carries all buddies; add a peer per buddy with AddPeer.
 	IfName string
 	// PrivateKey is this node's WireGuard (X25519) private key
 	// (crypto.X25519FromEd25519Private).
