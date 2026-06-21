@@ -45,7 +45,7 @@ func (e *ProbeError) Error() string { return e.Msg }
 // The remote endpoint is the peer's real IP ONLY on a direct path; over a relay
 // it is the relay's address, so it is annotated accordingly and must not be
 // mistaken for the attacker.
-func logSASFailure(reason error, sess tunnel.Session, used relay.Path, partner protocol.Peer, token string) {
+func logSASFailure(reason error, remote string, used relay.Path, partner protocol.Peer, token string) {
 	headline := "SAS REJECTED — possible MITM / token-theft attack"
 	if errors.Is(reason, ErrSASTimeout) {
 		headline = "SAS NOT CONFIRMED (timed out) — aborting, treat with caution"
@@ -61,7 +61,7 @@ func logSASFailure(reason error, sess tunnel.Session, used relay.Path, partner p
 		"  token hash      : %s\n"+
 		"  timestamp       : %s\n"+
 		"  -> key NOT trusted. Run --invite to generate a fresh token for your buddy.",
-		headline, sess.RemoteAddr(), remoteNote, partner.VirtualIP, partner.PubKey,
+		headline, remote, remoteNote, partner.VirtualIP, partner.PubKey,
 		tokenKey(token), time.Now().UTC().Format(time.RFC3339))
 }
 

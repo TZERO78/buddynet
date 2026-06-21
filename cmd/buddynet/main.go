@@ -130,6 +130,7 @@ func main() {
 	name := flag.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars")
 	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
 	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
+	wireguard := flag.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y). Phase 3: direct P2P only (relay-over-WireGuard not yet).")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
@@ -230,7 +231,7 @@ func main() {
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
 		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
 		reauthInterval: *reauthInterval,
-		name:           *name, dns: *dnsFlag, lazy: *lazyFlag,
+		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -374,7 +375,7 @@ type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	peersFile                                                               string
 	localListen, forward, vipListen, name                                   string
-	lab, status, interactive, ephemeral, quic, dns, lazy                    bool
+	lab, status, interactive, ephemeral, quic, dns, lazy, wireguard         bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
 
@@ -390,6 +391,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
+		WireGuard: a.wireguard,
 	}
 }
 
@@ -415,7 +417,20 @@ func (a buddyArgs) validate() {
 		fmt.Fprintln(os.Stderr, "error: --status needs --token (the pairing token)")
 		os.Exit(2)
 	}
-	if !a.status && a.localListen == "" && a.forward == "" && a.vipListen == "" {
+	// --wireguard carries IP natively (the partner is reachable at its VIP over
+	// bnet0), so the -L/-forward/--vip-listen requirement is waived. It is the WG
+	// DATA plane, opt-in, and (Phase 3) direct-P2P single-peer only: not combinable
+	// with the MultiPeer manifest or the QUIC-stream-specific --lazy yet.
+	if a.wireguard {
+		if a.peersFile != "" {
+			fmt.Fprintln(os.Stderr, "error: --wireguard cannot be combined with --peers-file yet (MultiPeer-over-bnet0 is a later step)")
+			os.Exit(2)
+		}
+		if a.lazy {
+			fmt.Fprintln(os.Stderr, "error: --wireguard cannot be combined with --lazy (lazy is QUIC-stream specific)")
+			os.Exit(2)
+		}
+	} else if !a.status && a.localListen == "" && a.forward == "" && a.vipListen == "" {
 		fmt.Fprintln(os.Stderr, "error: set at least one of -L, --vip-listen or -forward (otherwise the tunnel carries nothing)")
 		os.Exit(2)
 	}

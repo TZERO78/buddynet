@@ -104,6 +104,15 @@ type BuddyConfig struct {
 	// but the QUIC tunnel is only dialled when a client actually connects.
 	// Requires LocalListen to be set.
 	Lazy bool
+
+	// WireGuard selects the kernel WireGuard data plane (bnet0) for the peer
+	// tunnel instead of QUIC (Phase 3, opt-in). The partner is reachable natively
+	// at its VIP (the kernel routes 10.66/16 over bnet0), so -L/-forward are not
+	// used. Needs Linux + NET_ADMIN + the wireguard module on BOTH buddies; the
+	// SAS first-contact binding runs over the punched socket (no TLS EKM), and the
+	// reconnect secret is the static-DH PairSecret. Direct P2P only for now
+	// (relay-over-WireGuard is a later step). Fails closed if WG is unavailable.
+	WireGuard bool
 }
 
 // attempt is the per-connection plan: which rendezvous token to register with,

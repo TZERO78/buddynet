@@ -129,6 +129,12 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		return errors.New("no path to the partner (no candidates, no relay)")
 	}
 
+	// WireGuard data plane (Phase 3, opt-in): hand the punched socket to kernel WG
+	// instead of running QUIC. Fails closed (no silent fallback to another plane).
+	if cfg.WireGuard {
+		return runWGDirect(ctx, cfg, nd, conn, att, partner, partnerPub, needSAS)
+	}
+
 	// One QUIC transport over the socket; deterministic role: lower key listens.
 	tr := tunnel.NewQUIC(conn, priv, partnerPub, cfg.IdleTimeout)
 	defer tr.Close()
@@ -156,7 +162,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		myEdPub := priv.Public().(ed25519.PublicKey)
 		sas := ComputeSAS(myEdPub, partnerPub, ekm)
 		if err := PromptSAS(sas, cfg.SASTimeout); err != nil {
-			logSASFailure(err, sess, used, partner, att.inviteToken)
+			logSASFailure(err, sess.RemoteAddr().String(), used, partner, att.inviteToken)
 			return err // Buddy stops the reconnect loop, key NOT stored
 		}
 		if err := trust.confirm(att.inviteToken, partnerPub); err != nil {
