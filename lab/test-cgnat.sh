@@ -9,7 +9,8 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 CF=docker-compose.cgnat.yml
-dc() { docker compose -f "$CF" "$@"; }
+PROJECT=bncgnat
+dc() { docker compose -p "$PROJECT" -f "$CF" "$@"; }
 
 cleanup() { dc down -v >/dev/null 2>&1 || true; }
 trap cleanup EXIT
