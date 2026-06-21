@@ -1,0 +1,120 @@
+# BuddyNet CGNAT lab — does hole-punching get through, and where does relay win?
+#
+# Each buddy sits behind its OWN NAT router; the server is on the WAN.
+#
+#   buddy-a ─[lan_a]─ nat-a ─┐
+#                            ├─[wan]─ server (handshake + blind relay)
+#   buddy-b ─[lan_b]─ nat-b ─┘
+#
+# NAT_MODE=cone (default): MASQUERADE preserves the source port, so the
+#   server-observed port matches what the peer must hit → the SIMULTANEOUS hole
+#   punch succeeds → CONNECTED via="direct P2P".
+# NAT_MODE=symmetric: MASQUERADE --random-fully gives a different mapped port per
+#   destination, so the server-observed port is useless to the peer → the punch
+#   fails → CONNECTED via="handshake server as relay". This is exactly why hard /
+#   symmetric CGNAT defeats hole-punching for everyone (Tailscale → DERP, us → relay).
+#
+# This is the MECHANISM proof (2 buddies). The 5-buddy party variant wraps each
+# party node the same way (one NAT router per node). Run: ./test-cgnat.sh
+
+x-nat: &nat
+  build: { context: .., dockerfile: lab/Dockerfile.nat }
+  image: buddynet-lab-nat
+  cap_add: [NET_ADMIN]
+  sysctls:
+    - net.ipv4.ip_forward=1
+  restart: unless-stopped
+
+x-buddy: &buddy
+  build: { context: .., dockerfile: lab/Dockerfile }
+  image: buddynet-lab-buddy
+  entrypoint: ["/bin/sh", "/entrypoint-natclient.sh"]
+  cap_add: [NET_ADMIN]
+  depends_on: [server, nat-a, nat-b]
+  restart: unless-stopped
+
+services:
+
+  server:
+    build: { context: .., dockerfile: deployments/Dockerfile }
+    image: buddynet-lab-server
+    command:
+      - --role=handshake,relay
+      - --listen
+      - "[::]:51820"
+      - --relay-listen
+      - "[::]:51821"
+      - --key
+      - /var/lib/buddynet/id.key
+      - --relay-endpoint
+      - 172.30.0.10:51821
+    volumes: [server-key:/var/lib/buddynet]
+    networks: { wan: { ipv4_address: 172.30.0.10 } }
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  nat-a:
+    <<: *nat
+    environment: { NAT_WAN_PREFIX: "172.30.", NAT_MODE: "${NAT_MODE:-cone}" }
+    networks:
+      wan: { ipv4_address: 172.30.0.2 }
+      lan_a: { ipv4_address: 172.31.0.2 }
+
+  nat-b:
+    <<: *nat
+    environment: { NAT_WAN_PREFIX: "172.30.", NAT_MODE: "${NAT_MODE:-cone}" }
+    networks:
+      wan: { ipv4_address: 172.30.0.3 }
+      lan_b: { ipv4_address: 172.32.0.2 }
+
+  buddy-a:
+    <<: *buddy
+    command:
+      - --role=buddy
+      - --key=/var/lib/buddynet/id.key
+      - --forward=127.0.0.1:7777
+      - --no-interactive
+      - --lab
+    environment:
+      BUDDYNET_SERVER: "172.30.0.10:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_LAB: "1"
+      BUDDYNET_TOKEN: "cgnat-token-42"
+      NAT_GW: "172.31.0.2"
+      NODE_NAME: "a"
+    volumes:
+      - buddy-a-key:/var/lib/buddynet
+      - ./entrypoint-natclient.sh:/entrypoint-natclient.sh:ro
+    networks: { lan_a: { ipv4_address: 172.31.0.10 } }
+
+  buddy-b:
+    <<: *buddy
+    command:
+      - --role=buddy
+      - --key=/var/lib/buddynet/id.key
+      - --L=0.0.0.0:7070
+      - --no-interactive
+      - --lab
+    environment:
+      BUDDYNET_SERVER: "172.30.0.10:51820"
+      BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
+      BUDDYNET_LAB: "1"
+      BUDDYNET_TOKEN: "cgnat-token-42"
+      NAT_GW: "172.32.0.2"
+      NODE_NAME: "b"
+    volumes:
+      - buddy-b-key:/var/lib/buddynet
+      - ./entrypoint-natclient.sh:/entrypoint-natclient.sh:ro
+    networks: { lan_b: { ipv4_address: 172.32.0.10 } }
+
+networks:
+  wan: { ipam: { config: [{ subnet: 172.30.0.0/24 }] } }
+  lan_a: { internal: true, ipam: { config: [{ subnet: 172.31.0.0/24 }] } }
+  lan_b: { internal: true, ipam: { config: [{ subnet: 172.32.0.0/24 }] } }
+
+volumes:
+  server-key:
+  buddy-a-key:
+  buddy-b-key:
