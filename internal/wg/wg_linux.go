@@ -486,3 +486,17 @@ func delLinkByName(name string) error {
 	}
 	return delLink(iface.Index)
 }
+
+// Available reports whether kernel WireGuard can be brought up on this host —
+// Linux with NET_ADMIN and the wireguard module — by creating and immediately
+// deleting a throwaway device. Callers use it to choose the WG data path and fall
+// back to QUIC otherwise. Cheap and side-effect-free (the probe device is removed).
+func Available() bool {
+	const probe = "bn-probe0"
+	_ = delLinkByName(probe) // clear any leftover from a crashed run
+	if err := createLink(probe); err != nil {
+		return false
+	}
+	_ = delLinkByName(probe)
+	return true
+}

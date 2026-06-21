@@ -14,3 +14,6 @@ func AddPeer(ifName string, p Peer) error { return ErrUnsupported }
 
 // RemovePeer is unavailable off Linux (see Up).
 func RemovePeer(ifName string, pub [32]byte) error { return ErrUnsupported }
+
+// Available reports false off Linux: no kernel WireGuard.
+func Available() bool { return false }
