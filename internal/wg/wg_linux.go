@@ -27,13 +27,14 @@ const (
 
 	wgDeviceFReplacePeers = 1
 
-	wgPeerAPublicKey                   = 0
-	wgPeerAFlags                       = 2
-	wgPeerAEndpoint                    = 3
-	wgPeerAPersistentKeepaliveInterval = 4
-	wgPeerAAllowedips                  = 8
+	// WGPEER_A_* are 1-based (WGPEER_A_UNSPEC = 0), per uapi/linux/wireguard.h.
+	wgPeerAPublicKey                   = 1
+	wgPeerAFlags                       = 3
+	wgPeerAEndpoint                    = 4
+	wgPeerAPersistentKeepaliveInterval = 5
+	wgPeerAAllowedips                  = 9
 
-	wgPeerFReplaceAllowedips = 1
+	wgPeerFReplaceAllowedips = 2 // 1<<1; (1<<0 is WGPEER_F_REMOVE_ME)
 
 	wgAllowedipAFamily   = 1
 	wgAllowedipAIpaddr   = 2

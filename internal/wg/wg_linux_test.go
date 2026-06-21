@@ -126,6 +126,32 @@ func TestBuildSetDeviceAttrsTopLevel(t *testing.T) {
 	}
 }
 
+// TestPeerAttrNumbers pins the WGPEER_A_* attribute numbers to the kernel uapi
+// values (uapi/linux/wireguard.h) using hard-coded literals — verified against
+// the real `wg` tool's netlink bytes. A regression to 0-based numbering (an easy
+// mistake: WGPEER_A_UNSPEC = 0) would make the kernel reject SET_DEVICE with
+// EINVAL, which unit tests on encoding alone would NOT catch.
+func TestPeerAttrNumbers(t *testing.T) {
+	if wgPeerAPublicKey != 1 || wgPeerAFlags != 3 || wgPeerAEndpoint != 4 ||
+		wgPeerAPersistentKeepaliveInterval != 5 || wgPeerAAllowedips != 9 {
+		t.Fatalf("WGPEER_A_* numbers drifted from kernel uapi: pub=%d flags=%d ep=%d ka=%d aip=%d (want 1,3,4,5,9)",
+			wgPeerAPublicKey, wgPeerAFlags, wgPeerAEndpoint, wgPeerAPersistentKeepaliveInterval, wgPeerAAllowedips)
+	}
+	// WGPEER_F_REPLACE_ALLOWEDIPS is 1<<1; 1<<0 is WGPEER_F_REMOVE_ME.
+	if wgPeerFReplaceAllowedips != 2 {
+		t.Fatalf("WGPEER_F_REPLACE_ALLOWEDIPS = %d, want 2 (1 would REMOVE the peer)", wgPeerFReplaceAllowedips)
+	}
+	// Device-level numbers (verified against `wg`): ifindex=1, privkey=3,
+	// flags=5, listenport=6, peers=8; allowed-ip: family=1, addr=2, cidr=3.
+	if wgDeviceAIfindex != 1 || wgDeviceAPrivateKey != 3 || wgDeviceAFlags != 5 ||
+		wgDeviceAListenPort != 6 || wgDeviceAPeers != 8 {
+		t.Fatalf("WGDEVICE_A_* numbers drifted from kernel uapi")
+	}
+	if wgAllowedipAFamily != 1 || wgAllowedipAIpaddr != 2 || wgAllowedipACidrMask != 3 {
+		t.Fatalf("WGALLOWEDIP_A_* numbers drifted from kernel uapi")
+	}
+}
+
 func TestParseFamilyID(t *testing.T) {
 	// Synthesize a CTRL_NEWFAMILY reply: nlmsghdr + genlmsghdr + FAMILY_ID attr.
 	attrs := nlAttrU16(ctrlAttrFamilyID, 0x2a)
