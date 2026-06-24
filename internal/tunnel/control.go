@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
@@ -137,10 +138,11 @@ func (r *ControlRequest) Reply(b []byte) error {
 
 // ControlServer is the handshake server's QUIC control listener.
 type ControlServer struct {
-	tr   *quic.Transport
-	ln   *quic.Listener
-	reqs chan *ControlRequest
-	done chan struct{}
+	tr        *quic.Transport
+	ln        *quic.Listener
+	reqs      chan *ControlRequest
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 // ListenControl starts a QUIC control listener on conn, presenting the server's
@@ -222,13 +224,15 @@ func (s *ControlServer) Accept(ctx context.Context) (*ControlRequest, error) {
 	}
 }
 
-// Close stops the listener and transport (leaving the UDP socket open).
+// Close stops the listener and transport (leaving the UDP socket open). Safe to
+// call concurrently and more than once: the select/default check-then-close was a
+// race (two callers could both pass the default and double-close s.done, panicking
+// "close of closed channel"); a sync.Once makes the shutdown idempotent.
 func (s *ControlServer) Close() error {
-	select {
-	case <-s.done:
-	default:
+	s.closeOnce.Do(func() {
 		close(s.done)
-	}
-	s.ln.Close()
-	return s.tr.Close()
+		s.ln.Close()
+		_ = s.tr.Close()
+	})
+	return nil
 }
