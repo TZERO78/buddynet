@@ -128,18 +128,21 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 	if len(chain) == 0 {
 		return errors.New("no path to the partner (no candidates, no relay)")
 	}
+	// Deterministic relay session id: both buddies derive the same value, so a
+	// relay can splice their two legs by it. Used by both the QUIC and WG paths.
+	session := sessionToken(att.rendezvous, myPub, partner.PubKey)
 
-	// WireGuard data plane (Phase 3, opt-in): hand the punched socket to kernel WG
-	// instead of running QUIC. Fails closed (no silent fallback to another plane).
+	// WireGuard data plane (Phase 3, opt-in): hand the socket to kernel WG instead
+	// of running QUIC, over the same fallback chain (direct, then relay). Fails
+	// closed (no silent fallback to another plane).
 	if cfg.WireGuard {
-		return runWGDirect(ctx, cfg, nd, conn, att, partner, partnerPub, needSAS)
+		return runWG(ctx, cfg, nd, conn, att, partner, partnerPub, needSAS, chain, session)
 	}
 
 	// One QUIC transport over the socket; deterministic role: lower key listens.
 	tr := tunnel.NewQUIC(conn, priv, partnerPub, cfg.IdleTimeout)
 	defer tr.Close()
 	listening := myPub < partner.PubKey
-	session := sessionToken(att.rendezvous, myPub, partner.PubKey)
 
 	sess, used, err := dialChain(ctx, tr, conn, myID, chain, listening, session, cfg.PunchDur)
 	if err != nil {
