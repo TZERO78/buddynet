@@ -93,22 +93,62 @@ func udpAddrEqual(a, b *net.UDPAddr) bool {
 	return a != nil && b != nil && a.Port == b.Port && a.IP.Equal(b.IP)
 }
 
-// runWGDirect brings up the kernel WireGuard data plane for a DIRECT P2P tunnel
-// (Phase 3 step 4c). It fails closed: if WG is unavailable, there is no direct
-// candidate, the punch fails, or the SAS is rejected, it returns an error rather
-// than silently using QUIC or any other path. The partner is then reachable
-// natively at its VIP over bnet0 (no -L/-forward). Relay-over-WireGuard and
-// MultiPeer-over-bnet0 are later steps.
-func runWGDirect(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, att attempt, partner protocol.Peer, partnerPub ed25519.PublicKey, needSAS bool) error {
+// primeWGPath walks the fallback chain and returns the first endpoint it can make
+// usable, plus which path worked, mirroring primePath on the QUIC side. For Direct
+// it hole-punches and returns the punched peer address; for Relayed it binds this
+// node's leg on the relay and returns the relay address. In both cases the returned
+// address is what the WG data plane uses as its peer endpoint (over a relay the
+// relay forwards the encrypted WG packets to the partner's leg, exactly as it does
+// QUIC — it is never a WG peer and holds no key). conn keeps the NAT mapping the
+// bind/punch opened, so the socket handoff to kernel WG reuses it.
+func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration) (*net.UDPAddr, relay.Path, error) {
+	var lastErr error
+	for _, p := range chain {
+		switch p.Kind {
+		case relay.Direct:
+			remote, err := tunnel.Punch(conn, myID, p.Candidates, punchDur)
+			if err != nil {
+				log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, fmt.Sprintf("direct punch: %v", err))
+				lastErr = err
+				continue
+			}
+			return remote, p, nil
+		case relay.Relayed:
+			relayAddr, err := net.ResolveUDPAddr("udp", p.RelayEndpoint)
+			if err != nil {
+				log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, fmt.Sprintf("resolve relay: %v", err))
+				lastErr = err
+				continue
+			}
+			if err := relay.BindLeg(conn, relayAddr, session, 5*time.Second); err != nil {
+				log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, fmt.Sprintf("relay bind: %v", err))
+				lastErr = err
+				continue
+			}
+			return relayAddr, p, nil
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("no usable path")
+	}
+	return nil, relay.Path{}, fmt.Errorf("all fallback paths failed: %w", lastErr)
+}
+
+// runWG brings up the kernel WireGuard data plane (Phase 3 steps 4c/4d). It walks
+// the same fallback chain as the QUIC path — direct hole-punch first, then a relay
+// — and over the chosen endpoint does the EKM-free SAS binding (TOFU), derives the
+// static-DH reconnect secret, hands the socket to kernel WG (bnet0), and keeps the
+// tunnel up until ctx.Done; the partner is then reachable natively at its VIP over
+// bnet0 (no -L/-forward). It fails closed: if WG is unavailable, no path works, or
+// the SAS is rejected, it returns an error rather than silently using another plane.
+// MultiPeer-over-bnet0 is a later step.
+func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, att attempt, partner protocol.Peer, partnerPub ed25519.PublicKey, needSAS bool, chain []relay.Path, session string) error {
 	if !wg.Available() {
 		return errors.New("--wireguard set but kernel WireGuard is unavailable here (need Linux + NET_ADMIN + the wireguard module)")
 	}
-	if len(partner.Candidates) == 0 {
-		return errors.New("--wireguard: no direct candidates for the partner (relay-over-WireGuard is not implemented yet)")
-	}
-	remote, err := tunnel.Punch(conn, nd.id, partner.Candidates, cfg.PunchDur)
+	remote, used, err := primeWGPath(conn, nd.id, chain, session, cfg.PunchDur)
 	if err != nil {
-		return fmt.Errorf("--wireguard: direct hole punch failed (relay-over-WireGuard is not implemented yet): %w", err)
+		return fmt.Errorf("--wireguard: %w", err)
 	}
 
 	// First contact (TOFU): verify the partner with a SAS bound to a fresh
@@ -154,7 +194,7 @@ func runWGDirect(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPCo
 	defer func() { _ = down() }()
 
 	log.Printf("CONNECTED: role=buddy partner=%s key=%s vip=%s via=%q remote=%s",
-		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, "direct P2P (WireGuard)", remoteAP)
+		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, used.Desc+" (WireGuard)", remoteAP)
 
 	if att.firstPairing {
 		if serr := saveSession(cfg.KnownPeers, att.inviteToken, partner.PubKey, secret); serr != nil {
