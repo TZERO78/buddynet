@@ -125,6 +125,31 @@ relay address. Buddies try direct hole-punch first; if that fails within
 
 ---
 
+## WireGuard data plane (`--wireguard`)
+
+Opt-in (Phase 3): carry the tunnel over kernel WireGuard instead of QUIC, so the
+partner is reachable natively at its VIP. Full design and security notes in
+**[WIREGUARD.md](WIREGUARD.md)**; the operational essentials:
+
+- **Requirements.** Linux with the `wireguard` kernel module (`modprobe wireguard`)
+  and **`NET_ADMIN`** (root, or `AmbientCapabilities=CAP_NET_ADMIN` in the unit) to
+  create the interface. Set `--wireguard` on **both** buddies.
+- **Fails closed.** If `--wireguard` is set but kernel WireGuard is unavailable, the
+  buddy errors out — it does **not** silently fall back to QUIC.
+- **Interfaces.** One WireGuard interface per buddy: `bnet0` for a single partner,
+  `bnet0`, `bnet1`, … in MultiPeer (`--peers-file`). Each carries this node's VIP and
+  a `/32` route to that partner's VIP. They are torn down when the tunnel drops.
+- **Forwarding flags are ignored** on this path: the VIP is reachable directly, so
+  `-L`/`-forward`/`--vip-listen` print a `NOTE` and do nothing. Reach the partner at
+  `<partner-vip>:<port>`.
+- **Exposure.** Every service the host publishes on `0.0.0.0` is reachable by the
+  paired buddy over the VIP (not yet scoped to one service) — pair only with a buddy
+  you trust and keep host services authenticated. Only the partner's VIP `/32` is
+  routed; LANs/VLANs behind the buddy are not.
+- `CONNECTED` logs `via="… (WireGuard)"`.
+
+---
+
 ## Log schema
 
 BuddyNet uses structured `key=value` log lines so audit trails can be parsed,

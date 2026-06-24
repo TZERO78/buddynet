@@ -142,8 +142,10 @@ mesh, use a solution built for that.
 - **Blind relay.** Buddies run their own QUIC/TLS end to end; a relay only
   forwards the encrypted packets, keyed by an opaque session token. It sees
   virtual IPs and ciphertext, never content.
-- **QUIC now, WireGuard later.** The data plane sits behind a `Transport`
-  interface; v1 ships QUIC (TLS 1.3), v2 can drop in WireGuard unchanged.
+- **QUIC by default, kernel WireGuard opt-in.** The default data plane is QUIC
+  (TLS 1.3). With `--wireguard` (Phase 3, Linux + `NET_ADMIN`) the tunnel runs over
+  kernel WireGuard instead and the partner is reachable natively at its VIP — same
+  control plane, same fallback chain. See **[docs/WIREGUARD.md](docs/WIREGUARD.md)**.
 - **Lazy tunnel (`--lazy`).** The `-L` TCP listener binds immediately; the
   QUIC tunnel is established on demand when the first connection arrives.
   Useful for backup tools (rsync, kopia) that are invoked infrequently.
@@ -244,9 +246,12 @@ single `.bundle`.)
 
 The two-buddy setup is implemented and tested end to end. **MultiPeer** (many
 buddies at once — `--peers-file`, per-buddy VIP routing, live reload) is built
-and lab-validated for the v2.1 line. Peer-to-peer gossip and the WireGuard
-transport remain on the v2 roadmap — all additive on the v1 wire format, virtual
-IPs, and fallback chain.
+and lab-validated for the v2.1 line. A **kernel-WireGuard data plane**
+(`--wireguard`, direct + relay + MultiPeer) is built and lab-validated on the
+`phase3/wireguard` integration branch — opt-in, not yet in a tagged release
+(see [docs/WIREGUARD.md](docs/WIREGUARD.md)). Peer-to-peer gossip remains
+deferred. Everything is additive on the v1 wire format, virtual IPs, and fallback
+chain.
 
 **Security posture**
 

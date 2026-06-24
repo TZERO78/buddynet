@@ -129,11 +129,11 @@ manifest (`--peers-file`), hold a tunnel to each at once, and route to them by
 name (`--vip-listen`), all under one supervisor where one buddy failing never
 affects the others.
 
-| | Two buddies | MultiPeer (shipping) | Still on the roadmap |
+| | Two buddies | MultiPeer (shipping) | Phase 3 / roadmap |
 |---|---|---|---|
 | Buddies | the one partner | many, each pinned in a manifest | — |
-| Discovery | handshake server | handshake server (per buddy) | peer-to-peer gossip overlay |
-| Transport | QUIC | QUIC | QUIC **or** WireGuard (same seam) |
+| Discovery | handshake server | handshake server (per buddy) | peer-to-peer gossip overlay (deferred) |
+| Data plane | QUIC | QUIC | QUIC, or opt-in kernel WireGuard (`--wireguard`, [WIREGUARD.md](WIREGUARD.md)) |
 
 The wire format, virtual IPs, and fallback chain are unchanged, so each step is
 additive — never a rewrite.

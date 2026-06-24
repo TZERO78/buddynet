@@ -258,6 +258,16 @@ secret and pin buddies with `--peer-key`.
   integrity protection, but they live in a `0700` dir alongside the identity key:
   a local attacker with write access there already controls the node. Pinning and
   the SAS still hold regardless of cache contents.
+- **WireGuard overlay host scoping (`--wireguard`).** On the opt-in WireGuard data
+  plane (Phase 3, [docs/WIREGUARD.md](docs/WIREGUARD.md)) the VIP is a real host
+  address, so *every* service the node publishes on `0.0.0.0` is reachable by the
+  paired buddy over the overlay — it is **not yet scoped to a single service**. This
+  is accepted for the two-person trust model (you pair only with a buddy you trust);
+  scoping `bnet*` down to a specific path is planned once **BuddyShare** is defined.
+  BuddyNet still routes only the partner's VIP `/32`, **never the LANs/VLANs behind
+  it** — it is not a subnet router. The same end-to-end guarantees hold: the
+  WireGuard tunnel is between the two identity-derived keys, and the relay forwards
+  only sealed WireGuard packets (it is not a WireGuard peer and holds no key).
 
 ## Lost identity keys
 

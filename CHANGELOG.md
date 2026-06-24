@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Kernel-WireGuard data plane (`--wireguard`, Phase 3).** Opt-in second data
+  plane (set on both buddies): instead of QUIC streams, the tunnel runs over a
+  kernel WireGuard interface and the partner is reachable natively at its VIP
+  (`10.66.X.Y`). The WireGuard X25519 keys and the VIP are derived deterministically
+  from the long-term Ed25519 identity, so `identity = key = VIP` carries onto the
+  data plane with nothing exchanged over the wire. Configured over raw netlink (no
+  `wg`/`ip` subprocess, zero new runtime dependencies). Reuses the entire control
+  plane and the direct→relay fallback chain — **no `protocol.Version` bump**.
+  - **Direct** (hole-punch → socket handoff to kernel WG, reusing the punched port
+    so the NAT mapping survives) and **relay** (the blind relay forwards the
+    encrypted WireGuard packets, never a WireGuard peer, holds no key).
+  - **First contact** is verified with a Short Authentication String bound to an
+    ephemeral-DH exchange over the punched UDP socket (RFC 6189), since there is no
+    TLS exporter on this path; pinned peers skip it. Reconnects use a deterministic
+    static-DH secret. Fails closed: WG unavailable / no path / rejected SAS → error,
+    never a silent fall back to another plane.
+  - **MultiPeer** (`--wireguard` + `--peers-file`): one interface per buddy
+    (`bnet0`, `bnet1`, …), since kernel WireGuard has one listen port per device.
+    Keeps every buddy peer-to-peer (no central hub/"switch") and the relay working
+    per buddy.
+  - `-L`/`-forward`/`--vip-listen` are not needed on this path (the VIP is native)
+    and are ignored with a `NOTE`.
+  - Lab-validated (own netns tests): `lab/test-wg-buddy.sh`, `test-wg-relay.sh`,
+    `test-wg-multipeer.sh`. See [docs/WIREGUARD.md](docs/WIREGUARD.md).
+  - On the `phase3/wireguard` integration branch; **not yet in a tagged release**.
+
+### Fixed
+
+- `tunnel.ControlServer.Close` is now idempotent (`sync.Once`): the previous
+  check-then-close on the done channel could double-close under concurrent callers
+  and panic ("close of closed channel"). Surfaced as a `-race` flake.
+
 ## [v2.3.0] — 2026-06-20
 
 ### Security
