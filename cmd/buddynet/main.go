@@ -130,7 +130,7 @@ func main() {
 	name := flag.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars")
 	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
 	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
-	wireguard := flag.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y). Phase 3: direct P2P only (relay-over-WireGuard not yet).")
+	wireguard := flag.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y), direct or over a relay; -L/-forward/--vip-listen are not needed on this path (and are ignored).")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
@@ -429,6 +429,13 @@ func (a buddyArgs) validate() {
 		if a.lazy {
 			fmt.Fprintln(os.Stderr, "error: --wireguard cannot be combined with --lazy (lazy is QUIC-stream specific)")
 			os.Exit(2)
+		}
+		// -L/-forward/--vip-listen are the QUIC stream-forwarding plumbing; on the WG
+		// path the partner is reachable directly at its VIP, so they do nothing. Say
+		// so rather than ignoring them silently, so an operator is not left wondering
+		// why a listener never carried anything.
+		if a.localListen != "" || a.forward != "" || a.vipListen != "" {
+			fmt.Fprintln(os.Stderr, "NOTE: --wireguard ignores -L/-forward/--vip-listen — reach the partner directly at its VIP (e.g. http://<partner-vip>:<port>)")
 		}
 	} else if !a.status && a.localListen == "" && a.forward == "" && a.vipListen == "" {
 		fmt.Fprintln(os.Stderr, "error: set at least one of -L, --vip-listen or -forward (otherwise the tunnel carries nothing)")
