@@ -29,7 +29,7 @@ var errSessionRevoked = errors.New("stored session removed — peer revoked")
 // many peers never retry in lockstep (no thundering herd). It is the per-partner
 // unit the supervisor runs N of; lt (lazy) is only ever non-nil on the
 // single-peer path. inviteStart bounds a one-time invite's first-pairing window.
-func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, next nextAttemptFn, inviteStart time.Time) error {
+func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, next nextAttemptFn, inviteStart time.Time, ifIndex int) error {
 	backoff := reconnectBase
 	failures := 0
 	for {
@@ -46,6 +46,9 @@ func peerLoop(ctx context.Context, cfg BuddyConfig, nd *node, lt *lazyTunnel, ne
 		if aerr != nil {
 			return aerr
 		}
+		// One WireGuard interface per buddy: this worker always uses bnet{ifIndex}
+		// (stable across reconnects), so N buddies never fight over one device/port.
+		att.ifIndex = ifIndex
 		// A one-time invite is only valid for a limited window of first pairing.
 		if cfg.Ephemeral && att.firstPairing && time.Since(inviteStart) > cfg.InviteTimeout {
 			return fmt.Errorf("invite token expired after %s without pairing — run --invite again for a fresh one", cfg.InviteTimeout)
@@ -125,6 +128,27 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 	}
 	exited := make(chan exit, 16)
 
+	// One WireGuard interface per buddy (bnet0..N). ifIndexOf assigns each peer the
+	// lowest free index, kept STABLE across reconnects and freed only when the
+	// worker has fully exited (its interface torn down), so a reused index can never
+	// collide with an interface still being removed.
+	ifIndexOf := map[string]int{}
+	allocIf := func(key string) int {
+		if idx, ok := ifIndexOf[key]; ok {
+			return idx
+		}
+		used := make(map[int]bool, len(ifIndexOf))
+		for _, idx := range ifIndexOf {
+			used[idx] = true
+		}
+		idx := 0
+		for used[idx] {
+			idx++
+		}
+		ifIndexOf[key] = idx
+		return idx
+	}
+
 	start := func(s peerSpec) {
 		key := bcrypto.PubKeyB64(s.pin)
 		if _, ok := running[key]; ok {
@@ -132,12 +156,13 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 		}
 		gen++
 		g := gen
+		ifIndex := allocIf(key)
 		wctx, cancel := context.WithCancel(ctx)
 		running[key] = handle{cancel: cancel, gen: g}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := peerLoop(wctx, cfg, nd, nil, peerSource(cfg, s), time.Time{}); err != nil {
+			if err := peerLoop(wctx, cfg, nd, nil, peerSource(cfg, s), time.Time{}, ifIndex); err != nil {
 				log.Printf("SUPERVISOR: action=peer-stopped key=%s detail=%q", keyTag(key), err.Error())
 			}
 			exited <- exit{key, g}
@@ -164,6 +189,11 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 			if h, ok := running[e.key]; ok && h.gen == e.gen {
 				h.cancel()
 				delete(running, e.key)
+				// The worker has fully returned (its bnet{ifIndex} is torn down), so
+				// the interface index is free for a future peer. A stale exit
+				// (gen mismatch) is from an already-replaced instance whose index the
+				// live instance still owns — leave it.
+				delete(ifIndexOf, e.key)
 			}
 
 		case <-reload:

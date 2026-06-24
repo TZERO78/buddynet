@@ -111,7 +111,7 @@ func TestPeerLoopReturnsSourceError(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- peerLoop(context.Background(), BuddyConfig{}, &node{}, nil,
-			func(int) (attempt, error) { return attempt{}, boom }, time.Time{})
+			func(int) (attempt, error) { return attempt{}, boom }, time.Time{}, 0)
 	}()
 	select {
 	case err := <-done:
@@ -170,7 +170,7 @@ func TestPeerLoopHonoursCancel(t *testing.T) {
 		// next() returns the revocation sentinel so the loop never enters buddyRun;
 		// we only assert it does not spin or hang under a dead context.
 		done <- peerLoop(ctx, BuddyConfig{}, &node{}, nil,
-			func(int) (attempt, error) { return attempt{}, errSessionRevoked }, time.Time{})
+			func(int) (attempt, error) { return attempt{}, errSessionRevoked }, time.Time{}, 0)
 	}()
 	select {
 	case <-done:
