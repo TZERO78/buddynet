@@ -417,15 +417,11 @@ func (a buddyArgs) validate() {
 		fmt.Fprintln(os.Stderr, "error: --status needs --token (the pairing token)")
 		os.Exit(2)
 	}
-	// --wireguard carries IP natively (the partner is reachable at its VIP over
-	// bnet0), so the -L/-forward/--vip-listen requirement is waived. It is the WG
-	// DATA plane, opt-in, and (Phase 3) direct-P2P single-peer only: not combinable
-	// with the MultiPeer manifest or the QUIC-stream-specific --lazy yet.
+	// --wireguard carries IP natively (each partner is reachable at its VIP over
+	// that buddy's bnetN), so the -L/-forward/--vip-listen requirement is waived. It
+	// is the WG DATA plane, opt-in. MultiPeer works (one interface per buddy); only
+	// the QUIC-stream-specific --lazy is not applicable.
 	if a.wireguard {
-		if a.peersFile != "" {
-			fmt.Fprintln(os.Stderr, "error: --wireguard cannot be combined with --peers-file yet (MultiPeer-over-bnet0 is a later step)")
-			os.Exit(2)
-		}
 		if a.lazy {
 			fmt.Fprintln(os.Stderr, "error: --wireguard cannot be combined with --lazy (lazy is QUIC-stream specific)")
 			os.Exit(2)

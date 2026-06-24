@@ -62,6 +62,13 @@ const (
 	nlaFNested      = 0x8000
 	nlaTypeMask     = 0x3fff
 	rtScopeUniverse = 0
+
+	// route attributes (RTM_NEWROUTE rtmsg fields) — a directly-connected /32 to a
+	// partner's VIP out the buddy's own bnetN interface (one interface per buddy).
+	rtTableMain = 254
+	rtProtBoot  = 3
+	rtScopeLink = 253
+	rtnUnicast  = 1
 )
 
 var nativeEndian = binary.NativeEndian
@@ -359,6 +366,34 @@ func addrAdd(ifindex int, p netip.Prefix) error {
 	return expectAck(resp, "add address")
 }
 
+// routeAdd installs a route for dst out the given interface (scope link — the
+// partner's VIP is directly connected over its bnetN). The route is dropped
+// automatically when the interface is deleted, so teardown needs no counterpart.
+// Kernel WireGuard does not add routes itself (unlike wg-quick), so the overlay
+// needs this explicit /32 per partner when each buddy has its own interface (a
+// shared /16 would overlap across the bnet0..N interfaces).
+func routeAdd(ifindex int, dst netip.Prefix) error {
+	d4 := dst.Addr().As4()
+	rtm := make([]byte, syscall.SizeofRtMsg)
+	rtm[0] = syscall.AF_INET
+	rtm[1] = byte(dst.Bits()) // dst_len
+	rtm[4] = rtTableMain
+	rtm[5] = rtProtBoot
+	rtm[6] = rtScopeLink
+	rtm[7] = rtnUnicast
+	body := append([]byte{}, rtm...)
+	body = append(body, nlAttr(syscall.RTA_DST, d4[:])...)
+	var oif [4]byte
+	nativeEndian.PutUint32(oif[:], uint32(ifindex))
+	body = append(body, nlAttr(syscall.RTA_OIF, oif[:])...)
+	req := nlMessage(syscall.RTM_NEWROUTE, reqAck|syscall.NLM_F_CREATE|syscall.NLM_F_REPLACE, 1, body)
+	resp, err := roundtrip(syscall.NETLINK_ROUTE, req)
+	if err != nil {
+		return err
+	}
+	return expectAck(resp, "add route")
+}
+
 // --- device config over NETLINK_GENERIC -------------------------------------
 
 func resolveFamily(name string) (uint16, error) {
@@ -467,6 +502,15 @@ func Up(cfg Config) (down func() error, err error) {
 	if err := setLinkUp(ifindex); err != nil {
 		_ = teardown()
 		return nil, err
+	}
+	// Per-partner routes (one interface per buddy): the connected /32 to the
+	// partner's VIP out this interface. Added after link-up; removed implicitly
+	// when teardown deletes the interface.
+	for _, r := range cfg.Routes {
+		if err := routeAdd(ifindex, r); err != nil {
+			_ = teardown()
+			return nil, fmt.Errorf("wg: add route %s: %w", r, err)
+		}
 	}
 
 	released := false

@@ -18,9 +18,11 @@ import (
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
-// wgIfName is the BuddyNet WireGuard adapter (one device carries the overlay; one
-// peer per buddy). 2-peer/single-tunnel for now (Phase 3 4c).
-const wgIfName = "bnet0"
+// wgIfName is this buddy's WireGuard interface: one interface per buddy (bnet0,
+// bnet1, …), so N buddies never share one device/listen-port (which would break
+// the per-peer hole-punch handoff). Single-peer is bnet0; the supervisor assigns a
+// stable index per buddy in MultiPeer mode.
+func wgIfName(ifIndex int) string { return fmt.Sprintf("bnet%d", ifIndex) }
 
 // This is the buddy-side glue for the WireGuard data path (Phase 3 step 4c):
 // the EKM-free SAS binding run over the punched UDP socket, and the socket→WG
@@ -187,7 +189,7 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 	if remoteAP.Addr().Is4In6() {
 		remoteAP = netip.AddrPortFrom(remoteAP.Addr().Unmap(), remoteAP.Port())
 	}
-	down, err := bringUpWGDirect(conn, wgIfName, nd.priv, partnerPub, remoteAP)
+	down, err := bringUpWGDirect(conn, wgIfName(att.ifIndex), nd.priv, partnerPub, remoteAP)
 	if err != nil {
 		return fmt.Errorf("--wireguard: bring up data plane: %w", err)
 	}

@@ -71,6 +71,11 @@ type Config struct {
 	Address netip.Prefix
 	// Peer is the single remote peer (the spike configures exactly one).
 	Peer Peer
+	// Routes are installed out this interface after it is up (scope link). With one
+	// interface per buddy the partner's VIP needs an explicit /32 here, since kernel
+	// WireGuard adds no routes and a shared /16 connected route would overlap across
+	// the bnet0..N interfaces. Dropped automatically when the interface is removed.
+	Routes []netip.Prefix
 }
 
 func (c Config) validate() error {
@@ -102,24 +107,28 @@ func (c Config) validate() error {
 //
 // listenPort is the local UDP port to bind (the hole-punched port, reused so the
 // NAT mapping survives the socket→WG handoff); endpoint is the partner's reachable
-// UDP address. The interface gets this node's VIP as a /16 (so the kernel routes
-// the whole 10.66/16 overlay over it); the peer is allowed its VIP as a /32.
+// UDP address. The interface gets this node's VIP as a /32 and an explicit /32
+// route to the partner's VIP out this interface — so multiple buddies, each on
+// their own bnetN, do not fight over one shared 10.66/16 connected route. The peer
+// is allowed its VIP as a /32 (cryptokey routing).
 func ConfigForPeer(ifName string, listenPort int, myPriv ed25519.PrivateKey, partnerPub ed25519.PublicKey, endpoint netip.AddrPort) (Config, error) {
 	peerX, err := crypto.X25519FromEd25519Public(partnerPub)
 	if err != nil {
 		return Config{}, fmt.Errorf("wg: derive partner X25519 key: %w", err)
 	}
 	myPub := myPriv.Public().(ed25519.PublicKey)
+	partnerVIP := netip.PrefixFrom(crypto.VirtualIP(partnerPub), 32)
 	return Config{
 		IfName:     ifName,
 		PrivateKey: crypto.X25519FromEd25519Private(myPriv),
 		ListenPort: listenPort,
-		Address:    netip.PrefixFrom(crypto.VirtualIP(myPub), 16),
+		Address:    netip.PrefixFrom(crypto.VirtualIP(myPub), 32),
 		Peer: Peer{
 			PublicKey:  peerX,
 			Endpoint:   endpoint,
-			AllowedIPs: []netip.Prefix{netip.PrefixFrom(crypto.VirtualIP(partnerPub), 32)},
+			AllowedIPs: []netip.Prefix{partnerVIP},
 			Keepalive:  25,
 		},
+		Routes: []netip.Prefix{partnerVIP},
 	}, nil
 }

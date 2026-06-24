@@ -124,6 +124,7 @@ type attempt struct {
 	inviteToken  string            // human token, for TOFU/session keying ("" on reconnect)
 	pin          ed25519.PublicKey // reconnect: partner key that MUST match (nil otherwise)
 	firstPairing bool              // ephemeral invite: derive & store a session on success
+	ifIndex      int               // WireGuard data plane: this buddy's interface is bnet{ifIndex} (one per buddy)
 }
 
 // node bundles everything a buddy needs that exists exactly ONCE per process,
@@ -307,7 +308,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	// Single-peer / first-pairing path: one reconnect loop. nextAttempt prefers a
 	// stored session (reconnect, pinning the recorded key) and otherwise pairs with
 	// the invite/legacy token; an ephemeral invite stores a session on success.
-	return peerLoop(ctx, cfg, nd, lt, func(int) (attempt, error) { return nextAttempt(cfg) }, time.Now())
+	return peerLoop(ctx, cfg, nd, lt, func(int) (attempt, error) { return nextAttempt(cfg) }, time.Now(), 0)
 }
 
 // Reconnect backoff bounds: start at reconnectBase, double up to reconnectMax,

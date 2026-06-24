@@ -34,11 +34,15 @@ func TestConfigForPeer(t *testing.T) {
 	if cfg.Peer.PublicKey != wantPeerX {
 		t.Fatal("Peer.PublicKey not derived from partner's Ed25519 public key")
 	}
-	if cfg.Address != netip.PrefixFrom(bcrypto.VirtualIP(myPub), 16) {
-		t.Fatalf("Address: want %s/16, got %s", bcrypto.VirtualIP(myPub), cfg.Address)
+	if cfg.Address != netip.PrefixFrom(bcrypto.VirtualIP(myPub), 32) {
+		t.Fatalf("Address: want %s/32, got %s", bcrypto.VirtualIP(myPub), cfg.Address)
 	}
-	if len(cfg.Peer.AllowedIPs) != 1 || cfg.Peer.AllowedIPs[0] != netip.PrefixFrom(bcrypto.VirtualIP(peerPub), 32) {
-		t.Fatalf("AllowedIPs: want %s/32, got %v", bcrypto.VirtualIP(peerPub), cfg.Peer.AllowedIPs)
+	wantPartnerVIP := netip.PrefixFrom(bcrypto.VirtualIP(peerPub), 32)
+	if len(cfg.Peer.AllowedIPs) != 1 || cfg.Peer.AllowedIPs[0] != wantPartnerVIP {
+		t.Fatalf("AllowedIPs: want %s, got %v", wantPartnerVIP, cfg.Peer.AllowedIPs)
+	}
+	if len(cfg.Routes) != 1 || cfg.Routes[0] != wantPartnerVIP {
+		t.Fatalf("Routes: want [%s], got %v", wantPartnerVIP, cfg.Routes)
 	}
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("derived config failed validate(): %v", err)
