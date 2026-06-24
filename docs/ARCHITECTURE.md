@@ -91,9 +91,9 @@ loopback interface ([`internal/vip`](../internal/vip), via netlink) so
 `name.buddy:port` routes to the right buddy's tunnel. The manifest is reconciled
 live on `SIGHUP`. See [PEERS.md](PEERS.md).
 
-## Transport seam (QUIC now, WireGuard later)
+## Data plane: QUIC streams, or kernel WireGuard
 
-The data plane is hidden behind a small interface
+The **default** data plane is hidden behind a small interface
 ([`internal/tunnel/transport.go`](../internal/tunnel/transport.go)):
 
 ```go
@@ -104,14 +104,24 @@ type Transport interface {
 }
 ```
 
-- **v1 ships `QUICTransport`** — TLS 1.3, reliable, ordered, multiplexed. Already
-  end-to-end encrypted, and relay-blind (a relay sees only QUIC packets).
-- **v2 can drop in `WireGuardTransport`** — same interface, ChaCha20-Poly1305
-  data plane — without the roles above it changing a line. The seam is compiled
-  today as an inert placeholder ([`wireguard.go`](../internal/tunnel/wireguard.go)).
+- **`QUICTransport`** — TLS 1.3, reliable, ordered, multiplexed. Already
+  end-to-end encrypted, and relay-blind (a relay sees only QUIC packets). A QUIC
+  `Session` multiplexes streams (control / data / keepalive), so one encrypted
+  connection carries `-L`/`-forward`/`--vip-listen`.
 
-A QUIC `Session` multiplexes streams (control / data / keepalive), so one
-encrypted connection carries everything.
+- **Kernel WireGuard (`--wireguard`, Phase 3)** — an **opt-in second data plane**,
+  *not* a `Transport` implementation. It does not expose streams: it brings up a
+  kernel WireGuard interface (`bnet0`, …, one per buddy) so the partner is reachable
+  **natively at its VIP**. It reuses the entire control plane and the same
+  direct→relay fallback (the blind relay forwards the encrypted WireGuard packets as
+  it forwards QUIC). Built over raw netlink in [`internal/wg`](../internal/wg) +
+  [`internal/role/wgpath.go`](../internal/role/wgpath.go). See
+  **[WIREGUARD.md](WIREGUARD.md)**.
+
+> [`internal/tunnel/wireguard.go`](../internal/tunnel/wireguard.go) is a now-stale
+> sketch of an *earlier* idea — a userspace-WireGuard `Transport` exposing the tun
+> as streams. The shipped Phase-3 design took a different route (kernel WireGuard,
+> native VIP, no stream seam); that placeholder is slated for removal.
 
 ## Why the relay stays blind
 
