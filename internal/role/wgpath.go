@@ -13,7 +13,6 @@ import (
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	"github.com/tzero78/buddynet/internal/relay"
-	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/internal/wg"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
@@ -106,29 +105,13 @@ func udpAddrEqual(a, b *net.UDPAddr) bool {
 func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration) (*net.UDPAddr, relay.Path, error) {
 	var lastErr error
 	for _, p := range chain {
-		switch p.Kind {
-		case relay.Direct:
-			remote, err := tunnel.Punch(conn, myID, p.Candidates, punchDur)
-			if err != nil {
-				log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, fmt.Sprintf("direct punch: %v", err))
-				lastErr = err
-				continue
-			}
-			return remote, p, nil
-		case relay.Relayed:
-			relayAddr, err := net.ResolveUDPAddr("udp", p.RelayEndpoint)
-			if err != nil {
-				log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, fmt.Sprintf("resolve relay: %v", err))
-				lastErr = err
-				continue
-			}
-			if err := relay.BindLeg(conn, relayAddr, session, 5*time.Second); err != nil {
-				log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, fmt.Sprintf("relay bind: %v", err))
-				lastErr = err
-				continue
-			}
-			return relayAddr, p, nil
+		addr, err := primeOne(conn, myID, p, session, punchDur)
+		if err != nil {
+			log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, err.Error())
+			lastErr = err
+			continue
 		}
+		return addr, p, nil
 	}
 	if lastErr == nil {
 		lastErr = errors.New("no usable path")

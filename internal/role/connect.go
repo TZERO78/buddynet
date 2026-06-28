@@ -276,26 +276,39 @@ func dialChain(ctx context.Context, tr *tunnel.QUICTransport, conn *net.UDPConn,
 // primePath makes a path usable and returns the endpoint to dial. Direct
 // punches a hole to the partner; Relayed binds this node's leg on the relay and
 // uses the relay address as the endpoint.
-func primePath(conn *net.UDPConn, myID string, p relay.Path, session string, punchDur time.Duration) (string, error) {
+// primeOne readies a single fallback path on conn and returns the peer endpoint to
+// use: a hole-punch for Direct, a relay-leg bind for Relayed. Shared by the QUIC
+// dial loop (primePath) and the WireGuard path walk (primeWGPath).
+func primeOne(conn *net.UDPConn, myID string, p relay.Path, session string, punchDur time.Duration) (*net.UDPAddr, error) {
 	switch p.Kind {
 	case relay.Direct:
 		remote, err := tunnel.Punch(conn, myID, p.Candidates, punchDur)
 		if err != nil {
-			return "", fmt.Errorf("direct punch: %w", err)
+			return nil, fmt.Errorf("direct punch: %w", err)
 		}
-		return remote.String(), nil
+		return remote, nil
 	case relay.Relayed:
 		relayAddr, err := net.ResolveUDPAddr("udp", p.RelayEndpoint)
 		if err != nil {
-			return "", fmt.Errorf("resolve relay %q: %w", p.RelayEndpoint, err)
+			return nil, fmt.Errorf("resolve relay %q: %w", p.RelayEndpoint, err)
 		}
 		if err := relay.BindLeg(conn, relayAddr, session, 5*time.Second); err != nil {
-			return "", fmt.Errorf("relay bind: %w", err)
+			return nil, fmt.Errorf("relay bind: %w", err)
 		}
-		return relayAddr.String(), nil
+		return relayAddr, nil
 	default:
-		return "", errors.New("unknown path kind")
+		return nil, errors.New("unknown path kind")
 	}
+}
+
+// primePath primes one path for the QUIC dial loop, returning the endpoint as a
+// string for tunnel dialing.
+func primePath(conn *net.UDPConn, myID string, p relay.Path, session string, punchDur time.Duration) (string, error) {
+	addr, err := primeOne(conn, myID, p, session, punchDur)
+	if err != nil {
+		return "", err
+	}
+	return addr.String(), nil
 }
 
 // sessionToken derives the relay session id deterministically from the pairing

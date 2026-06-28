@@ -171,25 +171,6 @@ func buildSetDeviceAttrs(ifindex int, cfg Config) []byte {
 	return out
 }
 
-// buildAddPeerAttrs encodes a WG_CMD_SET_DEVICE body that ADDS/updates one peer
-// WITHOUT WGDEVICE_F_REPLACE_PEERS — so the device's other peers stay intact
-// (the bnet0 adapter model: one device, one peer per buddy).
-func buildAddPeerAttrs(ifindex int, p Peer) []byte {
-	out := nlAttrU32(wgDeviceAIfindex, uint32(ifindex))
-	out = append(out, nlNested(wgDeviceAPeers, nlNested(0, buildPeer(p)))...)
-	return out
-}
-
-// buildRemovePeerAttrs encodes a WG_CMD_SET_DEVICE body that removes one peer by
-// public key (WGPEER_F_REMOVE_ME), leaving the device's other peers intact.
-func buildRemovePeerAttrs(ifindex int, pub [32]byte) []byte {
-	peer := nlAttr(wgPeerAPublicKey, pub[:])
-	peer = append(peer, nlAttrU32(wgPeerAFlags, wgPeerFRemoveMe)...)
-	out := nlAttrU32(wgDeviceAIfindex, uint32(ifindex))
-	out = append(out, nlNested(wgDeviceAPeers, nlNested(0, peer))...)
-	return out
-}
-
 // nlMessage frames a netlink message: nlmsghdr + body.
 func nlMessage(msgType, flags uint16, seq uint32, body []byte) []byte {
 	total := syscall.NLMSG_HDRLEN + len(body)
@@ -434,30 +415,6 @@ func resolveDevice(ifName string) (family uint16, ifindex int, err error) {
 	return family, iface.Index, nil
 }
 
-// AddPeer adds or updates a single peer on an existing device, leaving the
-// device's other peers intact (the bnet0 adapter model — one device, one peer per
-// buddy). Re-adding the same public key updates that peer's endpoint/allowed-ips.
-func AddPeer(ifName string, p Peer) error {
-	if p.PublicKey == ([32]byte{}) {
-		return errors.New("wg: AddPeer: zero PublicKey")
-	}
-	family, ifindex, err := resolveDevice(ifName)
-	if err != nil {
-		return err
-	}
-	return sendSetDevice(family, buildAddPeerAttrs(ifindex, p))
-}
-
-// RemovePeer removes a single peer by its public key, leaving other peers intact.
-// Removing an unknown peer is a no-op (the kernel does not error).
-func RemovePeer(ifName string, pub [32]byte) error {
-	family, ifindex, err := resolveDevice(ifName)
-	if err != nil {
-		return err
-	}
-	return sendSetDevice(family, buildRemovePeerAttrs(ifindex, pub))
-}
-
 // --- orchestration ----------------------------------------------------------
 
 // Up creates the WireGuard interface, configures it and the peer, assigns the
@@ -470,9 +427,7 @@ func Up(cfg Config) (down func() error, err error) {
 		return nil, err
 	}
 	// Clean any stale interface of the same name so repeated runs are idempotent.
-	if existing, e := net.InterfaceByName(cfg.IfName); e == nil {
-		_ = delLink(existing.Index)
-	}
+	_ = delLinkByName(cfg.IfName)
 	if err := createLink(cfg.IfName); err != nil {
 		return nil, fmt.Errorf("wg: create %s: %w", cfg.IfName, err)
 	}

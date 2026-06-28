@@ -56,8 +56,8 @@ type Peer struct {
 
 // Config describes the interface to bring up.
 type Config struct {
-	// IfName is the interface name (max 15 bytes), e.g. "bnet0" — the BuddyNet
-	// adapter. One device carries all buddies; add a peer per buddy with AddPeer.
+	// IfName is the interface name (max 15 bytes), e.g. "bnet0". BuddyNet brings up
+	// one interface per buddy (bnet0, bnet1, …), each with that buddy as its sole peer.
 	IfName string
 	// PrivateKey is this node's WireGuard (X25519) private key
 	// (crypto.X25519FromEd25519Private).
@@ -117,7 +117,10 @@ func ConfigForPeer(ifName string, listenPort int, myPriv ed25519.PrivateKey, par
 		return Config{}, fmt.Errorf("wg: derive partner X25519 key: %w", err)
 	}
 	myPub := myPriv.Public().(ed25519.PublicKey)
-	partnerVIP := netip.PrefixFrom(crypto.VirtualIP(partnerPub), 32)
+	// The partner is allowed (cryptokey routing) and routed to at exactly its
+	// key-derived VIP /32 — the same prefix for both the WG AllowedIPs and the
+	// kernel FIB route.
+	peerVIP := []netip.Prefix{netip.PrefixFrom(crypto.VirtualIP(partnerPub), 32)}
 	return Config{
 		IfName:     ifName,
 		PrivateKey: crypto.X25519FromEd25519Private(myPriv),
@@ -126,9 +129,9 @@ func ConfigForPeer(ifName string, listenPort int, myPriv ed25519.PrivateKey, par
 		Peer: Peer{
 			PublicKey:  peerX,
 			Endpoint:   endpoint,
-			AllowedIPs: []netip.Prefix{partnerVIP},
+			AllowedIPs: peerVIP,
 			Keepalive:  25,
 		},
-		Routes: []netip.Prefix{partnerVIP},
+		Routes: peerVIP,
 	}, nil
 }
