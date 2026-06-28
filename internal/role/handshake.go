@@ -37,6 +37,9 @@ type HandshakeConfig struct {
 	Debug      bool          // verbose, security-sensitive logging
 	QUIC       bool          // run the control plane over QUIC instead of plain UDP
 	WireGuard  bool          // run the control plane over kernel WireGuard (requires --authorized: the allowlist is the WG peer set)
+	// WGControlPort is the inner (on-VIP) UDP port REGISTER/PEER_LIST use over the
+	// WireGuard control plane. 0 = DefaultWGControlPort. Must match on every buddy.
+	WGControlPort int
 	// RelayEndpoint, if set, is advertised to every paired buddy as a relay of
 	// last resort — use it when this VPS also runs --role=relay (commonly on a
 	// second port). Buddies fall back to it only after a direct punch fails.

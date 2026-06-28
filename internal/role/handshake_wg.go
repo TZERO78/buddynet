@@ -20,12 +20,24 @@ import (
 // hsWGIface is the server's WireGuard control-plane interface.
 const hsWGIface = "bnet-hs0"
 
-// hsWGControlPort is the UDP port REGISTER/PEER_LIST use INSIDE the tunnel (on the
-// server's VIP). It must differ from the WireGuard underlay listen port — the
-// kernel WG socket already holds that port, so a userspace bind on the same port
-// fails with EADDRINUSE. It lives only on the private overlay, so it cannot clash
-// with anything on the public interface. Server and buddy agree on it by constant.
-const hsWGControlPort = 51821
+// DefaultWGControlPort is the default UDP port REGISTER/PEER_LIST use INSIDE the
+// tunnel (on the server's VIP), when --wireguard-control-port is not set. It must
+// differ from any port the host binds with a wildcard address, since a wildcard
+// bind shadows the VIP bind: notably the WireGuard underlay listen port (51820,
+// held by the kernel WG socket) and the relay listen port (51821 by default, when
+// the VPS also runs --role=relay). 51822 keeps clear of both. It is configurable so
+// an operator whose 51822 is taken can move it — the SAME value must be set on the
+// server and every buddy (they agree by configuration, not a baked-in constant).
+const DefaultWGControlPort = 51822
+
+// wgControlPort resolves the configured inner control port, falling back to the
+// default when unset (0).
+func wgControlPort(configured int) uint16 {
+	if configured <= 0 || configured > 65535 {
+		return DefaultWGControlPort
+	}
+	return uint16(configured)
+}
 
 // serveControlWG runs the handshake control plane over kernel WireGuard. The
 // server brings up one interface whose WG peers ARE the --authorized allowlist
@@ -77,9 +89,10 @@ func serveControlWG(ctx context.Context, priv ed25519.PrivateKey, authz *authori
 	// Serve REGISTER inside the tunnel, on the server VIP at the inner control port
 	// (distinct from the WG underlay port). The kernel routes replies back through
 	// the tunnel to the buddy.
-	lconn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(myVIP, hsWGControlPort)))
+	ctrlPort := wgControlPort(cfg.WGControlPort)
+	lconn, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(myVIP, ctrlPort)))
 	if err != nil {
-		return fmt.Errorf("--wireguard handshake: listen on %s:%d: %w", myVIP, hsWGControlPort, err)
+		return fmt.Errorf("--wireguard handshake: listen on %s:%d (is --wireguard-control-port free, and not equal to the relay/underlay port?): %w", myVIP, ctrlPort, err)
 	}
 	defer lconn.Close()
 	go func() { <-ctx.Done(); lconn.Close() }()
