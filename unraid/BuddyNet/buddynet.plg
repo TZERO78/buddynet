@@ -237,6 +237,12 @@ Lazy tunnel (--lazy) — defer the tunnel until the first -L connection (needs -
   <option value="enable"  <?=v($cfg,'LAZY')=='enable'?'selected':''?>>Enabled</option>
   </select>
 
+Encrypt the control plane (--quic-handshake) — SECURE DEFAULT: encrypts matchmaking so the token never travels in cleartext; with an approval-mode server it also pins your key at the TLS handshake. Disable only for a legacy plain-UDP server. **Must be set the same way on the handshake server.**
+: <select name="QUIC_HANDSHAKE">
+  <option value="enable"  <?=v($cfg,'QUIC_HANDSHAKE')!='disable'?'selected':''?>>Enabled (secure default)</option>
+  <option value="disable" <?=v($cfg,'QUIC_HANDSHAKE')=='disable'?'selected':''?>>Disabled (legacy plain UDP)</option>
+  </select>
+
 WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGuard instead of QUIC; the partner is reachable natively at its VIP (10.66.X.Y). Needs the Buddy key above pinned:
 : <select name="WIREGUARD">
   <option value="disable" <?=v($cfg,'WIREGUARD')=='disable'?'selected':''?>>Disabled</option>
@@ -385,6 +391,14 @@ start() {
   # the privileged 127.0.0.153:53 bind succeeds).
   [ -n "$NAME" ] && args+=(--name "$NAME")
   [ "$DNS" = "enable" ] && args+=(--dns)
+  # Encrypt the control plane (matchmaking) — the secure default. Pass the flag
+  # explicitly so the behaviour is the same regardless of the binary's default;
+  # only "disable" opts out to legacy plain UDP. Must match the handshake server.
+  if [ "$QUIC_HANDSHAKE" = "disable" ]; then
+    args+=(--quic-handshake=false)
+  else
+    args+=(--quic-handshake)
+  fi
   # Lazy needs -L (there is no listener to hold open without it); skip + warn.
   if [ "$LAZY" = "enable" ]; then
     if [ -n "$LISTEN" ]; then

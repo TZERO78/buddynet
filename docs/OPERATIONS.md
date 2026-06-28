@@ -6,10 +6,13 @@ and the `--status` probe.
 
 ---
 
-## QUIC control plane (`--quic-handshake`)
+## QUIC control plane (`--quic-handshake`, the secure default)
 
-**Use `--quic-handshake` on every deployment.** It must be set identically on
-the handshake server and on every buddy that connects to it.
+**The control plane is encrypted with QUIC/TLS 1.3 by default** — security by
+default. You do not need to pass anything; it is on unless you explicitly opt out
+with `--quic-handshake=false` (or `BUDDYNET_QUIC=0`) on the handshake server **and**
+every buddy. Keep it on. The examples below pass `--quic-handshake` explicitly,
+which is fine (it just confirms the default).
 
 ```bash
 # Server
