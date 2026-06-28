@@ -275,7 +275,7 @@ func main() {
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
 					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
-					QUIC: *quicHandshake, AllowCIDRs: allowedCIDRs,
+					QUIC: *quicHandshake, WireGuard: *wireguard, AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
