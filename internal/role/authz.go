@@ -153,6 +153,19 @@ func (a *authorizer) count() int {
 	return len(a.keys)
 }
 
+// authorizedKeys returns the base64 Ed25519 public keys currently on the allowlist.
+// The WireGuard handshake uses it as the server's WG peer set: kernel WireGuard
+// admits only known peers, so the allowlist IS the network admission control.
+func (a *authorizer) authorizedKeys() []string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	out := make([]string, 0, len(a.keys))
+	for k := range a.keys {
+		out = append(out, k)
+	}
+	return out
+}
+
 func (a *authorizer) logPending(pubkey, tokenHash string) {
 	a.mu.Lock()
 	last, seen := a.logged[pubkey]
