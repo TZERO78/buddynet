@@ -104,7 +104,7 @@ func main() {
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
 	debug := flag.Bool("debug", false, "handshake: verbose logging of parked/dropped packets (not for production)")
-	quicHandshake := flag.Bool("quic-handshake", false, "use QUIC (not plain UDP) for the handshake control plane; set the SAME on the server and every buddy")
+	quicHandshake := flag.Bool("quic-handshake", true, "encrypt the handshake control plane with QUIC/TLS 1.3 — the secure default. Pass --quic-handshake=false (or BUDDYNET_QUIC=0) for legacy PLAIN UDP, where the token travels in cleartext. Set the SAME on the server and every buddy.")
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
 	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]")
@@ -175,10 +175,14 @@ func main() {
 			*dnsFlag = true
 		}
 	}
-	if !*quicHandshake {
-		if v := os.Getenv("BUDDYNET_QUIC"); v == "1" || v == "true" {
-			*quicHandshake = true
-		}
+	// QUIC (encrypted) is the secure default; BUDDYNET_QUIC=0/false opts out to the
+	// legacy cleartext plain-UDP control plane (for headless setups that pass env,
+	// not flags). =1/true is accepted too (a redundant explicit opt-in).
+	switch os.Getenv("BUDDYNET_QUIC") {
+	case "0", "false":
+		*quicHandshake = false
+	case "1", "true":
+		*quicHandshake = true
 	}
 	if !*lazyFlag {
 		if v := os.Getenv("BUDDYNET_LAZY"); v == "1" || v == "true" {
@@ -683,10 +687,12 @@ SECURITY — please read
   • Keep the token off the command line: prefer BUDDYNET_TOKEN or a 0600 file.
 
 TRANSPORT
-  The handshake control plane uses plain UDP by default (source addresses are
-  validated by a cookie, so the server is never a reflector). Pass
-  --quic-handshake on the server AND every buddy to use QUIC instead — same
-  protection via QUIC's built-in address validation, at the cost of a TLS cert.
+  The handshake control plane is encrypted with QUIC/TLS 1.3 BY DEFAULT: the
+  pairing token never travels in cleartext, source addresses are validated by the
+  QUIC handshake (the server is never a reflector), and with --authorized the
+  server pins clients to the allowlist at the TLS handshake. Pass
+  --quic-handshake=false (or BUDDYNET_QUIC=0) on the server AND every buddy for the
+  legacy plain-UDP control plane (token in cleartext; cookie-validated sources).
 
 FLAGS
 `, appName, appVersion())

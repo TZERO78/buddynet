@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The handshake control plane is now QUIC/TLS 1.3 by default (security by
+  default).** Previously plain UDP (cleartext token) was the default and
+  `--quic-handshake` opted in; now encryption is on unless you explicitly opt out
+  with `--quic-handshake=false` (or `BUDDYNET_QUIC=0`). **Set the same on the server
+  and every buddy** — a QUIC buddy cannot pair with a plain-UDP server (and vice
+  versa), so when upgrading, upgrade/align both sides, or pass `--quic-handshake=false`
+  on both for the old behaviour.
+
 ### Added
 
 - **Known-buddies control plane: QUIC client-key pinning in approval mode.** With

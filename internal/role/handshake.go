@@ -396,9 +396,10 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl, cfg.AllowCIDRs)
 	}
 	log.Print("handshake control plane: UDP (source address validated by cookie)")
-	log.Print("WARNING: on plain UDP the REGISTER (incl. the pairing token) travels in CLEARTEXT — " +
-		"an on-path observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --lab). " +
-		"Pass --quic-handshake on the server AND every buddy to encrypt the control plane; always pin buddies with --peer-key.")
+	log.Print("WARNING: plain UDP is the LEGACY control plane (you opted out of the secure default with " +
+		"--quic-handshake=false): the REGISTER (incl. the pairing token) travels in CLEARTEXT — an on-path " +
+		"observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --lab). Drop " +
+		"--quic-handshake=false on the server AND every buddy to restore encryption; always pin buddies with --peer-key.")
 
 	buf := make([]byte, 1500)
 	for {
