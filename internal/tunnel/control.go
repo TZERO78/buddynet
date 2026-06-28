@@ -59,6 +59,29 @@ func pinnedPeerVerify(want ed25519.PublicKey) func([][]byte, [][]*x509.Certifica
 	}
 }
 
+// clientKeyVerify returns a TLS VerifyPeerCertificate (server side) that extracts
+// the client's Ed25519 identity from its certificate and defers the accept/reject
+// decision to allow. It lets the handshake server pin CLIENTS to its allowlist
+// during the TLS handshake — so a non-allowlisted buddy is refused before it can
+// send a REGISTER (the same early rejection kernel WireGuard gives), not merely at
+// the app layer afterwards. Used only in approval mode; open mode passes nil.
+func clientKeyVerify(allow func(ed25519.PublicKey) error) func([][]byte, [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return errors.New("client presented no certificate")
+		}
+		c, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return err
+		}
+		pk, ok := c.PublicKey.(ed25519.PublicKey)
+		if !ok {
+			return errors.New("client certificate is not an Ed25519 identity")
+		}
+		return allow(pk)
+	}
+}
+
 func controlQUICConf(idle time.Duration) *quic.Config {
 	ka := idle / 4
 	if ka < 5*time.Second {
@@ -79,8 +102,10 @@ type ControlClient struct {
 }
 
 // DialControl opens a QUIC control connection to server over conn, pinning the
-// server's identity key. On error it cleans up and leaves conn open.
-func DialControl(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, serverPub ed25519.PublicKey, idle time.Duration) (*ControlClient, error) {
+// server's identity key. It presents the buddy's own identity certificate so a
+// server in approval mode can pin the client to its allowlist during the TLS
+// handshake. On error it cleans up and leaves conn open.
+func DialControl(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, serverPub ed25519.PublicKey, priv ed25519.PrivateKey, idle time.Duration) (*ControlClient, error) {
 	tr := &quic.Transport{Conn: conn}
 	tlsConf := &tls.Config{
 		// PKI-free: identity is pinned by key in VerifyPeerCertificate below, not by
@@ -88,6 +113,7 @@ func DialControl(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, se
 		InsecureSkipVerify:    true, //nosec G402 -- server identity is pinned by key in VerifyPeerCertificate
 		MinVersion:            tls.VersionTLS13,
 		NextProtos:            []string{controlALPN},
+		Certificates:          []tls.Certificate{selfSignedCert(priv)}, // our identity, for server-side client pinning
 		VerifyPeerCertificate: pinnedPeerVerify(serverPub),
 	}
 	qc, err := tr.Dial(ctx, server, tlsConf, controlQUICConf(idle))
@@ -147,13 +173,23 @@ type ControlServer struct {
 
 // ListenControl starts a QUIC control listener on conn, presenting the server's
 // identity certificate. conn is owned by the caller; Close leaves it open.
-func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duration) (*ControlServer, error) {
+//
+// verifyClient pins CLIENTS by key during the TLS handshake (approval mode): a
+// non-nil callback requires every client to present a certificate whose Ed25519
+// key it accepts, so a non-allowlisted buddy is refused before sending a REGISTER.
+// Pass nil in open mode — any client may connect and is gated at the app layer.
+func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duration, verifyClient func(ed25519.PublicKey) error) (*ControlServer, error) {
 	tr := &quic.Transport{Conn: conn}
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{selfSignedCert(priv)},
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{controlALPN},
-		ClientAuth:   tls.NoClientCert, // clients are authenticated at the app layer
+		ClientAuth:   tls.NoClientCert, // open mode: clients gated at the app layer
+	}
+	if verifyClient != nil {
+		// Approval mode: demand and pin a client certificate at the TLS layer.
+		tlsConf.ClientAuth = tls.RequireAnyClientCert
+		tlsConf.VerifyPeerCertificate = clientKeyVerify(verifyClient)
 	}
 	ln, err := tr.Listen(tlsConf, controlQUICConf(idle))
 	if err != nil {

@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -447,7 +448,20 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 // so a polling buddy makes progress). QUIC's handshake already validated the
 // source address, so no cookie is needed; the rate limiter still bounds load.
 func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
-	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
+	// In approval mode, pin clients to the allowlist during the TLS handshake so a
+	// non-allowlisted buddy is refused before it can send a REGISTER (the same early
+	// rejection kernel WireGuard gives). Open mode leaves client auth at the app layer.
+	var verifyClient func(ed25519.PublicKey) error
+	if authz != nil {
+		verifyClient = func(pub ed25519.PublicKey) error {
+			if authz.allowed(bcrypto.PubKeyB64(pub)) {
+				return nil
+			}
+			return errors.New("client key is not on the allowlist")
+		}
+		log.Print("approval mode: QUIC control pins clients to the allowlist at the TLS handshake")
+	}
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout, verifyClient)
 	if err != nil {
 		return err
 	}

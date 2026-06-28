@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestControlRoundtripAndSocketReuse(t *testing.T) {
 		t.Fatalf("server listen: %v", err)
 	}
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -92,7 +93,8 @@ func TestControlRoundtripAndSocketReuse(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cli, err := DialControl(ctx, cliConn, srvConn.LocalAddr().(*net.UDPAddr), srvPub, 30*time.Second)
+	_, cliPriv, _ := ed25519.GenerateKey(rand.Reader)
+	cli, err := DialControl(ctx, cliConn, srvConn.LocalAddr().(*net.UDPAddr), srvPub, cliPriv, 30*time.Second)
 	if err != nil {
 		t.Fatalf("DialControl: %v", err)
 	}
@@ -123,7 +125,7 @@ func TestControlRejectsWrongServerKey(t *testing.T) {
 
 	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -133,7 +135,68 @@ func TestControlRejectsWrongServerKey(t *testing.T) {
 	defer cliConn.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	if _, err := DialControl(ctx, cliConn, srvConn.LocalAddr().(*net.UDPAddr), wrongPub, 30*time.Second); err == nil {
+	_, cliPriv, _ := ed25519.GenerateKey(rand.Reader)
+	if _, err := DialControl(ctx, cliConn, srvConn.LocalAddr().(*net.UDPAddr), wrongPub, cliPriv, 30*time.Second); err == nil {
 		t.Fatal("dial succeeded against a mismatched server key; want failure")
+	}
+}
+
+// In approval mode the server pins clients by key at the TLS handshake: an
+// allowlisted client connects, a non-allowlisted one is refused before any REGISTER.
+func TestControlPinsClientKey(t *testing.T) {
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	srvPub := srvPriv.Public().(ed25519.PublicKey)
+	okPub, okPriv, _ := ed25519.GenerateKey(rand.Reader)
+	_, foePriv, _ := ed25519.GenerateKey(rand.Reader)
+
+	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	defer srvConn.Close()
+	verify := func(pub ed25519.PublicKey) error {
+		if pub.Equal(okPub) {
+			return nil
+		}
+		return errors.New("not allowlisted")
+	}
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, verify)
+	if err != nil {
+		t.Fatalf("ListenControl: %v", err)
+	}
+	defer srv.Close()
+	go func() {
+		for {
+			req, err := srv.Accept(context.Background())
+			if err != nil {
+				return
+			}
+			req.Reply([]byte("ok"))
+		}
+	}()
+	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
+
+	// Allowlisted client: handshake + roundtrip succeed.
+	okConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	defer okConn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cli, err := DialControl(ctx, okConn, srvAddr, srvPub, okPriv, 30*time.Second)
+	if err != nil {
+		t.Fatalf("allowlisted client rejected: %v", err)
+	}
+	if _, err := cli.Roundtrip(ctx, []byte("hi")); err != nil {
+		t.Fatalf("allowlisted roundtrip failed: %v", err)
+	}
+	cli.Close()
+
+	// Non-allowlisted client: the TLS handshake (and thus any roundtrip) must fail.
+	foeConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	defer foeConn.Close()
+	fctx, fcancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer fcancel()
+	foe, err := DialControl(fctx, foeConn, srvAddr, srvPub, foePriv, 30*time.Second)
+	if err == nil {
+		if _, rerr := foe.Roundtrip(fctx, []byte("hi")); rerr == nil {
+			t.Fatal("non-allowlisted client completed a roundtrip; want rejection")
+		}
+		foe.Close()
 	}
 }
