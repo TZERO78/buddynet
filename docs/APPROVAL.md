@@ -5,6 +5,12 @@ By default the handshake server pairs any two buddies that share a valid token.
 key appears in the authorized-clients file may pair. Everyone else is logged as
 pending and silently dropped.
 
+With `--quic-handshake` (recommended), the allowlist is also enforced at the **TLS
+handshake**: a buddy presents its identity certificate and a non-allowlisted key is
+refused before it can send a `REGISTER` — strangers never reach the matchmaking
+logic. On plain UDP the allowlist is enforced at the application layer (the REGISTER
+is parsed, then dropped). Either way, only allowlisted keys can pair.
+
 This is the right mode for:
 - A shared VPS where you control who can rendezvous.
 - Multi-tenant setups where different user groups must be isolated.
