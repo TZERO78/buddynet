@@ -35,28 +35,43 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		}()
 	}
 
-	// One dual-stack UDP socket does everything (register, punch, relay-bind,
-	// QUIC); reusing it preserves the NAT mapping the server observed.
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
-	if err != nil {
-		return fmt.Errorf("open udp socket: %w", err)
-	}
-	defer conn.Close()
-
 	// needSAS is set when the partner key is unknown (trust-on-first-use) and must
 	// be verified by the human via the SAS once the tunnel is up.
 	var needSAS bool
-
-	serverAddrs, serr := resolveAll(cfg.Server)
 	var partner protocol.Peer
-	if serr == nil {
-		partner, err = buddyRegister(conn, serverAddrs, cfg, nd, att.rendezvous, 30*time.Second)
-		if err != nil {
-			return err
+	var conn *net.UDPConn
+	var err error
+
+	if cfg.WireGuard {
+		// WireGuard control plane: register over an ephemeral WG tunnel to the
+		// server (the --authorized allowlist is the server's WG peer set), then
+		// reuse that underlay port for the data socket so the endpoint the server
+		// observed through the tunnel stays valid for the direct punch.
+		port, par, herr := registerOverWG(ctx, cfg, nd, att, 30*time.Second)
+		if herr != nil {
+			return herr
 		}
+		if conn, err = net.ListenUDP("udp", &net.UDPAddr{Port: port}); err != nil {
+			return fmt.Errorf("open data socket on handshake port %d: %w", port, err)
+		}
+		partner = par
 	} else {
-		log.Printf("CONNECT: action=server-unreachable server=%q detail=%q", cfg.Server, serr.Error())
+		// One dual-stack UDP socket does everything (register, punch, relay-bind,
+		// QUIC); reusing it preserves the NAT mapping the server observed.
+		if conn, err = net.ListenUDP("udp", &net.UDPAddr{Port: 0}); err != nil {
+			return fmt.Errorf("open udp socket: %w", err)
+		}
+		serverAddrs, serr := resolveAll(cfg.Server)
+		if serr == nil {
+			if partner, err = buddyRegister(conn, serverAddrs, cfg, nd, att.rendezvous, 30*time.Second); err != nil {
+				conn.Close()
+				return err
+			}
+		} else {
+			log.Printf("CONNECT: action=server-unreachable server=%q detail=%q", cfg.Server, serr.Error())
+		}
 	}
+	defer conn.Close()
 
 	// Identity checks on the partner the server vouched for.
 	if partner.PubKey != "" {
