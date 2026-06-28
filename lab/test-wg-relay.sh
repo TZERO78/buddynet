@@ -38,8 +38,6 @@ SRVPUB=$("$BN" --key "$D/srv.key" identity)
 APUB=$("$BN" --key "$D/a.key" identity)
 BPUB=$("$BN" --key "$D/b.key" identity)
 echo "server=$SRVPUB"; echo "A=$APUB"; echo "B=$BPUB"
-# WG-only: the server's WG peers ARE the allowlist (kernel WG admits only known keys).
-printf '%s a\n%s b\n' "$APUB" "$BPUB" > "$D/auth.txt"
 
 echo "== bridge topology (ns-srv/a/b on br0 in ns-sw) =="
 sudo ip netns add ns-sw; sudo ip netns add ns-srv; sudo ip netns add ns-a; sudo ip netns add ns-b
@@ -72,11 +70,10 @@ run_buddy() { # $1 ns, $2 keyfile, $3 peerpub, $4 logfile
 	PIDS="$PIDS $!"
 }
 
-echo "== handshake+relay server (WireGuard control plane; advertises itself as relay) =="
+echo "== handshake+relay server (advertises itself as relay) =="
 sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
 	--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
 	--relay-endpoint 10.50.0.10:51821 \
-	--wireguard --authorized "$D/auth.txt" \
 	--key "$D/srv.key" >"$D/srv.log" 2>&1 &
 PIDS="$PIDS $!"
 sleep 1

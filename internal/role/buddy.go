@@ -113,11 +113,6 @@ type BuddyConfig struct {
 	// reconnect secret is the static-DH PairSecret. Direct P2P only for now
 	// (relay-over-WireGuard is a later step). Fails closed if WG is unavailable.
 	WireGuard bool
-
-	// WGControlPort is the inner (on-VIP) UDP port REGISTER/PEER_LIST use when
-	// matchmaking runs over the WireGuard control plane. 0 = DefaultWGControlPort.
-	// Must match the server's --wireguard-control-port.
-	WGControlPort int
 }
 
 // attempt is the per-connection plan: which rendezvous token to register with,

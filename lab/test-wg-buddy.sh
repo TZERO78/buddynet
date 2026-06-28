@@ -16,10 +16,9 @@ BN=/tmp/wgb/bn
 D=/tmp/wgb
 TOKEN=lab-wg-e2e-token
 
-kill_actors() { set +e; sudo pkill -f "$BN" 2>/dev/null; set -e; }
 cleanup() {
 	set +e
-	kill_actors
+	for p in ${PIDS:-}; do sudo kill "$p" 2>/dev/null; done
 	for ns in ns-srv ns-a ns-b ns-sw; do sudo ip netns del "$ns" 2>/dev/null; done
 }
 trap cleanup EXIT
@@ -35,8 +34,6 @@ SRVPUB=$("$BN" --key "$D/srv.key" identity)
 APUB=$("$BN" --key "$D/a.key" identity)
 BPUB=$("$BN" --key "$D/b.key" identity)
 echo "server=$SRVPUB"; echo "A=$APUB"; echo "B=$BPUB"
-# WG-only control plane (phase 1): the server's WG peers ARE the allowlist.
-printf '%s a\n%s b\n' "$APUB" "$BPUB" > "$D/auth.txt"
 
 echo "== bridge topology (ns-srv/a/b on br0 in ns-sw) =="
 sudo ip netns add ns-sw; sudo ip netns add ns-srv; sudo ip netns add ns-a; sudo ip netns add ns-b
@@ -61,13 +58,10 @@ run_buddy() { # $1 ns, $2 keyfile, $3 peerpub, $4 extra-flags, $5 logfile
 	PIDS="$PIDS $!"
 }
 
-start_server() { # $1 mode: wg (WireGuard control plane) | plain (UDP control plane)
-	local extra=""
-	[ "${1:-plain}" = wg ] && extra="--wireguard --authorized $D/auth.txt"
-	# shellcheck disable=SC2086
+start_server() {
 	sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
 		--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
-		--key "$D/srv.key" --relay-endpoint 10.50.0.10:51821 $extra >"$D/srv.log" 2>&1 &
+		--key "$D/srv.key" --relay-endpoint 10.50.0.10:51821 >"$D/srv.log" 2>&1 &
 	PIDS="$PIDS $!"
 }
 
@@ -79,8 +73,8 @@ assert_connected() { # $1 logfile, $2 expected-via, $3 label
 }
 
 FAIL=0
-echo "== PHASE 1: --wireguard direct P2P (WireGuard control plane) =="
-start_server wg; sleep 1.5
+echo "== PHASE 1: --wireguard direct P2P =="
+start_server; sleep 1
 run_buddy a "$D/a.key" "$BPUB" "--wireguard" "$D/a.log"
 run_buddy b "$D/b.key" "$APUB" "--wireguard" "$D/b.log"
 if assert_connected "$D/a.log" "direct P2P (WireGuard)" "buddy-a" && \
@@ -98,10 +92,9 @@ else
 	tail -5 "$D/a.log" | sed 's/^/    a| /'
 fi
 
-# Phase 1 used a WireGuard control plane; phase 2 (QUIC) needs a plain UDP one, so
-# restart everything and bring the server back in plain mode.
-kill_actors; sleep 2; PIDS=""
-start_server plain; sleep 1.5
+# tear down phase-1 buddies (keep server)
+for p in $PIDS; do sudo kill "$p" 2>/dev/null; done; PIDS=""; sleep 1
+start_server >/dev/null 2>&1 || true
 
 echo "== PHASE 2: QUIC default (no --wireguard) — no regression =="
 : > "$D/a2.log"; : > "$D/b2.log"
