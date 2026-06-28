@@ -37,10 +37,6 @@ type HandshakeConfig struct {
 	TTL        time.Duration // liveness window for a registration
 	Debug      bool          // verbose, security-sensitive logging
 	QUIC       bool          // run the control plane over QUIC instead of plain UDP
-	WireGuard  bool          // run the control plane over kernel WireGuard (requires --authorized: the allowlist is the WG peer set)
-	// WGControlPort is the inner (on-VIP) UDP port REGISTER/PEER_LIST use over the
-	// WireGuard control plane. 0 = DefaultWGControlPort. Must match on every buddy.
-	WGControlPort int
 	// RelayEndpoint, if set, is advertised to every paired buddy as a relay of
 	// last resort — use it when this VPS also runs --role=relay (commonly on a
 	// second port). Buddies fall back to it only after a direct punch fails.
@@ -391,16 +387,10 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		log.Printf("source allowlist ON: only %v may register", cfg.AllowCIDRs)
 	}
 
-	// Transport choice: WireGuard admits only allowlisted peers (the allowlist is
-	// the WG peer set), QUIC validates the source address in its handshake, plain
-	// UDP gets the same property from the address-validation cookie. All reuse the
-	// same pairing core. WG is checked first because it needs its own socket (the
-	// kernel WG interface) rather than the plain-UDP conn opened above.
-	if cfg.WireGuard {
-		conn.Close() // WG serves on its own interface socket, not this plain-UDP one
-		log.Print("handshake control plane: kernel WireGuard (admits only --authorized peers; source validated by the WG handshake)")
-		return serveControlWG(ctx, priv, authz, cfg, reg, rl)
-	}
+	// Transport choice: QUIC validates the source address in its handshake (and, in
+	// approval mode, pins clients to the allowlist at the TLS handshake), plain UDP
+	// gets source validation from the address-validation cookie. Both reuse the same
+	// pairing core.
 	if cfg.QUIC {
 		log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
 		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl, cfg.AllowCIDRs)

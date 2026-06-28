@@ -237,14 +237,11 @@ Lazy tunnel (--lazy) — defer the tunnel until the first -L connection (needs -
   <option value="enable"  <?=v($cfg,'LAZY')=='enable'?'selected':''?>>Enabled</option>
   </select>
 
-WireGuard (--wireguard) — run BOTH matchmaking and the data tunnel over kernel WireGuard. The server must run in approval mode (--authorized) with THIS node's key allowlisted, and the Buddy key above must be pinned:
+WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGuard instead of QUIC; the partner is reachable natively at its VIP (10.66.X.Y). Needs the Buddy key above pinned:
 : <select name="WIREGUARD">
   <option value="disable" <?=v($cfg,'WIREGUARD')=='disable'?'selected':''?>>Disabled</option>
   <option value="enable"  <?=v($cfg,'WIREGUARD')=='enable'?'selected':''?>>Enabled</option>
   </select>
-
-WireGuard control port (--wireguard-control-port) — must be the SAME on the server and every buddy; leave empty for the default (51822):
-: <input type="text" name="WG_CONTROL_PORT" value="<?=v($cfg,'WG_CONTROL_PORT')?>" placeholder="51822 (default)">
 
 &nbsp;
 : <input type="submit" value="Apply">
@@ -396,13 +393,9 @@ start() {
       echo "WARNING: Lazy tunnel is enabled but no -L (Expose local port) is set — ignoring --lazy." >>"$LOG"
     fi
   fi
-  # WireGuard: matchmaking AND the data tunnel run over kernel WireGuard. The
-  # server must run --wireguard --authorized with this node's key allowlisted; the
-  # control port (if set) must match the server's --wireguard-control-port.
-  if [ "$WIREGUARD" = "enable" ]; then
-    args+=(--wireguard)
-    [ -n "$WG_CONTROL_PORT" ] && args+=(--wireguard-control-port "$WG_CONTROL_PORT")
-  fi
+  # WireGuard data plane: the peer tunnel runs over kernel WireGuard (the partner
+  # is reachable natively at its VIP). Control plane stays QUIC/plain.
+  [ "$WIREGUARD" = "enable" ] && args+=(--wireguard)
   # Prefer the token from a file on the array (real 0600 perms) over the flash
   # cfg value; /boot is FAT and cannot enforce permissions. Only override when the
   # file is non-empty and readable (an empty file must not blank out the token).

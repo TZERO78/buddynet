@@ -131,7 +131,6 @@ func main() {
 	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
 	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
 	wireguard := flag.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y), direct or over a relay; -L/-forward/--vip-listen are not needed on this path (and are ignored).")
-	wgControlPort := flag.Int("wireguard-control-port", role.DefaultWGControlPort, "UDP port the WireGuard control plane uses for REGISTER/PEER_LIST inside the tunnel (on the server VIP). Set the SAME value on the server and every buddy; must be free on the server and not equal to the WireGuard underlay (--listen) or relay (--relay-listen) port.")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
 	flag.Usage = usage
@@ -233,7 +232,6 @@ func main() {
 		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
 		reauthInterval: *reauthInterval,
 		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
-		wgControlPort: *wgControlPort,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -277,7 +275,7 @@ func main() {
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
 					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
-					QUIC: *quicHandshake, WireGuard: *wireguard, WGControlPort: *wgControlPort, AllowCIDRs: allowedCIDRs,
+					QUIC: *quicHandshake, AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
@@ -379,7 +377,6 @@ type buddyArgs struct {
 	localListen, forward, vipListen, name                                   string
 	lab, status, interactive, ephemeral, quic, dns, lazy, wireguard         bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
-	wgControlPort                                                           int
 }
 
 // config maps the parsed flags onto the role package's BuddyConfig.
@@ -394,7 +391,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
-		WireGuard: a.wireguard, WGControlPort: a.wgControlPort,
+		WireGuard: a.wireguard,
 	}
 }
 
