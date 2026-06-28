@@ -1,7 +1,14 @@
-// Package tunnel is the data plane: it brings up an end-to-end-encrypted,
+// Package tunnel is the default data plane: it brings up an end-to-end-encrypted,
 // multiplexed session between two nodes and carries plain TCP across it. The
-// transport is hidden behind an interface so v1 can ship on QUIC while v2 drops
-// in WireGuard without the roles above it changing a line.
+// transport is hidden behind an interface; the shipping implementation is QUIC
+// (TLS 1.3, multiplexed streams).
+//
+// The opt-in kernel-WireGuard data plane (--wireguard, internal/wg +
+// internal/role/wgpath.go) is deliberately NOT a Transport: it is packet/L3
+// oriented (one kernel WG interface per buddy, the partner reachable natively at
+// its VIP), so it cannot satisfy the stream-shaped Session contract below
+// (OpenStream/CloseWrite/ExportKeyingMaterial). It is a separate, parallel plane
+// that reuses the same control plane and fallback chain — see docs/WIREGUARD.md.
 //
 // The session model matches the BuddyNet stream layout:
 //
@@ -18,14 +25,9 @@ package tunnel
 
 import (
 	"context"
-	"errors"
 	"io"
 	"net"
 )
-
-// ErrNotImplemented is returned by transports whose backend is a future-version
-// seam (e.g. WireGuard in v1).
-var ErrNotImplemented = errors.New("tunnel: transport not implemented in this build")
 
 // Stream is one bidirectional, ordered byte stream within a Session. CloseWrite
 // half-closes the send direction (signals EOF to the peer) while still draining
