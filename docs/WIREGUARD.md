@@ -10,6 +10,15 @@ the whole control plane (matchmaking, signed `PEER_LIST`, pinning/TOFU, the
 fallback chain, the blind relay, the 48-buddy cap) is unchanged. No protocol
 version bump: the wire format between buddy and server is identical.
 
+> **The control plane is always QUIC/plain — never WireGuard.** Matchmaking runs
+> over `--quic-handshake` (encrypted, source-validated, and — with `--authorized` —
+> pinning clients to the allowlist at the TLS handshake; see
+> [OPERATIONS.md](OPERATIONS.md) and [APPROVAL.md](APPROVAL.md)). Keeping control
+> off WireGuard is deliberate: the server would otherwise key peers by identity and
+> a buddy's N concurrent registrations would collide, breaking per-buddy endpoint
+> discovery and MultiPeer — the same reason Tailscale/Netbird keep their control
+> plane off WireGuard. `--wireguard` is purely the data plane.
+
 ## Why WireGuard
 
 The QUIC path forwards TCP over streams (`-L`/`-forward`). WireGuard instead gives

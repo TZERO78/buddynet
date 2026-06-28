@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Known-buddies control plane: QUIC client-key pinning in approval mode.** With
+  `--quic-handshake --authorized`, the handshake server now pins clients by key at
+  the **TLS handshake** — every buddy presents its Ed25519 identity certificate and
+  a key not on the allowlist is refused *before* it can send a `REGISTER` (the same
+  early rejection a firewall gives, enforced cryptographically; no PKI — the key is
+  pinned directly, mirroring how the buddy already pins the server key). Open mode
+  (no `--authorized`) is unchanged: any client may connect and pairing is gated by
+  the secret token at the application layer. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+  The control plane is always QUIC/plain — never WireGuard — so per-buddy endpoint
+  discovery and MultiPeer keep working.
 - **Kernel-WireGuard data plane (`--wireguard`, Phase 3).** Opt-in second data
   plane (set on both buddies): instead of QUIC streams, the tunnel runs over a
   kernel WireGuard interface and the partner is reachable natively at its VIP

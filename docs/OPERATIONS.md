@@ -46,6 +46,37 @@ CLEARTEXT — use --quic-handshake on the server and every buddy to encrypt
 the control plane.
 ```
 
+### Locking the control plane to known buddies (`--authorized`)
+
+In **approval mode** (`--authorized <allowlist>`) the QUIC control plane pins
+clients by key at the **TLS handshake**: every buddy presents its Ed25519 identity
+certificate, and the server rejects any key not on the allowlist **before** it can
+send a `REGISTER`. A non-allowlisted node never reaches the matchmaking logic — the
+same early rejection a firewall gives, enforced cryptographically (no PKI; the key
+is pinned directly, mirroring how the buddy pins the server key). The server logs:
+
+```
+approval mode: QUIC control pins clients to the allowlist at the TLS handshake
+```
+
+```bash
+# Server: only allowlisted buddy keys may even open a control connection
+buddynet --role=handshake --quic-handshake \
+  --authorized /var/lib/buddynet/clients.txt --key /var/lib/buddynet/id.key
+
+# Approve a buddy (get its key with `buddynet identity` on that node):
+buddynet --authorized /var/lib/buddynet/clients.txt allowclient <buddy-key>
+```
+
+Without `--authorized` (open mode) the QUIC handshake still encrypts the exchange
+and validates the source, but any client may connect and pairing is gated only by
+the secret token at the application layer. See [APPROVAL.md](APPROVAL.md).
+
+> This is BuddyNet's "known buddies only" control plane. The data plane can run
+> over QUIC (default) or kernel WireGuard (`--wireguard`); the control plane is
+> always QUIC/plain — never WireGuard — so per-buddy endpoint discovery and
+> MultiPeer keep working (see [WIREGUARD.md](WIREGUARD.md)).
+
 ### Environment variable
 
 ```bash
