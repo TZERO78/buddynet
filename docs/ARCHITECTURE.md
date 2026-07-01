@@ -118,11 +118,6 @@ type Transport interface {
   [`internal/role/wgpath.go`](../internal/role/wgpath.go). See
   **[WIREGUARD.md](WIREGUARD.md)**.
 
-> [`internal/tunnel/wireguard.go`](../internal/tunnel/wireguard.go) is a now-stale
-> sketch of an *earlier* idea — a userspace-WireGuard `Transport` exposing the tun
-> as streams. The shipped Phase-3 design took a different route (kernel WireGuard,
-> native VIP, no stream seam); that placeholder is slated for removal.
-
 ## Why the relay stays blind
 
 The buddies run **their own** end-to-end QUIC/TLS between each other. A relay

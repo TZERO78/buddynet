@@ -39,44 +39,51 @@ const (
 	maxCtrlConns   = 256   // concurrent QUIC control connections the server services
 )
 
-// pinnedPeerVerify returns a TLS VerifyPeerCertificate that accepts the peer
-// only if its certificate carries exactly want — the same key-pinning used by
-// the data plane, with no CA or hostname.
+// peerEd25519FromCerts extracts the peer's Ed25519 identity from the leaf
+// certificate of a TLS handshake (PKI-free: the key IS the identity). Shared by
+// the server- and client-key pinning verifiers below.
+func peerEd25519FromCerts(rawCerts [][]byte) (ed25519.PublicKey, error) {
+	if len(rawCerts) == 0 {
+		return nil, errors.New("peer presented no certificate")
+	}
+	c, err := x509.ParseCertificate(rawCerts[0])
+	if err != nil {
+		return nil, err
+	}
+	pk, ok := c.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return nil, errors.New("peer certificate is not an Ed25519 identity")
+	}
+	return pk, nil
+}
+
+// pinnedPeerVerify returns a TLS VerifyPeerCertificate that accepts the peer only
+// if its certificate carries exactly want — the same key-pinning used by the data
+// plane, with no CA or hostname.
 func pinnedPeerVerify(want ed25519.PublicKey) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
-			return errors.New("peer presented no certificate")
-		}
-		c, err := x509.ParseCertificate(rawCerts[0])
+		pk, err := peerEd25519FromCerts(rawCerts)
 		if err != nil {
 			return err
 		}
-		pk, ok := c.PublicKey.(ed25519.PublicKey)
-		if !ok || !pk.Equal(want) {
+		if !pk.Equal(want) {
 			return errors.New("peer identity does not match the expected key (possible MITM)")
 		}
 		return nil
 	}
 }
 
-// clientKeyVerify returns a TLS VerifyPeerCertificate (server side) that extracts
-// the client's Ed25519 identity from its certificate and defers the accept/reject
-// decision to allow. It lets the handshake server pin CLIENTS to its allowlist
-// during the TLS handshake — so a non-allowlisted buddy is refused before it can
-// send a REGISTER (the same early rejection kernel WireGuard gives), not merely at
-// the app layer afterwards. Used only in approval mode; open mode passes nil.
+// clientKeyVerify returns a TLS VerifyPeerCertificate (server side) that hands the
+// client's Ed25519 identity to allow. It lets the handshake server pin CLIENTS to
+// its allowlist during the TLS handshake — so a non-allowlisted buddy is refused
+// before it can send a REGISTER (the same early rejection kernel WireGuard gives),
+// not merely at the app layer afterwards. Used only in approval mode; open mode
+// passes nil.
 func clientKeyVerify(allow func(ed25519.PublicKey) error) func([][]byte, [][]*x509.Certificate) error {
 	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		if len(rawCerts) == 0 {
-			return errors.New("client presented no certificate")
-		}
-		c, err := x509.ParseCertificate(rawCerts[0])
+		pk, err := peerEd25519FromCerts(rawCerts)
 		if err != nil {
 			return err
-		}
-		pk, ok := c.PublicKey.(ed25519.PublicKey)
-		if !ok {
-			return errors.New("client certificate is not an Ed25519 identity")
 		}
 		return allow(pk)
 	}
