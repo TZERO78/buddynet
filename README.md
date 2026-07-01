@@ -159,9 +159,10 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   buddy prints its identity at startup). Without `--peer-key`, trust-on-first-use
   is used — but on that first connect both sides show a **Short Authentication
   String**: a 6-character code (e.g. `K7QX2M`) derived from both keys and the
-  live TLS session. Read it to your buddy over a trusted channel (phone, Signal);
-  confirm only if they match. A man in the middle makes the two sides show a
-  *different* code, so you catch it before any key is trusted. After that the key
+  live TLS session. Call your buddy over a trusted channel (phone, Signal), read
+  them your code and type in theirs (both sides do — it is mutual). A man in the
+  middle makes the two sides show a *different* code, so it will not match and you
+  catch it before any key is trusted. After that the key
   is pinned and checked silently. For daemons set `--no-interactive` and pin with
   `--peer-key` (an unknown key is then refused, never learned blind).
 - The token is a **bearer secret** — keep it off the command line (use a `0600`
