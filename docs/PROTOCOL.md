@@ -1,13 +1,16 @@
-# BuddyNet Protocol v1
+# BuddyNet Protocol
 
 The control plane is **UDP + JSON**, one datagram per message. The single source
 of truth is [`pkg/protocol`](../pkg/protocol); a one-byte drift between
 implementations would break signature verification, so anything that crosses the
 wire or is signed lives there and nowhere else.
 
-- **Version:** `3` (`protocol.Version`). Every message stamps `ver`; a mismatch
-  is reported clearly instead of failing as an opaque signature error. v3 added
-  the relay bind address-validation cookie (see "Relay bind handshake").
+- **Version:** `6` (`protocol.Version`). Every message stamps `ver`; a mismatch
+  is reported clearly instead of failing as an opaque signature error. Server and
+  buddies must run the same version. Notable bumps: **v3** added the relay bind
+  address-validation cookie (see "Relay bind handshake"), **v4** widened the
+  virtual IP to a `/16` (`10.66.X.Y`), **v6** lets the pairing token travel sealed
+  to the server's pinned key (`token_enc`) instead of in cleartext.
 - **Field cap:** untrusted strings are bounded by `MaxFieldLen` (128) before
   being used as map keys.
 
@@ -16,7 +19,7 @@ wire or is signed lives there and nowhere else.
 ```jsonc
 {
   "type": "REGISTER|PEER_LIST|COOKIE|RELAY_OFFER|CONNECT|PING|PONG",
-  "ver":  2,
+  "ver":  6,
   // ...type-specific fields, all omitempty...
 }
 ```
@@ -30,6 +33,7 @@ candidate and the same NAT mapping is reused for the tunnel.
 | Field | Meaning |
 |---|---|
 | `token` | the **rendezvous secret** the server pairs on: a one-time invite token on first pairing, or the derived session secret on later reconnects (see *Pairing secret* below). The server treats it as opaque. |
+| `token_enc` | the same rendezvous secret, but **sealed to the server's pinned key** (NaCl sealed box; v6). Preferred over cleartext `token` so an on-path observer on plain UDP sees only ciphertext; the server unseals it to the same value. |
 | `role` | `buddy` / `relay` |
 | `id` | ephemeral per-run id (dedupes a peer's v4+v6 registrations) |
 | `pubkey` | base64 Ed25519 identity |
