@@ -67,43 +67,90 @@ func ComputeSAS(myPub, peerPub ed25519.PublicKey, sessionID []byte) string {
 	return string(out[:])
 }
 
-// PromptSAS shows the safety check and waits for the human to confirm the SAS
-// matches their buddy's. Anything other than an explicit yes — including no
-// answer within timeout — is treated as a mismatch and returns ErrSASRejected,
-// so a silent/automated context never blindly trusts a new key. It reads from
-// stdin and writes the prompt to stderr (so a piped stdout stays clean).
+// PromptSAS shows this side's Short Authentication String and waits for the human
+// to TYPE IN the code their buddy reads to them over a trusted channel. Requiring
+// the code to be entered — rather than a bare "yes" — means it cannot be confirmed
+// without actually receiving it out of band, so a reflexive keypress no longer
+// trusts an unverified key. Under a man in the middle the two ends derive DIFFERENT
+// codes (channel binding), so what the buddy reads will not match what this side
+// expects and the entry is rejected. Anything that does not match — including no
+// answer within timeout — returns ErrSASRejected/ErrSASTimeout, so a silent or
+// automated context never blindly trusts a new key. Both buddies run this on first
+// contact, so the check is mutual: each reads its own code and types the other's.
+// The prompt goes to stderr (so a piped stdout stays clean); the code is read from
+// stdin.
 func PromptSAS(sas string, timeout time.Duration) error {
 	fmt.Fprintf(os.Stderr, `
 🔑 Safety check — first contact with this buddy.
-   Read this code to your buddy over a trusted channel (phone, Signal) and check
-   it matches what THEY see. If it differs, someone may be in the middle — abort.
+   Call your buddy over a trusted channel (phone, Signal). Read them YOUR code,
+   then type the code THEY read back to you. If someone is in the middle the two
+   codes differ, so it will not match — abort.
 
-        %s
+        your code:  %s
 
-   Confirm only if BOTH sides show the SAME code.
    No answer within %s counts as a mismatch (abort).
-Do they match? [y/N] `, sas, timeout)
+Type your buddy's code: `, sas, timeout)
 
-	return readSASConfirmation(timeout)
+	line, err := readSASLine(timeout)
+	if err != nil {
+		return err
+	}
+	if sasMatches(line, sas) {
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "code does not match — aborting (key NOT trusted).")
+	return ErrSASRejected
 }
 
-// readSASConfirmation reads one line of confirmation from stdin within timeout.
-// It prefers a read deadline, so the read itself unblocks on timeout and no
-// reader goroutine can outlive the call. On a stdin that does not support
-// deadlines (a regular-file redirect) it falls back to a background reader —
-// there the read returns promptly (data or EOF) anyway, so nothing leaks.
-func readSASConfirmation(timeout time.Duration) error {
+// sasMatches reports whether a human-typed code equals the expected SAS after
+// forgiving normalisation, so a correct code is never rejected over cosmetics.
+func sasMatches(typed, expected string) bool {
+	return normalizeSAS(typed) == expected
+}
+
+// normalizeSAS canonicalises a typed code: upper-case, drop spaces/hyphens the
+// user may have added, and fold the Crockford-base32 look-alikes a person tends to
+// mistype (O→0, I/L→1). The expected SAS is already upper-case Crockford without
+// O/I/L, so normalising the input and comparing for equality is exact.
+func normalizeSAS(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToUpper(s) {
+		switch r {
+		case ' ', '-', '\t', '\r', '\n':
+			continue
+		case 'O':
+			b.WriteByte('0')
+		case 'I', 'L':
+			b.WriteByte('1')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// readSASLine reads one line from stdin within timeout. It prefers a read
+// deadline, so the read itself unblocks on timeout and no reader goroutine can
+// outlive the call. On a stdin that does not support deadlines (a regular-file
+// redirect) it falls back to a background reader — there the read returns promptly
+// (data or EOF) anyway, so nothing leaks. A timeout returns ErrSASTimeout; a read
+// error with no data returns ErrSASRejected. A final line without a trailing
+// newline (EOF right after the code) is still accepted.
+func readSASLine(timeout time.Duration) (string, error) {
 	if err := os.Stdin.SetReadDeadline(time.Now().Add(timeout)); err == nil {
 		defer os.Stdin.SetReadDeadline(time.Time{})
 		line, rerr := bufio.NewReader(os.Stdin).ReadString('\n')
 		if rerr != nil {
 			if errors.Is(rerr, os.ErrDeadlineExceeded) {
 				fmt.Fprintln(os.Stderr, "\n⏰ no answer — aborting (key NOT trusted).")
-				return ErrSASTimeout
+				return "", ErrSASTimeout
 			}
-			return ErrSASRejected
+			if line != "" { // EOF right after the code, no newline
+				return line, nil
+			}
+			return "", ErrSASRejected
 		}
-		return decideSAS(line)
+		return line, nil
 	}
 
 	// Fallback path (stdin has no deadline support, e.g. `buddynet ... < file`).
@@ -120,23 +167,11 @@ func readSASConfirmation(timeout time.Duration) error {
 	select {
 	case <-time.After(timeout):
 		fmt.Fprintln(os.Stderr, "\n⏰ no answer — aborting (key NOT trusted).")
-		return ErrSASTimeout
+		return "", ErrSASTimeout
 	case r := <-ch:
-		if r.err != nil {
-			return ErrSASRejected
+		if r.err != nil && r.line == "" {
+			return "", ErrSASRejected
 		}
-		return decideSAS(r.line)
-	}
-}
-
-// decideSAS maps a human's answer line to the trust decision: an explicit yes
-// trusts the key, anything else (including blank) refuses it.
-func decideSAS(line string) error {
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return nil
-	default:
-		fmt.Fprintln(os.Stderr, "aborted — key NOT trusted.")
-		return ErrSASRejected
+		return r.line, nil
 	}
 }

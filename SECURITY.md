@@ -61,22 +61,27 @@ partner." BuddyNet closes this with a trust hierarchy (strongest first):
 
    ```
    🔑 Safety check — first contact with this buddy.
-           K7QX2M
-   Do they match? [y/N]
+           your code:  K7QX2M
+   Type your buddy's code: _
    ```
 
-   Read it to your buddy over a **trusted out-of-band channel** (phone, Signal)
-   and confirm only if **both sides show the same code**. Because the code is
-   bound to the live TLS session (channel binding), a man in the middle — who
-   terminates a *different* TLS session to each side — makes the two codes
-   differ. This catches the MITM **at first contact**, not after the fact, and
-   it holds **even against a malicious handshake server**: a substituted key
-   yields a mismatching SAS. On confirm the key is pinned (indexed by a *hash* of
-   the token, never the token in clear) and later connects are checked silently.
+   Call your buddy over a **trusted out-of-band channel** (phone, Signal), read
+   them **your** code, and **type in the code they read to you**. Both buddies do
+   this, so the check is mutual. Because the code is bound to the live TLS session
+   (channel binding), a man in the middle — who terminates a *different* TLS
+   session to each side — makes the two codes differ, so what your buddy reads
+   will not match and the entry is rejected. This catches the MITM **at first
+   contact**, not after the fact, and it holds **even against a malicious
+   handshake server**: a substituted key yields a mismatching code. On a match the
+   key is pinned (indexed by a *hash* of the token, never the token in clear) and
+   later connects are checked silently.
 
-   > **The one assumption you cannot remove:** the SAS only protects you if a
-   > human actually compares it. Reflexively pressing `y` defeats it. For
-   > unattended links, use `--peer-key` instead.
+   > **Why type it, not press `y`:** requiring the code to be *entered* means it
+   > cannot be confirmed without actually receiving it out of band — a reflexive
+   > keypress no longer trusts an unverified key. The residual is a user who types
+   > their **own** displayed code instead of the one they heard; that is far more
+   > deliberate than a single `y`, but for unattended links use `--peer-key`, which
+   > removes the human step entirely.
 
 3. **`--lab`** — no verification at all. Must be set explicitly, logged
    loudly, **testing only.** Never use it on a daemon or a server-side host.

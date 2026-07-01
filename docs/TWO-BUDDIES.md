@@ -73,16 +73,17 @@ String** before the key is trusted:
 
 ```
 🔑 Safety check — first contact with this buddy.
-        K7QX2M
-Do they match? [y/N]
+        your code:  K7QX2M
+Type your buddy's code: _
 ```
 
-The code is derived from both identities and the live TLS session. Read it to
-your buddy over a trusted channel (phone, Signal) and confirm only if **both
-sides show the same** code. A man in the middle terminates a different TLS
-session to each side, so the two codes differ — that is how you catch it. On a
-mismatch (or no answer within `--sas-timeout`, default 30s) the connection is
-dropped and nothing is trusted. Later connects check the pinned key silently.
+The code is derived from both identities and the live TLS session. Call your
+buddy over a trusted channel (phone, Signal), read them **your** code, and **type
+in the code they read to you** (both sides do this — the check is mutual). A man
+in the middle terminates a different TLS session to each side, so the two codes
+differ and the entry will not match — that is how you catch it. On a mismatch (or
+no answer within `--sas-timeout`, default 30s) the connection is dropped and
+nothing is trusted. Later connects check the pinned key silently.
 
 For unattended buddies (daemons, Unraid), there is no human to confirm: set
 `--no-interactive` and pin the key with `--peer-key` up front. An unknown key is

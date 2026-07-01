@@ -61,7 +61,8 @@ func TestComputeSASDetectsMITM(t *testing.T) {
 	}
 }
 
-// PromptSAS confirms only on an explicit yes; no/garbage/timeout all reject.
+// PromptSAS confirms only when the typed code matches; a wrong code, a bare "yes"
+// (no longer accepted — the code must be entered), or a timeout all reject.
 func TestPromptSAS(t *testing.T) {
 	// Silence the prompt written to stderr during the test.
 	devnull, _ := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
@@ -78,17 +79,23 @@ func TestPromptSAS(t *testing.T) {
 		return PromptSAS("K7QX2M", 2*time.Second)
 	}
 
-	if err := withStdin("y\n"); err != nil {
-		t.Errorf("'y' should confirm, got %v", err)
+	if err := withStdin("K7QX2M\n"); err != nil {
+		t.Errorf("correct code should confirm, got %v", err)
 	}
-	if err := withStdin("yes\n"); err != nil {
-		t.Errorf("'yes' should confirm, got %v", err)
+	if err := withStdin("k7 qx2m\n"); err != nil { // case + spaces are forgiven
+		t.Errorf("normalised correct code should confirm, got %v", err)
 	}
-	if err := withStdin("n\n"); err != ErrSASRejected {
-		t.Errorf("'n' should reject, got %v", err)
+	if err := withStdin("K7QX2M"); err != nil { // EOF right after the code, no newline
+		t.Errorf("correct code without trailing newline should confirm, got %v", err)
 	}
-	if err := withStdin("maybe\n"); err != ErrSASRejected {
-		t.Errorf("garbage should reject, got %v", err)
+	if err := withStdin("AAAAAA\n"); err != ErrSASRejected {
+		t.Errorf("wrong code should reject, got %v", err)
+	}
+	if err := withStdin("yes\n"); err != ErrSASRejected {
+		t.Errorf("'yes' is no longer a valid confirmation, should reject, got %v", err)
+	}
+	if err := withStdin("\n"); err != ErrSASRejected {
+		t.Errorf("blank line should reject, got %v", err)
 	}
 
 	// Timeout with no input must reject (never silently confirm), distinctly from
@@ -98,5 +105,27 @@ func TestPromptSAS(t *testing.T) {
 	defer w.Close()
 	if err := PromptSAS("K7QX2M", 100*time.Millisecond); err != ErrSASTimeout {
 		t.Errorf("timeout should return ErrSASTimeout, got %v", err)
+	}
+}
+
+// normalizeSAS forgives cosmetics (case, spaces, hyphens) and the Crockford
+// look-alikes a human mistypes (O→0, I/L→1), so a correct code is never rejected.
+func TestSASMatches(t *testing.T) {
+	cases := []struct {
+		typed, expected string
+		want            bool
+	}{
+		{"K7QX2M", "K7QX2M", true},
+		{"k7qx2m", "K7QX2M", true},
+		{" K7-QX2M ", "K7QX2M", true},
+		{"OQIZM2", "0Q1ZM2", true}, // O→0, I→1
+		{"lqizm2", "1Q1ZM2", true}, // l→1, i→1
+		{"K7QX2N", "K7QX2M", false},
+		{"", "K7QX2M", false},
+	}
+	for _, c := range cases {
+		if got := sasMatches(c.typed, c.expected); got != c.want {
+			t.Errorf("sasMatches(%q, %q) = %v, want %v", c.typed, c.expected, got, c.want)
+		}
 	}
 }
