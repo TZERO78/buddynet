@@ -4,25 +4,25 @@ import (
 	"crypto/ed25519"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/tabwriter"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/peer"
 )
 
 // This file holds the `peers` subcommands a node uses to curate its OWN list of
-// buddies (list/add/remove). There is no admin authority here: BuddyNet is
-// decentralised and self-sovereign, so each node manages only its own manifest —
-// distrusting a buddy is a local decision that never affects the other peers.
-// Removal is the security-relevant one: it drops both the manifest line AND the
-// stored session secret, so a dropped buddy is fully revoked locally and not
-// silently reconnected (see removeSession).
+// buddies (list/add/remove/migrate). There is no admin authority here: BuddyNet
+// is decentralised and self-sovereign, so each node manages only its own
+// manifest — distrusting a buddy is a local decision that never affects the
+// other peers. Removal is the security-relevant one: it drops both the manifest
+// entry AND the stored session secret, so a dropped buddy is fully revoked
+// locally and not silently reconnected (see removeSession).
 
 // PeersList prints every configured buddy and whether it is already paired (has a
-// stored session). Buddies with a stored session but no manifest line — e.g.
+// stored session). Buddies with a stored session but no manifest entry — e.g.
 // peers paired before the manifest existed — are listed too, marked accordingly,
 // since the supervisor maintains them as well.
 func PeersList(peersFile, knownPeers, peersPath string) error {
@@ -42,17 +42,19 @@ func PeersList(peersFile, knownPeers, peersPath string) error {
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	rows := 0
-	emit := func(pin ed25519.PublicKey, status, tok, source string) {
+	emit := func(pin ed25519.PublicKey, name, status, tok, expose, source string) {
 		keyB64 := bcrypto.PubKeyB64(pin)
-		name := names[keyB64]
+		if name == "" {
+			name = names[keyB64]
+		}
 		if name == "" {
 			name = "—"
 		}
 		if rows == 0 {
-			fmt.Fprintln(w, "VIP\tNAME\tSTATUS\tKEY\tTOKEN\tSOURCE")
+			fmt.Fprintln(w, "VIP\tNAME\tSTATUS\tKEY\tTOKEN\tEXPOSE\tSOURCE")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
-			bcrypto.VirtualIPString(pin), name, status, shortKeyTag(keyB64), tok, source)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			bcrypto.VirtualIPString(pin), name, status, shortKeyTag(keyB64), tok, expose, source)
 		rows++
 	}
 
@@ -68,14 +70,18 @@ func PeersList(peersFile, knownPeers, peersPath string) error {
 		if s.token != "" {
 			tok = "token-set"
 		}
-		emit(s.pin, status, tok, "manifest")
+		expose := "(inherit)" // no per-buddy scope: --expose flag, else fail-closed
+		if s.expose != nil {
+			expose = s.expose.String()
+		}
+		emit(s.pin, s.name, status, tok, expose, "manifest")
 	}
 	for _, s := range sessions {
 		keyB64 := bcrypto.PubKeyB64(s.pin)
 		if inManifest[keyB64] {
 			continue
 		}
-		emit(s.pin, "paired", "—", "session-only")
+		emit(s.pin, "", "paired", "—", "(inherit)", "session-only")
 	}
 	if rows == 0 {
 		fmt.Println("(no buddies configured yet)")
@@ -95,10 +101,9 @@ func shortKeyTag(keyB64 string) string {
 }
 
 // loadPeerNames best-effort resolves pubkey -> self-asserted name from the
-// offline peer cache (peers.json). Names aren't kept in the manifest or the
-// session store; they're learned via the server's PEER_LIST and cached here, so
-// the map is empty until a buddy has been seen. A missing/unreadable cache is
-// not an error — the name column just shows "—".
+// offline peer cache (peers.json). Manifest names take precedence in PeersList;
+// this covers buddies without one, learned via the server's PEER_LIST. A
+// missing/unreadable cache is not an error — the name column just shows "—".
 func loadPeerNames(peersPath string) map[string]string {
 	names := map[string]string{}
 	reg, err := peer.Open(peersPath)
@@ -113,11 +118,18 @@ func loadPeerNames(peersPath string) map[string]string {
 	return names
 }
 
-// PeersAdd appends a buddy to the manifest: a pinned key and an optional one-time
-// bootstrap token. The key is validated and de-duplicated (a buddy already listed
-// is reported, not duplicated). The file is created 0600 in a 0700 directory,
-// same trust domain as known_peers.
-func PeersAdd(peersFile, key, token string) error {
+// errLegacyManifest tells the operator to convert before writing: add/remove
+// write only the YAML format, so they must not silently rewrite a legacy file.
+func errLegacyManifest(peersFile string) error {
+	return fmt.Errorf("%s is in the deprecated line format — run `buddynet --peers-file %s peers migrate` first", peersFile, peersFile)
+}
+
+// PeersAdd appends a buddy to the manifest: a pinned key, an optional one-time
+// bootstrap token, and optionally a name and a per-buddy exposure scope for the
+// WireGuard data plane. The key is validated and de-duplicated (a buddy already
+// listed is reported, not duplicated). The file is created 0600 in a 0700
+// directory, same trust domain as known_peers.
+func PeersAdd(peersFile, key, token, name, expose string) error {
 	if peersFile == "" {
 		return fmt.Errorf("--peers-file <path> is required for peers add")
 	}
@@ -128,6 +140,22 @@ func PeersAdd(peersFile, key, token string) error {
 	keyB64 := bcrypto.PubKeyB64(pin)
 	if strings.ContainsAny(token, " \t") {
 		return fmt.Errorf("bootstrap token must not contain whitespace")
+	}
+	if err := validateBuddyName(name); err != nil {
+		return err
+	}
+	var scope *nft.Scope
+	if expose != "" {
+		s, perr := nft.ParseScope(expose)
+		if perr != nil {
+			return perr
+		}
+		scope = &s
+	}
+	if legacy, lerr := manifestNeedsMigration(peersFile); lerr != nil {
+		return lerr
+	} else if legacy {
+		return errLegacyManifest(peersFile)
 	}
 
 	existing, err := loadPeersFile(peersFile)
@@ -145,37 +173,27 @@ func PeersAdd(peersFile, key, token string) error {
 		return errTooManyBuddies(len(existing) + 1)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(peersFile), 0o700); err != nil {
+	existing = append(existing, peerSpec{pin: pin, token: token, name: name, expose: scope})
+	if err := saveManifest(peersFile, existing); err != nil {
 		return err
 	}
-	line := keyB64
-	if token != "" {
-		line += " " + token
-	}
-	f, err := os.OpenFile(peersFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if _, err := fmt.Fprintln(f, line); err != nil {
-		return err
-	}
-	fmt.Printf("added buddy %s%s\n", keyTag(keyB64), tokenNote(token))
+	fmt.Printf("added buddy %s%s%s\n", keyTag(keyB64), tokenNote(token), exposeNote(scope))
 	fmt.Println("note: a running buddy picks this up on SIGHUP (kill -HUP <pid>) or restart.")
 	return nil
 }
 
-// PeersRemove revokes a buddy: it drops its manifest line AND its stored session
-// secret. Both are needed — removing only the manifest line would leave the
-// supervisor reconnecting via the stored session. Other buddies are untouched
-// (the design is decentralised: distrusting one peer never affects the rest).
+// PeersRemove revokes a buddy: it drops its manifest entry AND its stored
+// session secret. Both are needed — removing only the manifest entry would
+// leave the supervisor reconnecting via the stored session. Other buddies are
+// untouched (the design is decentralised: distrusting one peer never affects
+// the rest).
 func PeersRemove(peersFile, knownPeers, key string) error {
 	keyB64, err := resolveKeyRef(peersFile, knownPeers, key)
 	if err != nil {
 		return err
 	}
 
-	manifestRemoved, err := removeManifestLine(peersFile, keyB64)
+	manifestRemoved, err := removeManifestEntry(peersFile, keyB64)
 	if err != nil {
 		return err
 	}
@@ -190,6 +208,39 @@ func PeersRemove(peersFile, knownPeers, key string) error {
 	fmt.Printf("revoked buddy %s (manifest=%d session=%d)\n", keyTag(keyB64), manifestRemoved, sessionRemoved)
 	fmt.Println("note: a running buddy applies this on SIGHUP (kill -HUP <pid>) or restart;")
 	fmt.Println("      an already-established direct tunnel persists until it drops (see --reauth-interval).")
+	return nil
+}
+
+// PeersMigrate converts a legacy line-format manifest to the YAML schema in
+// place, keeping the original as <path>.bak. Already-YAML files are a no-op.
+func PeersMigrate(peersFile string) error {
+	if peersFile == "" {
+		return fmt.Errorf("--peers-file <path> is required for peers migrate")
+	}
+	legacy, err := manifestNeedsMigration(peersFile)
+	if err != nil {
+		return err
+	}
+	if !legacy {
+		fmt.Printf("%s is already in the YAML format (or absent) — nothing to do\n", peersFile)
+		return nil
+	}
+	specs, err := loadPeersFile(peersFile)
+	if err != nil {
+		return err
+	}
+	backup := peersFile + ".bak"
+	data, err := os.ReadFile(peersFile)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(backup, data, 0o600); err != nil {
+		return fmt.Errorf("write backup %s: %w", backup, err)
+	}
+	if err := saveManifest(peersFile, specs); err != nil {
+		return err
+	}
+	fmt.Printf("migrated %s to YAML (%d buddies); the old file is kept at %s\n", peersFile, len(specs), backup)
 	return nil
 }
 
@@ -236,41 +287,35 @@ func resolveKeyRef(peersFile, knownPeers, ref string) (string, error) {
 	}
 }
 
-// removeManifestLine drops every manifest line whose pinned key matches keyB64,
-// preserving comments, blank lines, and other peers. Returns how many were removed.
-func removeManifestLine(peersFile, keyB64 string) (int, error) {
+// removeManifestEntry drops every manifest entry whose pinned key matches
+// keyB64, preserving the other buddies. Returns how many were removed. A legacy
+// file must be migrated first (remove writes only YAML).
+func removeManifestEntry(peersFile, keyB64 string) (int, error) {
 	if peersFile == "" {
 		return 0, nil
 	}
-	data, err := os.ReadFile(peersFile)
+	if legacy, err := manifestNeedsMigration(peersFile); err != nil {
+		return 0, err
+	} else if legacy {
+		return 0, errLegacyManifest(peersFile)
+	}
+	specs, err := loadPeersFile(peersFile)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
 		return 0, err
 	}
-	var kept []string
+	var kept []peerSpec
 	removed := 0
-	for _, line := range strings.Split(string(data), "\n") {
-		text := strings.TrimSpace(line)
-		if text != "" && !strings.HasPrefix(text, "#") {
-			if fields := strings.Fields(text); len(fields) > 0 {
-				if pin, derr := bcrypto.DecodePubKey(fields[0]); derr == nil && bcrypto.PubKeyB64(pin) == keyB64 {
-					removed++
-					continue
-				}
-			}
+	for _, s := range specs {
+		if bcrypto.PubKeyB64(s.pin) == keyB64 {
+			removed++
+			continue
 		}
-		kept = append(kept, line)
+		kept = append(kept, s)
 	}
 	if removed == 0 {
 		return 0, nil
 	}
-	out := strings.TrimRight(strings.Join(kept, "\n"), "\n")
-	if out != "" {
-		out += "\n"
-	}
-	return removed, os.WriteFile(peersFile, []byte(out), 0o600)
+	return removed, saveManifest(peersFile, kept)
 }
 
 func tokenNote(token string) string {
@@ -278,4 +323,11 @@ func tokenNote(token string) string {
 		return " (no bootstrap token — must already be paired, or add one to bootstrap)"
 	}
 	return " (with bootstrap token)"
+}
+
+func exposeNote(scope *nft.Scope) string {
+	if scope == nil {
+		return ""
+	}
+	return fmt.Sprintf(" (WireGuard expose: %s)", scope)
 }
