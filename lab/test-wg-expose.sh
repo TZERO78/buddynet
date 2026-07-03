@@ -99,7 +99,7 @@ run_buddy b "$D/b.key" "$APUB" "--wireguard --expose all" "$D/b.log"
 if assert_connected "$D/a.log" "buddy-a" && assert_connected "$D/b.log" "buddy-b"; then
 	VIP_A=$(grep -m1 'CONNECTED:' "$D/b.log" | grep -oE 'vip=10\.66\.[0-9]+\.[0-9]+' | cut -d= -f2)
 	VIP_B=$(grep -m1 'CONNECTED:' "$D/a.log" | grep -oE 'vip=10\.66\.[0-9]+\.[0-9]+' | cut -d= -f2)
-	grep -q 'exposed=tcp/873' "$D/a.log" || { echo "  [FAIL] A did not log its scope"; FAIL=1; }
+	grep -q 'EXPOSE: action=scoped iface=bnet0 ports=tcp/873' "$D/a.log" || { echo "  [FAIL] A did not log its scope"; FAIL=1; }
 
 	if probe b "$VIP_A" 873; then echo "  [PASS] B reaches A's exposed :873"
 	else echo "  [FAIL] B cannot reach the exposed :873"; FAIL=1; fi
@@ -135,7 +135,7 @@ run_buddy a "$D/a.key" "$BPUB" "--wireguard" "$D/a3.log"
 run_buddy b "$D/b.key" "$APUB" "--wireguard --expose all" "$D/b3.log"
 if assert_connected "$D/a3.log" "buddy-a" && assert_connected "$D/b3.log" "buddy-b"; then
 	VIP_A=$(grep -m1 'CONNECTED:' "$D/b3.log" | grep -oE 'vip=10\.66\.[0-9]+\.[0-9]+' | cut -d= -f2)
-	grep -q 'exposed=NONE' "$D/a3.log" || { echo "  [FAIL] A did not log exposed=NONE"; FAIL=1; }
+	grep -q 'EXPOSE: action=fail-closed' "$D/a3.log" || { echo "  [FAIL] A did not log fail-closed scope"; FAIL=1; }
 	if probe b "$VIP_A" 873; then echo "  [FAIL] default exposed :873 — NOT fail-closed"; FAIL=1
 	else echo "  [PASS] no --expose → nothing reachable (fail-closed)"; fi
 else

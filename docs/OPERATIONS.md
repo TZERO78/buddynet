@@ -272,6 +272,23 @@ LAZY: action=listening addr=… detail="tunnel deferred until first connection"
 LAZY: action=waking    detail="local connection arrived, dialing tunnel"   # a CONNECTED: line follows
 ```
 
+### Scoped exposure — `EXPOSE:` (`--wireguard --expose`)
+
+Logged once per buddy interface at WireGuard bring-up, so the effective
+least-privilege posture is visible without guessing (see docs/WIREGUARD.md).
+
+```
+EXPOSE: action=scoped        iface=bnet0 ports=tcp/873,udp/51820   # buddy reaches ONLY these ports here
+EXPOSE: action=fail-closed   iface=bnet0 detail="…"                # no --expose: nothing reachable (default)
+EXPOSE: action=whole-host    iface=bnet0 detail="explicit --expose all"   # opted out of scoping
+EXPOSE: action=remove-failed iface=bnet0 detail=…                 # teardown could not drop the rules
+```
+
+A scope that cannot be enforced (no kernel nftables support / missing
+`CAP_NET_ADMIN`) is fail-closed: the tunnel is refused, surfaced as
+`RECONNECT: action=error` with an actionable message (add `--expose <port>`, or
+`--expose all`), never a silent whole-host exposure.
+
 ### BuddyDNS — `BUDDYDNS:` (`--dns`)
 
 ```
