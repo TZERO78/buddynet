@@ -211,5 +211,10 @@ Run as root with the `wireguard` module loaded (netns labs):
   `iptables-restore` reload leaves the buddynet table alone, a ufw-style
   default-deny additionally gates the tunnel (both layers must allow), and after
   a global `nft flush ruleset` the scope is re-asserted on reconnect.
+- `lab/test-docker-firewalls.sh` — the same coexistence against REAL running
+  firewall daemons in Docker (`firewalld`, `ufw`, a host `nft` table, and none):
+  the tunnel forms, the exposed port is reachable, the unexposed port stays
+  blocked by BuddyNet's scope, and the `inet buddynet` table lives alongside the
+  host firewall's own tables (`inet firewalld` / `ip filter` / `inet hostfw`).
 
 See also `docs/ARCHITECTURE.md` (data-plane seam) and `SECURITY.md` (threat model).

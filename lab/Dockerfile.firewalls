@@ -1,0 +1,20 @@
+# Debian-based lab image carrying REAL firewall daemons (firewalld, ufw) plus
+# nftables/iptables, so scoped exposure can be tested against a host firewall
+# that is actively managing its own ruleset — not just static rules we inject.
+# NOT for production (see deployments/Dockerfile for the hardened image).
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/buddynet ./cmd/buddynet
+
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nftables iptables ufw firewalld dbus \
+        iproute2 netcat-openbsd curl procps ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/buddynet /usr/local/bin/buddynet
+COPY lab/entrypoint-firewall.sh /entrypoint-firewall.sh
+RUN chmod +x /entrypoint-firewall.sh
+ENTRYPOINT ["/entrypoint-firewall.sh"]
