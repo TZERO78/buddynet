@@ -298,15 +298,23 @@ func buildBatch(scopes map[string]Scope, order []string) []byte {
 	seq := uint32(1)
 	next := func() uint32 { seq++; return seq }
 
+	// The kernel does not ack the BATCH_END delimiter, so the LAST inner message
+	// carries NLM_F_ACK — success then produces exactly one reply to wait for.
+	var lastInner int // offset of the most recent inner message
+	appendMsg := func(out, msg []byte) []byte {
+		lastInner = len(out)
+		return append(out, msg...)
+	}
+
 	out := batchDelim(nfnlMsgBatchBegin, seq)
 	tbl := nlAttrStrZ(nftaTableName, tableName)
 	// add-del-add idiom: the first NEWTABLE makes DELTABLE succeed even when the
 	// table does not exist yet (older kernels have no "ignore ENOENT" delete).
-	out = append(out, nftMessage(nft(nftMsgNewTable), create, next(), nfprotoInet, tbl)...)
-	out = append(out, nftMessage(nft(nftMsgDelTable), syscall.NLM_F_REQUEST, next(), nfprotoInet, tbl)...)
+	out = appendMsg(out, nftMessage(nft(nftMsgNewTable), create, next(), nfprotoInet, tbl))
+	out = appendMsg(out, nftMessage(nft(nftMsgDelTable), syscall.NLM_F_REQUEST, next(), nfprotoInet, tbl))
 
 	if len(scopes) > 0 {
-		out = append(out, nftMessage(nft(nftMsgNewTable), create, next(), nfprotoInet, tbl)...)
+		out = appendMsg(out, nftMessage(nft(nftMsgNewTable), create, next(), nfprotoInet, tbl))
 
 		hook := nlAttrBE32(nftaHookHooknum, nfInetLocalIn)
 		hook = append(hook, nlAttrBE32(nftaHookPriority, 0)...) // filter priority
@@ -317,22 +325,23 @@ func buildBatch(scopes map[string]Scope, order []string) []byte {
 		// other interfaces and its own firewall are untouched.
 		chain = append(chain, nlAttrBE32(nftaChainPolicy, nfAccept)...)
 		chain = append(chain, nlAttrStrZ(nftaChainType, "filter")...)
-		out = append(out, nftMessage(nft(nftMsgNewChain), create, next(), nfprotoInet, chain)...)
+		out = appendMsg(out, nftMessage(nft(nftMsgNewChain), create, next(), nfprotoInet, chain))
 
 		for _, ifName := range order {
 			for _, exprs := range ruleExprs(ifName, scopes[ifName]) {
 				rule := nlAttrStrZ(nftaRuleTable, tableName)
 				rule = append(rule, nlAttrStrZ(nftaRuleChain, chainName)...)
 				rule = append(rule, nlNested(nftaRuleExpressions, exprs)...)
-				out = append(out, nftMessage(nft(nftMsgNewRule), create|syscall.NLM_F_APPEND, next(), nfprotoInet, rule)...)
+				out = appendMsg(out, nftMessage(nft(nftMsgNewRule), create|syscall.NLM_F_APPEND, next(), nfprotoInet, rule))
 			}
 		}
 	}
 
-	// ACK the batch end so success produces exactly one reply to wait for.
-	end := batchDelim(nfnlMsgBatchEnd, next())
-	nativeEndian.PutUint16(end[6:8], syscall.NLM_F_REQUEST|syscall.NLM_F_ACK)
-	return append(out, end...)
+	// Flag the last inner message for an ack (see appendMsg).
+	flags := nativeEndian.Uint16(out[lastInner+6 : lastInner+8])
+	nativeEndian.PutUint16(out[lastInner+6:lastInner+8], flags|syscall.NLM_F_ACK)
+
+	return append(out, batchDelim(nfnlMsgBatchEnd, next())...)
 }
 
 // --- netlink I/O --------------------------------------------------------------
@@ -347,6 +356,11 @@ func sendBatch(batch []byte) error {
 	sa := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}
 	if err := syscall.Bind(fd, sa); err != nil {
 		return fmt.Errorf("nft: netlink bind: %w", err)
+	}
+	// Safety net: never hang the tunnel bring-up on a missing ack.
+	tv := syscall.Timeval{Sec: 5}
+	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+		return fmt.Errorf("nft: set recv timeout: %w", err)
 	}
 	if err := syscall.Sendto(fd, batch, 0, sa); err != nil {
 		return fmt.Errorf("nft: netlink send: %w", err)
