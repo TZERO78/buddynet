@@ -234,7 +234,7 @@ func PeersMigrate(peersFile string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
+	if err := os.WriteFile(backup, data, 0o600); err != nil { // #nosec G703 -- backup lands next to the operator's own --peers-file (same trust as every path flag; G304 sibling)
 		return fmt.Errorf("write backup %s: %w", backup, err)
 	}
 	if err := saveManifest(peersFile, specs); err != nil {
