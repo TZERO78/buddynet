@@ -16,6 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and every buddy** — a QUIC buddy cannot pair with a plain-UDP server (and vice
   versa), so when upgrading, upgrade/align both sides, or pass `--quic-handshake=false`
   on both for the old behaviour.
+- **BuddyDNS names can no longer take the fingerprint-alias shape.** A `--name`
+  that is exactly 8 hexadecimal characters is now rejected: that shape is reserved
+  for the `<fp8>.buddy` fingerprint alias, so a peer's self-asserted name can no
+  longer shadow another peer's fingerprint entry in the resolver. A vanity name
+  like `deadbeef` is disallowed for this reason; `deadbeefx` or `web01` are fine.
+  See [docs/BUDDYDNS.md](docs/BUDDYDNS.md).
+- **systemd units gain a crash-loop circuit breaker.** `StartLimitIntervalSec=60`
+  / `StartLimitBurst=5` on the handshake, relay and buddy units: a deterministic
+  start failure now stops after 5 attempts instead of restarting forever under
+  `Restart=on-failure`. Transient network reconnects are unaffected (handled
+  in-process with jittered backoff).
 
 ### Added
 
@@ -55,11 +66,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `test-wg-multipeer.sh`. See [docs/WIREGUARD.md](docs/WIREGUARD.md).
   - On the `phase3/wireguard` integration branch; **not yet in a tagged release**.
 
+- **Recovered-panic count in the per-minute stats line.** The handshake and relay
+  `stats (last …)` line now reports `panics=N` in its `ALERT:` segment — the
+  per-interval number of request/connection handler panics contained by the safety
+  net. A reliably-triggerable parser panic is otherwise only logged once per
+  throttle window; a rising count is now a standing operational signal. See
+  [SECURITY.md](SECURITY.md).
+
 ### Fixed
 
 - `tunnel.ControlServer.Close` is now idempotent (`sync.Once`): the previous
   check-then-close on the done channel could double-close under concurrent callers
   and panic ("close of closed channel"). Surfaced as a `-race` flake.
+
+### Security
+
+- **CI security tooling is pinned to exact versions.** `gosec` and `govulncheck`
+  are installed at `@v2.27.1` / `@v1.5.0` instead of `@latest`, verified against
+  the Go checksum database. A security tool runs in CI with repository/token
+  access, so an upstream compromise or a bad release can no longer be pulled in
+  automatically — matching how the GitHub Actions and the Docker base image are
+  already pinned by digest.
 
 ## [v2.3.0] — 2026-06-20
 
