@@ -23,7 +23,10 @@
 >   `firewalld` being installed (it talks to the kernel directly over netlink).
 > - **Coexistence:** rules live in BuddyNet's own private `table inet buddynet`,
 >   never in the host's `filter`/ufw/firewalld tables. An existing firewall setup
->   is not touched, and its reloads do not touch BuddyNet's scope.
+>   is not touched, and its reloads do not touch BuddyNet's scope. The host
+>   firewall can never *widen* the scope (a drop in any table wins) — and the
+>   reverse also holds: on a default-deny host firewall, tunnel traffic needs an
+>   allow there too (both layers must agree; defense in depth).
 > - **Fail-closed:** if the scope cannot be enforced (ancient pre-nftables
 >   kernel), the tunnel **refuses to come up** instead of silently exposing the
 >   host — `--expose all` is the explicit escape hatch.
@@ -203,5 +206,10 @@ Run as root with the `wireguard` module loaded (netns labs):
 - `lab/test-wg-expose.sh` — scoped exposure: the exposed port answers, everything
   else is blocked, no `--expose` exposes nothing (fail-closed), `--expose all`
   keeps whole-host reach, and the nft table is gone after teardown.
+- `lab/test-wg-firewalls.sh` — coexistence with the host's own firewall:
+  iptables-nft/iptables-legacy ACCEPTs cannot override the buddynet DROP, an
+  `iptables-restore` reload leaves the buddynet table alone, a ufw-style
+  default-deny additionally gates the tunnel (both layers must allow), and after
+  a global `nft flush ruleset` the scope is re-asserted on reconnect.
 
 See also `docs/ARCHITECTURE.md` (data-plane seam) and `SECURITY.md` (threat model).
