@@ -107,6 +107,11 @@ type Server struct {
 	statRejected   atomic.Int64 // over-cap / outside allowlist / rate-limited
 	statHoard      atomic.Int64 // per-IP leg cap hit (possible session hoarding)
 
+	// lastPanic is the process-wide recovered-panic total at the previous stats
+	// tick, so statsLoop can report the per-interval delta. Touched only by the
+	// single statsLoop goroutine, so it needs no atomic.
+	lastPanic int64
+
 	// hoardWarned throttles the per-IP leg-cap WARNING to once per statsInterval so
 	// a source hammering the cap cannot turn each packet into a log line. Bounded
 	// and pruned; the counter carries the volume into the stats line.
@@ -126,12 +131,18 @@ func (s *Server) statsLoop() {
 		}
 		pa, ch := s.statPaired.Swap(0), s.statChallenged.Swap(0)
 		rj, ho := s.statRejected.Swap(0), s.statHoard.Swap(0)
-		if pa|ch|rj|ho == 0 {
+		// Per-interval count of panics recovered by safe.Do across the process: a
+		// non-zero delta means a crafted datagram reliably trips a parser, which is
+		// otherwise invisible (each panic is logged only once per throttle window).
+		total := safe.PanicCount()
+		pan := total - s.lastPanic
+		s.lastPanic = total
+		if pa|ch|rj|ho == 0 && pan == 0 {
 			continue
 		}
 		line := fmt.Sprintf("stats (last %s): role=relay paired=%d challenged=%d rejected=%d", statsInterval, pa, ch, rj)
-		if ho > 0 {
-			line += fmt.Sprintf(" ALERT: leg-cap=%d", ho)
+		if ho > 0 || pan > 0 {
+			line += fmt.Sprintf(" ALERT: leg-cap=%d panics=%d", ho, pan)
 		}
 		log.Print(line)
 	}

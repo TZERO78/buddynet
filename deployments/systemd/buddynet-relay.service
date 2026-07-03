@@ -5,6 +5,10 @@ Documentation=https://github.com/TZERO78/buddynet
 # for NTP/time-sync before serving.
 After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
+# Crash-loop circuit breaker: stop retrying after 5 failed starts within 60s
+# (a deterministic fault) instead of restarting forever under Restart=on-failure.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 # Listen address/port is configurable without editing this unit:
