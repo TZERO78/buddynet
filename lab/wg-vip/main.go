@@ -17,6 +17,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"flag"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -34,6 +36,7 @@ func main() {
 	keyPath := flag.String("key", "", "attacker identity key file (created if missing)")
 	token := flag.String("token", "", "pairing token")
 	vip := flag.String("vip", "", "FORGED virtual IP to advertise (empty = advertise the correct one)")
+	quic := flag.Bool("quic", true, "register over the QUIC control plane (the default since QUIC-by-default); -quic=false uses the legacy plain-UDP plane")
 	flag.Parse()
 
 	srvPub, err := bcrypto.DecodePubKey(*serverKeyB64)
@@ -56,23 +59,53 @@ func main() {
 	if err != nil {
 		log.Fatalf("wg-vip: seal token: %v", err)
 	}
-	c, err := net.Dial("udp", *server)
-	if err != nil {
-		log.Fatalf("wg-vip: dial: %v", err)
-	}
-	defer c.Close()
 
 	base := protocol.Message{
 		Type: protocol.TypeRegister, Ver: protocol.Version, Role: protocol.RoleBuddy,
 		ID: "vip-attacker", PubKey: bcrypto.PubKeyB64(pub), TokenEnc: enc, VirtualIP: adv,
 	}
+	raw, _ := json.Marshal(base)
 
-	// One register does the cookie dance and parks; re-register periodically so the
-	// parked entry survives the server's registration TTL until the victim pairs.
+	// The attacker only needs to REGISTER a parked entry carrying the forged VIP; the
+	// victim rejects it at the pre-connect VIP↔key check, so no data plane is needed.
+	// The control transport must match the server's — QUIC by default (the server and
+	// victim both default to QUIC since #97), plain UDP under -quic=false.
+	if *quic {
+		addr, rerr := net.ResolveUDPAddr("udp", *server)
+		if rerr != nil {
+			log.Fatalf("wg-vip: resolve server: %v", rerr)
+		}
+		conn, lerr := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
+		if lerr != nil {
+			log.Fatalf("wg-vip: udp socket: %v", lerr)
+		}
+		defer conn.Close()
+		cli, derr := tunnel.DialControl(context.Background(), conn, addr, srvPub, priv, 2*time.Minute)
+		if derr != nil {
+			log.Fatalf("wg-vip: QUIC control dial (is the server on QUIC? pass -quic=false for plain UDP): %v", derr)
+		}
+		defer cli.Close()
+		// Re-roundtrip periodically so the parked entry survives the server's
+		// registration TTL until the victim pairs (each stream re-asserts the REGISTER).
+		for {
+			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_, _ = cli.Roundtrip(rctx, raw)
+			cancel()
+			log.Printf("wg-vip: registered+parked (QUIC) under the token — waiting for a victim to pair")
+			time.Sleep(3 * time.Second)
+		}
+	}
+
+	// Legacy plain-UDP plane (server started with --quic-handshake=false).
+	c, err := net.Dial("udp", *server)
+	if err != nil {
+		log.Fatalf("wg-vip: dial: %v", err)
+	}
+	defer c.Close()
 	register := func() {
 		m := base
-		raw, _ := json.Marshal(m)
-		c.Write(raw)
+		r, _ := json.Marshal(m)
+		c.Write(r)
 		c.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
 		buf := make([]byte, 2048)
 		n, rerr := c.Read(buf)
@@ -82,13 +115,12 @@ func main() {
 		var cm protocol.Message
 		if json.Unmarshal(buf[:n], &cm) == nil && cm.Type == protocol.TypeCookie {
 			m.Cookie = cm.Cookie
-			raw, _ = json.Marshal(m)
-			c.Write(raw)
+			r, _ = json.Marshal(m)
+			c.Write(r)
 		}
 	}
-
 	register()
-	log.Printf("wg-vip: registered+parked under the token — waiting for a victim to pair")
+	log.Printf("wg-vip: registered+parked (plain UDP) under the token — waiting for a victim to pair")
 	for range time.Tick(3 * time.Second) {
 		register()
 	}

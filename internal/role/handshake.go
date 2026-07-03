@@ -528,6 +528,11 @@ type hsCounters struct {
 	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
 	squatRejected atomic.Int64 // 3rd-party register rejected on full slot (slot already squatted)
 	replay        atomic.Int64 // approval-mode registration signature replayed
+
+	// lastPanic is the process-wide recovered-panic total observed at the previous
+	// stats tick, so logLoop can report the per-interval delta. Touched only by the
+	// single logLoop goroutine, so it needs no atomic.
+	lastPanic int64
 }
 
 var hsStats hsCounters
@@ -546,13 +551,20 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
 		npk, sq, rp := c.newPubKey.Swap(0), c.squatRejected.Swap(0), c.replay.Swap(0)
-		if pa|ch|rl|dr|npk|sq|rp == 0 {
+		// Per-interval count of panics recovered by safe.Do/Go across the process. A
+		// non-zero delta means a crafted input reliably trips a parser (ours or a
+		// dependency's) — invisible otherwise, since each panic is only logged once
+		// per throttle window. Surfacing it here turns it into a standing signal.
+		total := safe.PanicCount()
+		pan := total - c.lastPanic
+		c.lastPanic = total
+		if pa|ch|rl|dr|npk|sq|rp == 0 && pan == 0 {
 			continue // idle interval: stay quiet
 		}
 		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d challenged=%d rate-limited=%d dropped=%d",
 			statsInterval, pa, ch, rl, dr)
-		if npk > 0 || sq > 0 || rp > 0 {
-			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d", npk, sq, rp)
+		if npk > 0 || sq > 0 || rp > 0 || pan > 0 {
+			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d panics=%d", npk, sq, rp, pan)
 		}
 		log.Print(line)
 	}
