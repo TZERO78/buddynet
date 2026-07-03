@@ -249,6 +249,9 @@ WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGua
   <option value="enable"  <?=v($cfg,'WIREGUARD')=='enable'?'selected':''?>>Enabled</option>
   </select>
 
+Exposed ports (--expose, WireGuard only) — the port(s) your buddy may reach on THIS server over the tunnel, e.g. "873" or "873,8080" or "tcp/873,udp/51820"; "all" = explicit whole-host access. **Empty = NOTHING is exposed (fail-closed, secure default)** — your buddy cannot reach any service here until you name a port:
+: <input type="text" name="EXPOSE" value="<?=v($cfg,'EXPOSE')?>" placeholder="empty = nothing exposed (secure default)">
+
 &nbsp;
 : <input type="submit" value="Apply">
 
@@ -366,6 +369,7 @@ SERVER="$(trim "${SERVER:-}")"; SERVER_KEY="$(trim "${SERVER_KEY:-}")"; TOKEN="$
 TOKEN_FILE="$(trim "${TOKEN_FILE:-}")"; PEER_KEY="$(trim "${PEER_KEY:-}")"
 LISTEN="$(trim "${LISTEN:-}")"; FORWARD="$(trim "${FORWARD:-}")"
 NAME="$(trim "${NAME:-}")"; DNS="$(trim "${DNS:-}")"; LAZY="$(trim "${LAZY:-}")"
+EXPOSE="$(trim "${EXPOSE:-}")"
 
 is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
@@ -409,7 +413,16 @@ start() {
   fi
   # WireGuard data plane: the peer tunnel runs over kernel WireGuard (the partner
   # is reachable natively at its VIP). Control plane stays QUIC/plain.
-  [ "$WIREGUARD" = "enable" ] && args+=(--wireguard)
+  if [ "$WIREGUARD" = "enable" ]; then
+    args+=(--wireguard)
+    # Scoped exposure: empty EXPOSE = fail-closed (buddy reaches nothing here).
+    # Say so in the log so the posture is visible, mirroring the daemon's own line.
+    if [ -n "$EXPOSE" ]; then
+      args+=(--expose "$EXPOSE")
+    else
+      echo "NOTE: WireGuard is scoped by default — no Exposed ports set, so your buddy reaches NOTHING on this server (fail-closed). Set e.g. 873, or 'all' for explicit whole-host access." >>"$LOG"
+    fi
+  fi
   # Prefer the token from a file on the array (real 0600 perms) over the flash
   # cfg value; /boot is FAT and cannot enforce permissions. Only override when the
   # file is non-empty and readable (an empty file must not blank out the token).

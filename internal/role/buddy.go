@@ -16,6 +16,7 @@ import (
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	buddydns "github.com/tzero78/buddynet/internal/dns"
+	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/peer"
 	"github.com/tzero78/buddynet/internal/vip"
 )
@@ -113,6 +114,12 @@ type BuddyConfig struct {
 	// reconnect secret is the static-DH PairSecret. Direct P2P only for now
 	// (relay-over-WireGuard is a later step). Fails closed if WG is unavailable.
 	WireGuard bool
+
+	// Expose is the global --expose scope for the WireGuard data plane: the
+	// port(s) the partner may reach on this host over bnetN. nil = fail-closed
+	// (nothing exposed). A per-buddy `expose` in the manifest overrides it.
+	// Scope.All is the explicit whole-host opt-out (the pre-scoping behavior).
+	Expose *nft.Scope
 }
 
 // attempt is the per-connection plan: which rendezvous token to register with,
@@ -125,6 +132,7 @@ type attempt struct {
 	pin          ed25519.PublicKey // reconnect: partner key that MUST match (nil otherwise)
 	firstPairing bool              // ephemeral invite: derive & store a session on success
 	ifIndex      int               // WireGuard data plane: this buddy's interface is bnet{ifIndex} (one per buddy)
+	expose       *nft.Scope        // per-buddy WG exposure from the manifest (nil = inherit --expose, else fail-closed)
 }
 
 // node bundles everything a buddy needs that exists exactly ONCE per process,

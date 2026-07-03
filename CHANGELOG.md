@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING — WireGuard sharing is now SCOPED and fail-closed by default
+  (`--expose`).** On the `--wireguard` data plane a buddy can now reach **only**
+  the port(s) you name with `--expose` (e.g. `--expose 873`, or per buddy via
+  `expose:` in the manifest) — **without the flag, nothing on your host is
+  reachable** over the tunnel (ping stays allowed for diagnosis). Anyone relying
+  on the previous whole-host behaviour must now say so explicitly with
+  `--expose all`. The scope is enforced in the kernel's nftables subsystem via a
+  private `table inet buddynet` (programmed over raw netlink — no dependence on
+  nft/iptables/ufw/firewalld being installed, no interference with an existing
+  firewall setup) and is installed before the interface comes up; if it cannot be
+  enforced, the tunnel refuses to start rather than exposing the host. See
+  [docs/WIREGUARD.md](docs/WIREGUARD.md).
+- **The `--peers-file` manifest is now YAML** — per-buddy fields outgrew the old
+  line format: each entry takes `key` (required), plus optional `name`, `token`
+  and `expose` (the per-buddy WireGuard scope, overriding `--expose`). The legacy
+  `<key> [token]` line format is still read for one release with a deprecation
+  warning; convert with the new **`peers migrate`** subcommand (the old file is
+  kept as `.bak`). `peers add` gains `--name` and `--expose`; `peers list` shows
+  the per-buddy scope. This adds `gopkg.in/yaml.v3` as the project's second
+  approved application dependency (after `miekg/dns`); the manifest is parsed
+  strictly (unknown fields are errors) with bounded size. See
+  [docs/PEERS.md](docs/PEERS.md).
+
 - **The handshake control plane is now QUIC/TLS 1.3 by default (security by
   default).** Previously plain UDP (cleartext token) was the default and
   `--quic-handshake` opted in; now encryption is on unless you explicitly opt out

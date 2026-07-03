@@ -12,6 +12,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/relay"
 	"github.com/tzero78/buddynet/internal/wg"
 	"github.com/tzero78/buddynet/pkg/protocol"
@@ -94,6 +95,45 @@ func udpAddrEqual(a, b *net.UDPAddr) bool {
 	return a != nil && b != nil && a.Port == b.Port && a.IP.Equal(b.IP)
 }
 
+// effectiveScope resolves what this buddy may reach on our host over its bnetN:
+// the manifest's per-buddy `expose` wins, then the global --expose flag, and
+// with neither the zero Scope — fail-closed, nothing exposed.
+func effectiveScope(cfg BuddyConfig, att attempt) nft.Scope {
+	if att.expose != nil {
+		return *att.expose
+	}
+	if cfg.Expose != nil {
+		return *cfg.Expose
+	}
+	return nft.Scope{}
+}
+
+// applyScope enforces scope on ifName BEFORE the interface carries traffic, and
+// returns the teardown counterpart. Fail-closed: if the kernel cannot program
+// the rules (no nftables support, missing CAP_NET_ADMIN), the tunnel must NOT
+// come up — never silently expose the whole host. The explicit `all` scope is
+// the one case that installs nothing (the operator opted out of scoping; this
+// also keeps `--expose all` working on kernels without nftables).
+func applyScope(ifName string, scope nft.Scope) (func(), error) {
+	if scope.All {
+		log.Printf("WG: iface=%s exposed=all detail=%q", ifName, "explicit whole-host access (--expose all)")
+		return func() {}, nil
+	}
+	if err := nft.Apply(ifName, scope); err != nil {
+		return nil, fmt.Errorf("cannot enforce the exposure scope on %s (%w) — refusing to bring the tunnel up rather than exposing the whole host; needs kernel nftables support + CAP_NET_ADMIN, or pass --expose all for explicit whole-host access", ifName, err)
+	}
+	if len(scope.Ports) == 0 {
+		log.Printf("WG: iface=%s exposed=NONE detail=%q", ifName, "fail-closed; the buddy reaches nothing here — add --expose <port> (or expose: in the manifest) to share a service")
+	} else {
+		log.Printf("WG: iface=%s exposed=%s", ifName, scope)
+	}
+	return func() {
+		if err := nft.Remove(ifName); err != nil {
+			log.Printf("WARNING: could not remove the %s exposure rules: %v", ifName, err)
+		}
+	}, nil
+}
+
 // primeWGPath walks the fallback chain and returns the first endpoint it can make
 // usable, plus which path worked, mirroring primePath on the QUIC side. For Direct
 // it hole-punches and returns the punched peer address; for Relayed it binds this
@@ -172,7 +212,15 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 	if remoteAP.Addr().Is4In6() {
 		remoteAP = netip.AddrPortFrom(remoteAP.Addr().Unmap(), remoteAP.Port())
 	}
-	down, err := bringUpWGDirect(conn, wgIfName(att.ifIndex), nd.priv, partnerPub, remoteAP)
+	// Scoped exposure: enforce what this buddy may reach on our host BEFORE the
+	// interface exists, so there is never a window of whole-host access.
+	ifName := wgIfName(att.ifIndex)
+	removeScope, err := applyScope(ifName, effectiveScope(cfg, att))
+	if err != nil {
+		return fmt.Errorf("--wireguard: %w", err)
+	}
+	defer removeScope()
+	down, err := bringUpWGDirect(conn, ifName, nd.priv, partnerPub, remoteAP)
 	if err != nil {
 		return fmt.Errorf("--wireguard: bring up data plane: %w", err)
 	}

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/role"
 	"github.com/tzero78/buddynet/internal/secret"
 	"github.com/tzero78/buddynet/pkg/protocol"
@@ -114,7 +115,7 @@ func main() {
 	lab := flag.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1.")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
-	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest, one line '<peer-key-b64> [bootstrap-token]' per buddy; maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
+	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest (YAML: buddies with key/token/name/expose per entry; legacy line format still read — run `peers migrate`); maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
 	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
 	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
@@ -130,6 +131,7 @@ func main() {
 	name := flag.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars")
 	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
 	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
+	expose := flag.String("expose", "", "buddy (--wireguard): port(s) the partner may reach on THIS host over the tunnel, e.g. 873 or 873,8080 or tcp/873,udp/51820; 'all' = explicit whole-host access. WITHOUT this flag NOTHING is exposed (fail-closed; a manifest's per-buddy 'expose' overrides it)")
 	wireguard := flag.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y), direct or over a relay; -L/-forward/--vip-listen are not needed on this path (and are ignored).")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -236,6 +238,7 @@ func main() {
 		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
 		reauthInterval: *reauthInterval,
 		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
+		expose: *expose,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -378,9 +381,21 @@ func orDefault(v, def string) string {
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	peersFile                                                               string
-	localListen, forward, vipListen, name                                   string
+	localListen, forward, vipListen, name, expose                           string
 	lab, status, interactive, ephemeral, quic, dns, lazy, wireguard         bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
+}
+
+// exposeScope parses --expose; validate() has already rejected a bad value.
+func (a buddyArgs) exposeScope() *nft.Scope {
+	if a.expose == "" {
+		return nil // fail-closed default
+	}
+	s, err := nft.ParseScope(a.expose)
+	if err != nil {
+		return nil
+	}
+	return &s
 }
 
 // config maps the parsed flags onto the role package's BuddyConfig.
@@ -395,7 +410,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
-		WireGuard: a.wireguard,
+		WireGuard: a.wireguard, Expose: a.exposeScope(),
 	}
 }
 
@@ -425,6 +440,18 @@ func (a buddyArgs) validate() {
 	// that buddy's bnetN), so the -L/-forward/--vip-listen requirement is waived. It
 	// is the WG DATA plane, opt-in. MultiPeer works (one interface per buddy); only
 	// the QUIC-stream-specific --lazy is not applicable.
+	// --expose gates the WireGuard data plane; the QUIC door is already scoped
+	// by construction (-L/--forward carry exactly one configured service).
+	if a.expose != "" {
+		if !a.wireguard {
+			fmt.Fprintln(os.Stderr, "error: --expose only applies to --wireguard (the QUIC path forwards exactly the one service you configure)")
+			os.Exit(2)
+		}
+		if _, err := nft.ParseScope(a.expose); err != nil {
+			fmt.Fprintf(os.Stderr, "error: --expose: %v\n", err)
+			os.Exit(2)
+		}
+	}
 	if a.wireguard {
 		if a.lazy {
 			fmt.Fprintln(os.Stderr, "error: --wireguard cannot be combined with --lazy (lazy is QUIC-stream specific)")
@@ -532,11 +559,11 @@ func printIdentity(keyPath string) {
 	fmt.Println(bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
 }
 
-// runPeersCmd dispatches `peers <list|add|remove>` against the --peers-file
-// manifest (and --known-peers for revocation), then exits.
+// runPeersCmd dispatches `peers <list|add|remove|migrate>` against the
+// --peers-file manifest (and --known-peers for revocation), then exits.
 func runPeersCmd(peersFile, knownPeers, peersPath string, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers <list|add|remove> [args]")
+		fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers <list|add|remove|migrate> [args]")
 		return 2
 	}
 	var err error
@@ -544,23 +571,31 @@ func runPeersCmd(peersFile, knownPeers, peersPath string, args []string) int {
 	case "list":
 		err = role.PeersList(peersFile, knownPeers, peersPath)
 	case "add":
-		if len(args) < 2 {
-			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers add <peer-pubkey> [bootstrap-token]")
+		positional, opts, perr := parsePeersAddArgs(args[1:])
+		if perr != nil {
+			fmt.Fprintln(os.Stderr, "error:", perr)
+			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers add <peer-pubkey> [bootstrap-token] [--name NAME] [--expose PORTS]")
+			return 2
+		}
+		if len(positional) < 1 || len(positional) > 2 {
+			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers add <peer-pubkey> [bootstrap-token] [--name NAME] [--expose PORTS]")
 			return 2
 		}
 		token := ""
-		if len(args) > 2 {
-			token = args[2]
+		if len(positional) == 2 {
+			token = positional[1]
 		}
-		err = role.PeersAdd(peersFile, args[1], token)
+		err = role.PeersAdd(peersFile, positional[0], token, opts["name"], opts["expose"])
 	case "remove":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers remove <peer-pubkey>")
 			return 2
 		}
 		err = role.PeersRemove(peersFile, knownPeers, args[1])
+	case "migrate":
+		err = role.PeersMigrate(peersFile)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown peers subcommand %q (want list|add|remove)\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown peers subcommand %q (want list|add|remove|migrate)\n", args[0])
 		return 2
 	}
 	if err != nil {
@@ -568,6 +603,38 @@ func runPeersCmd(peersFile, knownPeers, peersPath string, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// parsePeersAddArgs splits `peers add` arguments into positionals and the
+// --name/--expose options (both `--opt value` and `--opt=value` forms). The
+// global flag package has already consumed the top-level flags, so this small
+// hand parser handles only the subcommand's own options.
+func parsePeersAddArgs(args []string) (positional []string, opts map[string]string, err error) {
+	opts = map[string]string{}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if !strings.HasPrefix(a, "--") {
+			positional = append(positional, a)
+			continue
+		}
+		name, value := strings.TrimPrefix(a, "--"), ""
+		if eq := strings.IndexByte(name, '='); eq >= 0 {
+			name, value = name[:eq], name[eq+1:]
+		} else {
+			if i+1 >= len(args) {
+				return nil, nil, fmt.Errorf("option --%s needs a value", name)
+			}
+			i++
+			value = args[i]
+		}
+		switch name {
+		case "name", "expose":
+			opts[name] = value
+		default:
+			return nil, nil, fmt.Errorf("unknown option --%s (want --name or --expose)", name)
+		}
+	}
+	return positional, opts, nil
 }
 
 func runAuthCmd(path, cmd string, args []string) int {
@@ -676,7 +743,7 @@ COMMANDS
   %[1]s gen-token                            mint a strong shared token
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
-  %[1]s --peers-file PATH peers list|add|remove   manage your buddies (MultiPeer)
+  %[1]s --peers-file PATH peers list|add|remove|migrate   manage your buddies (MultiPeer)
   %[1]s --authorized FILE approve|allowclient|list|revoke   server allowlist (approval mode)
   %[1]s version
 

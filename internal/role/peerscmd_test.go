@@ -14,11 +14,11 @@ func TestPeersAddDedupAndParse(t *testing.T) {
 	aB64 := bcrypto.PubKeyB64(a)
 	path := filepath.Join(t.TempDir(), "sub", "peers") // dir created by add
 
-	if err := PeersAdd(path, aB64, "boot-a"); err != nil {
+	if err := PeersAdd(path, aB64, "boot-a", "", ""); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	// Adding the same key again must not duplicate it.
-	if err := PeersAdd(path, aB64, "boot-a"); err != nil {
+	if err := PeersAdd(path, aB64, "boot-a", "", ""); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
 	specs, err := loadPeersFile(path)
@@ -32,7 +32,7 @@ func TestPeersAddDedupAndParse(t *testing.T) {
 		t.Fatalf("spec = %+v", specs[0])
 	}
 
-	if err := PeersAdd(path, "not-a-key", ""); err == nil {
+	if err := PeersAdd(path, "not-a-key", "", "", ""); err == nil {
 		t.Fatal("add must reject a bad key")
 	}
 }
@@ -49,7 +49,7 @@ func TestPeersRemoveRevokesBoth(t *testing.T) {
 	known := filepath.Join(dir, "known_peers")
 
 	for _, k := range []string{aB64, bB64} {
-		if err := PeersAdd(peers, k, "tok"); err != nil {
+		if err := PeersAdd(peers, k, "tok", "", ""); err != nil {
 			t.Fatalf("add %s: %v", k, err)
 		}
 	}
@@ -84,7 +84,7 @@ func TestPeersListSmoke(t *testing.T) {
 	dir := t.TempDir()
 	peers := filepath.Join(dir, "peers")
 	known := filepath.Join(dir, "known_peers")
-	if err := PeersAdd(peers, bcrypto.PubKeyB64(a), "boot-a"); err != nil {
+	if err := PeersAdd(peers, bcrypto.PubKeyB64(a), "boot-a", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	// Should not error with a manifest present and no sessions.
@@ -105,7 +105,7 @@ func TestPeersRemoveByShortKey(t *testing.T) {
 	dir := t.TempDir()
 	peers := filepath.Join(dir, "peers")
 	known := filepath.Join(dir, "known_peers")
-	if err := PeersAdd(peers, aB64, "tok"); err != nil {
+	if err := PeersAdd(peers, aB64, "tok", "", ""); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 
@@ -133,7 +133,7 @@ func TestPeersRemoveAmbiguousPrefix(t *testing.T) {
 	peers := filepath.Join(dir, "peers")
 	known := filepath.Join(dir, "known_peers")
 	for _, k := range []string{bcrypto.PubKeyB64(a), bcrypto.PubKeyB64(b)} {
-		if err := PeersAdd(peers, k, "tok"); err != nil {
+		if err := PeersAdd(peers, k, "tok", "", ""); err != nil {
 			t.Fatalf("add: %v", err)
 		}
 	}

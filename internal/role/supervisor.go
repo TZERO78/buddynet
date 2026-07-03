@@ -254,7 +254,7 @@ func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
 	bootstrap := func() attempt {
 		// Meet at the shared bootstrap token, pin the manifest key (so no SAS
 		// prompt — Model A), and store a session secret on success.
-		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true}
+		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true, expose: spec.expose}
 	}
 	return func(failures int) (attempt, error) {
 		secret, ok, err := loadSessionFor(cfg.KnownPeers, spec.pin)
@@ -272,7 +272,7 @@ func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
 					"session presumed stale (partner may have lost its copy); probing bootstrap token, key stays pinned")
 				return bootstrap(), nil
 			}
-			return attempt{rendezvous: secret, pin: spec.pin}, nil
+			return attempt{rendezvous: secret, pin: spec.pin, expose: spec.expose}, nil
 		}
 		if spec.token == "" {
 			return attempt{}, errSessionRevoked
