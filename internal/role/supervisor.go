@@ -9,7 +9,46 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/nft"
 )
+
+// scopeCell holds one buddy's live per-buddy exposure scope (nil = inherit the
+// global --expose flag). The supervisor goroutine updates it on SIGHUP; the
+// worker goroutine reads it when building each attempt — so a scope edit reaches
+// the next reconnect, not only the live reprogram. The mutex guards that cross-
+// goroutine handoff.
+type scopeCell struct {
+	mu    sync.Mutex
+	scope *nft.Scope
+}
+
+func newScopeCell(s *nft.Scope) *scopeCell { return &scopeCell{scope: s} }
+
+func (c *scopeCell) get() *nft.Scope {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.scope
+}
+
+func (c *scopeCell) set(s *nft.Scope) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.scope = s
+}
+
+// reprogramScope re-applies a per-buddy exposure scope to a LIVE bnetN without
+// dropping the tunnel — the SIGHUP path. It mirrors applyScope's Apply/Remove
+// split: whole-host removes any prior scoping rules, anything else (including
+// fail-closed with no ports) installs the drop-by-default chain. If the interface
+// is not currently up the rules simply match nothing until the next bring-up,
+// which re-applies from the worker's cell anyway.
+func reprogramScope(cfg BuddyConfig, ifName string, perBuddy *nft.Scope) error {
+	scope := effectiveScopeOf(cfg, perBuddy)
+	if scope.All {
+		return nft.Remove(ifName)
+	}
+	return nft.Apply(ifName, scope)
+}
 
 // nextAttemptFn yields the connection plan for the next reconnect round. The
 // single-peer path wraps nextAttempt; a multi-peer worker uses peerSource,
@@ -118,6 +157,8 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 	type handle struct {
 		cancel context.CancelFunc
 		gen    uint64
+		spec   peerSpec   // the spec this worker was started with (for change detection)
+		scope  *scopeCell // live per-buddy exposure scope; SIGHUP reprograms it in place
 	}
 	var wg sync.WaitGroup
 	var gen uint64
@@ -158,11 +199,15 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 		g := gen
 		ifIndex := allocIf(key)
 		wctx, cancel := context.WithCancel(ctx)
-		running[key] = handle{cancel: cancel, gen: g}
+		// The worker reads its exposure scope from this cell on every bring-up, so a
+		// SIGHUP scope edit (below) is picked up on the next reconnect too — not just
+		// reprogrammed live on the current interface.
+		cell := newScopeCell(s.expose)
+		running[key] = handle{cancel: cancel, gen: g, spec: s, scope: cell}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := peerLoop(wctx, cfg, nd, nil, peerSource(cfg, s), time.Time{}, ifIndex); err != nil {
+			if err := peerLoop(wctx, cfg, nd, nil, peerSource(cfg, s, cell), time.Time{}, ifIndex); err != nil {
 				log.Printf("SUPERVISOR: action=peer-stopped key=%s detail=%q", keyTag(key), err.Error())
 			}
 			exited <- exit{key, g}
@@ -214,12 +259,31 @@ func supervise(ctx context.Context, cfg BuddyConfig, nd *node, specs []peerSpec)
 				}
 			}
 			for key, s := range want {
-				if _, ok := running[key]; !ok {
-					log.Printf("SUPERVISOR: action=reload-start key=%s", keyTag(key))
-					start(s)
+				if h, ok := running[key]; ok {
+					// Already running: the only in-place change we act on is the
+					// per-buddy exposure scope. A changed scope is reprogrammed on the
+					// LIVE bnetN without dropping the tunnel — the scope is a purely
+					// local nftables change, so re-pairing (which would also wait on
+					// the partner) is unnecessary. The worker's cell is updated too, so
+					// a later reconnect uses the new scope. Other manifest edits
+					// (token/name) are not hot-reloaded.
+					if !sameScope(h.spec.expose, s.expose) {
+						h.scope.set(s.expose)
+						ifName := wgIfName(ifIndexOf[key])
+						if err := reprogramScope(cfg, ifName, s.expose); err != nil {
+							log.Printf("SUPERVISOR: action=reload-rescope-failed key=%s detail=%q", keyTag(key), err.Error())
+						} else {
+							log.Printf("SUPERVISOR: action=reload-rescope key=%s detail=%q", keyTag(key), "exposure scope reprogrammed live")
+						}
+						h.spec.expose = s.expose
+						running[key] = h
+					}
+					continue
 				}
+				log.Printf("SUPERVISOR: action=reload-start key=%s", keyTag(key))
+				start(s)
 			}
-			log.Printf("SUPERVISOR: action=reload buddies=%d", len(running))
+			log.Printf("SUPERVISOR: action=reload buddies=%d", len(want))
 		}
 	}
 }
@@ -250,11 +314,12 @@ const sessionFallbackAfter = 3
 // manifest key, so a token-knower cannot impersonate the partner — only the
 // pre-existing first-pairing endpoint-harvest exposure applies, and only while a
 // token is present). On success a fresh session is stored and the desync heals.
-func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
+func peerSource(cfg BuddyConfig, spec peerSpec, scope *scopeCell) nextAttemptFn {
 	bootstrap := func() attempt {
 		// Meet at the shared bootstrap token, pin the manifest key (so no SAS
-		// prompt — Model A), and store a session secret on success.
-		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true, expose: spec.expose}
+		// prompt — Model A), and store a session secret on success. The exposure
+		// scope is read LIVE from the cell so a SIGHUP edit reaches this bring-up.
+		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true, expose: scope.get()}
 	}
 	return func(failures int) (attempt, error) {
 		secret, ok, err := loadSessionFor(cfg.KnownPeers, spec.pin)
@@ -272,7 +337,7 @@ func peerSource(cfg BuddyConfig, spec peerSpec) nextAttemptFn {
 					"session presumed stale (partner may have lost its copy); probing bootstrap token, key stays pinned")
 				return bootstrap(), nil
 			}
-			return attempt{rendezvous: secret, pin: spec.pin, expose: spec.expose}, nil
+			return attempt{rendezvous: secret, pin: spec.pin, expose: scope.get()}, nil
 		}
 		if spec.token == "" {
 			return attempt{}, errSessionRevoked

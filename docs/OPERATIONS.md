@@ -176,10 +176,17 @@ partner is reachable natively at its VIP. Full design and security notes in
 - **Forwarding flags are ignored** on this path: the VIP is reachable directly, so
   `-L`/`-forward`/`--vip-listen` print a `NOTE` and do nothing. Reach the partner at
   `<partner-vip>:<port>`.
-- **Exposure.** Every service the host publishes on `0.0.0.0` is reachable by the
-  paired buddy over the VIP (not yet scoped to one service) — pair only with a buddy
-  you trust and keep host services authenticated. Only the partner's VIP `/32` is
-  routed; LANs/VLANs behind the buddy are not.
+- **Exposure is scoped by default (`--expose`).** A buddy can reach **only** the
+  port(s) you `--expose` (e.g. `--expose 873`, or per buddy via `expose:` in the
+  manifest); without it, nothing is reachable (fail-closed). `--expose all` restores
+  whole-host access explicitly. Only the partner's VIP `/32` is routed; LANs/VLANs
+  behind the buddy are not. See [WIREGUARD.md](WIREGUARD.md).
+- **Changing a scope at runtime.** A per-buddy `expose:` edit in the `--peers-file`
+  manifest takes effect on `SIGHUP`: the supervisor reprograms that buddy's `bnetN`
+  firewall scope **in place** — the tunnel stays up, no reconnect, the partner is
+  not involved (`SUPERVISOR: action=reload-rescope`). A tightened scope therefore
+  takes effect immediately, unlike a removed *buddy*, whose live tunnel lingers.
+  The global `--expose` flag is fixed for the process; change it with a restart.
 - `CONNECTED` logs `via="… (WireGuard)"`.
 
 ---

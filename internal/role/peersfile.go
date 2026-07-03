@@ -31,6 +31,18 @@ type peerSpec struct {
 	expose *nft.Scope
 }
 
+// sameScope reports whether two per-buddy exposure scopes are equivalent. Two
+// nil scopes are equal (both "inherit --expose"); one nil and one set differ.
+// Otherwise the normalized string form (deterministic — see nft.Scope) decides,
+// so re-ordered or duplicate ports do not count as a change. Used by the
+// supervisor to detect a manifest `expose:` edit on SIGHUP.
+func sameScope(a, b *nft.Scope) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.String() == b.String()
+}
+
 // maxManifestBytes bounds the manifest read. The file is the operator's own,
 // but parsing stays defensive (fail loud on something absurd, never OOM).
 const maxManifestBytes = 1 << 20

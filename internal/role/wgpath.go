@@ -99,8 +99,15 @@ func udpAddrEqual(a, b *net.UDPAddr) bool {
 // the manifest's per-buddy `expose` wins, then the global --expose flag, and
 // with neither the zero Scope — fail-closed, nothing exposed.
 func effectiveScope(cfg BuddyConfig, att attempt) nft.Scope {
-	if att.expose != nil {
-		return *att.expose
+	return effectiveScopeOf(cfg, att.expose)
+}
+
+// effectiveScopeOf is effectiveScope for a bare per-buddy scope pointer (nil =
+// inherit): per-buddy > global --expose flag > fail-closed. Shared by the
+// worker's bring-up and the supervisor's live SIGHUP reprogram.
+func effectiveScopeOf(cfg BuddyConfig, perBuddy *nft.Scope) nft.Scope {
+	if perBuddy != nil {
+		return *perBuddy
 	}
 	if cfg.Expose != nil {
 		return *cfg.Expose
