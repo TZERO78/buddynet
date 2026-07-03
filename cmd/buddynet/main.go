@@ -38,6 +38,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/role"
 	"github.com/tzero78/buddynet/internal/secret"
 	"github.com/tzero78/buddynet/pkg/protocol"
@@ -130,6 +131,7 @@ func main() {
 	name := flag.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars")
 	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
 	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
+	expose := flag.String("expose", "", "buddy (--wireguard): port(s) the partner may reach on THIS host over the tunnel, e.g. 873 or 873,8080 or tcp/873,udp/51820; 'all' = explicit whole-host access. WITHOUT this flag NOTHING is exposed (fail-closed; a manifest's per-buddy 'expose' overrides it)")
 	wireguard := flag.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y), direct or over a relay; -L/-forward/--vip-listen are not needed on this path (and are ignored).")
 
 	showVersion := flag.Bool("version", false, "print version and exit")
@@ -236,6 +238,7 @@ func main() {
 		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
 		reauthInterval: *reauthInterval,
 		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
+		expose: *expose,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -378,9 +381,21 @@ func orDefault(v, def string) string {
 type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	peersFile                                                               string
-	localListen, forward, vipListen, name                                   string
+	localListen, forward, vipListen, name, expose                           string
 	lab, status, interactive, ephemeral, quic, dns, lazy, wireguard         bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
+}
+
+// exposeScope parses --expose; validate() has already rejected a bad value.
+func (a buddyArgs) exposeScope() *nft.Scope {
+	if a.expose == "" {
+		return nil // fail-closed default
+	}
+	s, err := nft.ParseScope(a.expose)
+	if err != nil {
+		return nil
+	}
+	return &s
 }
 
 // config maps the parsed flags onto the role package's BuddyConfig.
@@ -395,7 +410,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
-		WireGuard: a.wireguard,
+		WireGuard: a.wireguard, Expose: a.exposeScope(),
 	}
 }
 
@@ -425,6 +440,18 @@ func (a buddyArgs) validate() {
 	// that buddy's bnetN), so the -L/-forward/--vip-listen requirement is waived. It
 	// is the WG DATA plane, opt-in. MultiPeer works (one interface per buddy); only
 	// the QUIC-stream-specific --lazy is not applicable.
+	// --expose gates the WireGuard data plane; the QUIC door is already scoped
+	// by construction (-L/--forward carry exactly one configured service).
+	if a.expose != "" {
+		if !a.wireguard {
+			fmt.Fprintln(os.Stderr, "error: --expose only applies to --wireguard (the QUIC path forwards exactly the one service you configure)")
+			os.Exit(2)
+		}
+		if _, err := nft.ParseScope(a.expose); err != nil {
+			fmt.Fprintf(os.Stderr, "error: --expose: %v\n", err)
+			os.Exit(2)
+		}
+	}
 	if a.wireguard {
 		if a.lazy {
 			fmt.Fprintln(os.Stderr, "error: --wireguard cannot be combined with --lazy (lazy is QUIC-stream specific)")
