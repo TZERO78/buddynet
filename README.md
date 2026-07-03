@@ -145,7 +145,10 @@ mesh, use a solution built for that.
 - **QUIC by default, kernel WireGuard opt-in.** The default data plane is QUIC
   (TLS 1.3). With `--wireguard` (Phase 3, Linux + `NET_ADMIN`) the tunnel runs over
   kernel WireGuard instead and the partner is reachable natively at its VIP — same
-  control plane, same fallback chain. See **[docs/WIREGUARD.md](docs/WIREGUARD.md)**.
+  control plane, same fallback chain. **WireGuard sharing is scoped by default:
+  a buddy reaches ONLY the port(s) you `--expose` (e.g. `--expose 873`), never
+  your whole host — full-host access requires an explicit `--expose all`.**
+  See **[docs/WIREGUARD.md](docs/WIREGUARD.md)**.
 - **Lazy tunnel (`--lazy`).** The `-L` TCP listener binds immediately; the
   QUIC tunnel is established on demand when the first connection arrives.
   Useful for backup tools (rsync, kopia) that are invoked infrequently.

@@ -47,23 +47,45 @@ reconnects use a per-buddy stored session secret.
 
 ## The manifest (`--peers-file`)
 
-One buddy per line; blank lines and `#` comments are ignored:
+The manifest is **YAML** — one entry per buddy, hand-editable and managed by the
+`peers` subcommands:
 
+```yaml
+buddies:
+  - name: alice                 # optional — display name / .buddy hint
+    key: ALICE_KEY-base64...    # required — the buddy's pinned Ed25519 identity
+    token: shared-with-alice    # optional — one-time bootstrap token
+    expose: [873]               # optional — WireGuard: alice reaches ONLY tcp :873 here
+  - name: bob
+    key: BOB_KEY-base64...
+    expose: [8080, "udp/51820"] # bare numbers are tcp; "udp/…" for UDP
+  - key: CAROL_KEY-base64...
+    expose: all                 # explicit whole-host access for carol
+  - key: DAVE_KEY-base64...     # no expose → inherits --expose, else fail-closed
 ```
-# <peer-pubkey-b64>                              [bootstrap-token]
-ALICE_KEY-base64...                              shared-token-with-alice
-BOB_KEY-base64...                                shared-token-with-bob
-CAROL_KEY-base64...                                                        # already paired, no token
-```
 
-- **`<peer-pubkey-b64>`** (required) — the buddy's Ed25519 identity. Every tunnel
-  is pinned by key (no trust-on-first-use, no SAS prompt — daemon-friendly).
-- **`[bootstrap-token]`** (optional) — a shared one-time token used only for the
-  *first* pairing. Both buddies put the same token on their respective lines.
-  Once paired, a session secret is stored in `--known-peers` and the token is no
-  longer needed (you can delete it from the line).
+- **`key`** (required) — the buddy's Ed25519 identity. Every tunnel is pinned by
+  key (no trust-on-first-use, no SAS prompt — daemon-friendly).
+- **`token`** (optional) — a shared one-time token used only for the *first*
+  pairing. Both buddies configure the same token. Once paired, a session secret
+  is stored in `--known-peers` and the token is no longer needed.
+- **`name`** (optional) — a display name (letters/digits/hyphens, max 63).
+- **`expose`** (optional, WireGuard data plane) — the port(s) THIS buddy may
+  reach on your host over its tunnel. Overrides the global `--expose` flag;
+  omitted, the buddy inherits the flag — and with neither, **nothing is exposed**
+  (fail-closed). `all` is the explicit whole-host opt-out. See
+  [WIREGUARD.md](WIREGUARD.md).
 
+Unknown fields are rejected (a typo never silently changes your security posture).
 The file is the same trust domain as `known_peers` — keep it `0600`.
+
+> **Upgrading from the old line format** (`<key> [token]` per line): it is still
+> read for one release (with a deprecation warning). Convert it in place with
+> `peers migrate` — the original is kept as `<file>.bak`:
+>
+> ```bash
+> buddynet --peers-file /var/lib/buddynet/peers peers migrate
+> ```
 
 `--peers-file` is mutually exclusive with the single-buddy pairing modes
 (`--invite` / `--join` / `--token`) and with `--lazy`. To route to more than one
@@ -76,13 +98,13 @@ Curate your own list without editing the file by hand. These run and exit:
 ```bash
 # Show your buddies and whether each is paired yet:
 buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers peers list
-# VIP            NAME   STATUS    KEY     TOKEN      SOURCE
-# 10.66.18.240   alice  paired    m2x9Kp  token-set  manifest
-# 10.66.7.13     —      unpaired  q8Lm2A  token-set  manifest
-# 10.66.44.2     bob    paired    Zk1pQ9  —          session-only
+# VIP            NAME   STATUS    KEY     TOKEN      EXPOSE     SOURCE
+# 10.66.18.240   alice  paired    m2x9Kp  token-set  tcp/873    manifest
+# 10.66.7.13     —      unpaired  q8Lm2A  token-set  (inherit)  manifest
+# 10.66.44.2     bob    paired    Zk1pQ9  —          (inherit)  session-only
 
-# Add a buddy (pinned key + optional bootstrap token):
-buddynet --peers-file /var/lib/buddynet/peers peers add DAVE_KEY shared-token-with-dave
+# Add a buddy (pinned key + optional bootstrap token, name, WireGuard scope):
+buddynet --peers-file /var/lib/buddynet/peers peers add DAVE_KEY shared-token-with-dave --name dave --expose 873
 
 # Remove (revoke) a buddy — the short 6-char KEY from `peers list` is enough:
 buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers peers remove Zk1pQ9

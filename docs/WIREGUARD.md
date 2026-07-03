@@ -4,6 +4,33 @@
 > lab-validated by the project's own netns tests (`lab/test-wg-*.sh`), **not yet in
 > a tagged release**. The default data plane is still QUIC.
 
+> ## ⚠️ Sharing is SCOPED by default (`--expose`)
+>
+> **A buddy can reach ONLY the port(s) you `--expose` — never your whole host.**
+> Without `--expose`, **nothing** on your host is reachable over the tunnel
+> (fail-closed; ping stays allowed for diagnosis). To share everything — the
+> pre-scoping behaviour — you must say so explicitly: `--expose all`.
+>
+> ```bash
+> buddynet --role=buddy ... --wireguard --expose 873          # buddy reaches ONLY tcp :873
+> buddynet --role=buddy ... --wireguard --expose tcp/873,udp/51820
+> buddynet --role=buddy ... --wireguard --expose all          # explicit whole-host access
+> ```
+>
+> - **Requirement:** kernel **nftables support** + `CAP_NET_ADMIN` — both already
+>   required for `--wireguard` on any current kernel. **No** userspace firewall
+>   tool is needed: BuddyNet does **not** depend on `nft`, `iptables`, `ufw` or
+>   `firewalld` being installed (it talks to the kernel directly over netlink).
+> - **Coexistence:** rules live in BuddyNet's own private `table inet buddynet`,
+>   never in the host's `filter`/ufw/firewalld tables. An existing firewall setup
+>   is not touched, and its reloads do not touch BuddyNet's scope.
+> - **Fail-closed:** if the scope cannot be enforced (ancient pre-nftables
+>   kernel), the tunnel **refuses to come up** instead of silently exposing the
+>   host — `--expose all` is the explicit escape hatch.
+> - **Per buddy:** in MultiPeer, each manifest entry can carry its own `expose:`
+>   list — see [PEERS.md](PEERS.md). Precedence: per-buddy `expose` →
+>   `--expose` flag → fail-closed.
+
 BuddyNet can carry the tunnel over **kernel WireGuard** instead of QUIC. It is
 opt-in (`--wireguard`, set on **both** buddies) and changes only the *data plane* —
 the whole control plane (matchmaking, signed `PEER_LIST`, pinning/TOFU, the
@@ -80,11 +107,42 @@ http://10.66.40.12          # the partner's Unraid web UI, a Docker app, ssh, �
 path they are **not needed and ignored** (a `NOTE` is printed if set). Reach the
 partner at `<partner-vip>:<port>`.
 
-**Scope:** what is reachable is whatever the partner publishes **on its own host**
-(services bound to `0.0.0.0`, Docker ports on the host, …). BuddyNet routes only the
+**Scope:** what is reachable is what the partner **`--expose`s** (see the box at
+the top): only the named port(s), nothing without the flag, the whole host only
+with an explicit `--expose all`. Independently of that, BuddyNet routes only the
 partner's VIP `/32` — it does **not** route the LANs/VLANs *behind* the partner.
 That is deliberate: BuddyNet connects two hosts, it is not a site-to-site / subnet
 router or a mesh VPN.
+
+## Scoped exposure — how it works
+
+WireGuard's own AllowedIPs is *address*-based cryptokey routing; it cannot scope
+*ports*. So BuddyNet gates inbound traffic on each `bnetN` in the kernel's
+nftables subsystem, programmed directly over raw nfnetlink (`internal/nft`, the
+same no-subprocess posture as the interface setup itself):
+
+```
+table inet buddynet {            # private table — never touches your firewall
+  chain in {                     # input hook, policy accept (host unaffected)
+    iifname "bnet0" ct state established,related accept
+    iifname "bnet0" tcp dport 873 accept        # one rule per exposed port
+    iifname "bnet0" meta l4proto icmp accept    # ping for diagnosis
+    iifname "bnet0" meta l4proto ipv6-icmp accept
+    iifname "bnet0" drop                        # the fail-closed floor
+  }
+}
+```
+
+- The scope is installed **before** the interface comes up — there is never a
+  window of whole-host access — and removed with it on teardown.
+- Established/related is allowed, so *your own* outbound connections to the buddy
+  always get their answers regardless of your scope.
+- Each buddy has its own interface, so each has its own scope (MultiPeer).
+- The whole table is rebuilt atomically on every change; a stale table from a
+  killed process is cleared on the next start. Only a global `nft flush ruleset`
+  removes it early — it is re-asserted on the next reconnect.
+- Your own reach *into* the buddy is decided by the **buddy's** scope, not yours
+  (egress is not filtered — this is inbound least-privilege, per host).
 
 ## MultiPeer: one interface per buddy
 
@@ -123,12 +181,12 @@ The supervisor assigns each buddy a stable interface index, reconciled live on
   pinning/TOFU with a SAS on first contact, replay/cap protections, blind relay.
 - **Fails closed:** WG unavailable, no usable path, or a rejected SAS → an error,
   never a silent switch to another data plane.
-- **Full-host exposure (known, accepted for now).** Because the VIP is a real
-  address on the host, *every* service listening on `0.0.0.0` is reachable by the
-  partner over the overlay — the overlay is not yet scoped to a single service. For
-  the two-person trust model this is accepted; once **BuddyShare** is defined, the
-  plan is to firewall `bnet*` down to just that path. Until then: only pair with a
-  buddy you trust, and keep host services authenticated.
+- **Whole-host exposure: RESOLVED by scoped exposure.** The formerly documented
+  residual risk — every `0.0.0.0` service reachable by the buddy — is closed:
+  inbound on `bnetN` is **fail-closed by default** and opened per port with
+  `--expose` (per buddy in the manifest). `--expose all` restores the old
+  behaviour, as an explicit operator decision. Defense in depth still applies:
+  keep the services you do expose authenticated.
 - The relay never sees plaintext on this path either — it forwards sealed WireGuard
   packets, just as it forwards QUIC.
 
@@ -142,5 +200,8 @@ Run as root with the `wireguard` module loaded (netns labs):
   the blind relay.
 - `lab/test-wg-multipeer.sh` — a full mesh of three buddies, each on its own
   `bnet0`/`bnet1`, each pinging both partners' VIPs.
+- `lab/test-wg-expose.sh` — scoped exposure: the exposed port answers, everything
+  else is blocked, no `--expose` exposes nothing (fail-closed), `--expose all`
+  keeps whole-host reach, and the nft table is gone after teardown.
 
 See also `docs/ARCHITECTURE.md` (data-plane seam) and `SECURITY.md` (threat model).

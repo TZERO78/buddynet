@@ -267,12 +267,17 @@ secret and pin buddies with `--peer-key`.
   integrity protection, but they live in a `0700` dir alongside the identity key:
   a local attacker with write access there already controls the node. Pinning and
   the SAS still hold regardless of cache contents.
-- **WireGuard overlay host scoping (`--wireguard`).** On the opt-in WireGuard data
-  plane (Phase 3, [docs/WIREGUARD.md](docs/WIREGUARD.md)) the VIP is a real host
-  address, so *every* service the node publishes on `0.0.0.0` is reachable by the
-  paired buddy over the overlay — it is **not yet scoped to a single service**. This
-  is accepted for the two-person trust model (you pair only with a buddy you trust);
-  scoping `bnet*` down to a specific path is planned once **BuddyShare** is defined.
+- **WireGuard overlay host scoping (`--wireguard`) — RESOLVED (scoped exposure).**
+  This was the documented residual risk of the WireGuard data plane: the VIP is a
+  real host address, so every service on `0.0.0.0` used to be reachable by the
+  paired buddy. It is now closed as a *property*: inbound on each `bnetN` is
+  **fail-closed by default** — a buddy reaches **only** the port(s) the operator
+  names with `--expose` (or per buddy via `expose:` in the manifest); without a
+  scope, nothing. Whole-host access requires the explicit `--expose all`. The
+  enforcement is in the kernel's nftables subsystem (private `buddynet` table,
+  programmed over raw nfnetlink — no dependence on any userspace firewall tool),
+  installed before the interface exists and refusing the tunnel if it cannot be
+  programmed — never fail-open. See [docs/WIREGUARD.md](docs/WIREGUARD.md).
   BuddyNet still routes only the partner's VIP `/32`, **never the LANs/VLANs behind
   it** — it is not a subnet router. The same end-to-end guarantees hold: the
   WireGuard tunnel is between the two identity-derived keys, and the relay forwards
