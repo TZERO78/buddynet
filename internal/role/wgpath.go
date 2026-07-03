@@ -116,20 +116,20 @@ func effectiveScope(cfg BuddyConfig, att attempt) nft.Scope {
 // also keeps `--expose all` working on kernels without nftables).
 func applyScope(ifName string, scope nft.Scope) (func(), error) {
 	if scope.All {
-		log.Printf("WG: iface=%s exposed=all detail=%q", ifName, "explicit whole-host access (--expose all)")
+		log.Printf("EXPOSE: action=whole-host iface=%s detail=%q", ifName, "explicit whole-host access (--expose all)")
 		return func() {}, nil
 	}
 	if err := nft.Apply(ifName, scope); err != nil {
 		return nil, fmt.Errorf("cannot enforce the exposure scope on %s (%w) — refusing to bring the tunnel up rather than exposing the whole host; needs kernel nftables support + CAP_NET_ADMIN, or pass --expose all for explicit whole-host access", ifName, err)
 	}
 	if len(scope.Ports) == 0 {
-		log.Printf("WG: iface=%s exposed=NONE detail=%q", ifName, "fail-closed; the buddy reaches nothing here — add --expose <port> (or expose: in the manifest) to share a service")
+		log.Printf("EXPOSE: action=fail-closed iface=%s detail=%q", ifName, "the buddy reaches nothing here — add --expose <port> (or expose: in the manifest) to share a service")
 	} else {
-		log.Printf("WG: iface=%s exposed=%s", ifName, scope)
+		log.Printf("EXPOSE: action=scoped iface=%s ports=%s", ifName, scope)
 	}
 	return func() {
 		if err := nft.Remove(ifName); err != nil {
-			log.Printf("WARNING: could not remove the %s exposure rules: %v", ifName, err)
+			log.Printf("EXPOSE: action=remove-failed iface=%s detail=%q", ifName, err.Error())
 		}
 	}, nil
 }

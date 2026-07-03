@@ -87,7 +87,7 @@ test_firewall() { # $1 firewall
 		FAIL=1; docker rm -f "$a" "$b" >/dev/null 2>&1; return
 	fi
 	docker logs "$a" 2>&1 | grep -m1 'FIREWALL:' | sed 's/^/  /'
-	docker logs "$a" 2>&1 | grep -m1 'WG: iface=' | sed 's/^/  /'
+	docker logs "$a" 2>&1 | grep -m1 'EXPOSE: action=' | sed 's/^/  /'
 
 	local vip_a
 	vip_a=$(docker logs "$b" 2>&1 | grep -m1 'CONNECTED:' | grep -oE 'vip=10\.66\.[0-9]+\.[0-9]+' | cut -d= -f2)
