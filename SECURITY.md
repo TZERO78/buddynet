@@ -166,8 +166,8 @@ journalctl --namespace=buddynet | grep -E '(CONNECTED|DISCONNECTED|PAIRED|TRUST|
 # 3) Per-minute aggregates — only when active; ALERT segment on security counters:
 journalctl --namespace=buddynet | grep 'stats (last'
 #   stats (last 1m0s): role=handshake paired=.. challenged=.. rate-limited=.. dropped=..
-#                      [ALERT: new-pubkey=.. squat-rejected=.. replay=..]
-#   stats (last 1m0s): role=relay paired=.. challenged=.. rejected=.. [ALERT: leg-cap=..]
+#                      [ALERT: new-pubkey=.. squat-rejected=.. replay=.. panics=..]
+#   stats (last 1m0s): role=relay paired=.. challenged=.. rejected=.. [ALERT: leg-cap=.. panics=..]
 ```
 
 Each role tags its lines with a `SyslogIdentifier`, so you can narrow to one role
@@ -182,7 +182,11 @@ public guessing oracle) and a plain truncated hash on the buddy side.
 
 An `ALERT:` segment, any `SECURITY:` line, or a sustained spike in
 `rate-limited`/`dropped`/`rejected` is the signature of an attack being absorbed
-(a spoofed-source flood, a token-squat, or a replay attempt).
+(a spoofed-source flood, a token-squat, or a replay attempt). A non-zero
+`panics=` in the ALERT is the per-interval count of handler panics recovered by
+the safety net (see `panic-recovered` above): a rising value means a crafted
+input is reliably tripping a parser (ours or a dependency's) and is worth
+investigating even though the process kept running.
 
 ## Attacker capabilities
 
