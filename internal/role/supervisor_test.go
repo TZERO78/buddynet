@@ -25,7 +25,7 @@ func TestPeerSource(t *testing.T) {
 	cfg := BuddyConfig{KnownPeers: path}
 
 	// a has a stored session → reconnect attempt with the secret, pinned.
-	att, err := peerSource(cfg, peerSpec{pin: a, token: "boot-a"})(0)
+	att, err := peerSource(cfg, peerSpec{pin: a, token: "boot-a"}, newScopeCell(nil))(0)
 	if err != nil {
 		t.Fatalf("present session: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestPeerSource(t *testing.T) {
 	}
 
 	// b has no session but a token → bootstrap attempt (first pairing, pinned).
-	att, err = peerSource(cfg, peerSpec{pin: b, token: "boot-b"})(0)
+	att, err = peerSource(cfg, peerSpec{pin: b, token: "boot-b"}, newScopeCell(nil))(0)
 	if err != nil {
 		t.Fatalf("bootstrap: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestPeerSource(t *testing.T) {
 	}
 
 	// b with neither session nor token → revoked (worker stops cleanly).
-	if _, err := peerSource(cfg, peerSpec{pin: b})(0); !errors.Is(err, errSessionRevoked) {
+	if _, err := peerSource(cfg, peerSpec{pin: b}, newScopeCell(nil))(0); !errors.Is(err, errSessionRevoked) {
 		t.Fatalf("no session/token: want errSessionRevoked, got %v", err)
 	}
 }
@@ -67,7 +67,7 @@ func TestPeerSourceStaleSessionFallback(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 	cfg := BuddyConfig{KnownPeers: path}
-	src := peerSource(cfg, peerSpec{pin: a, token: "boot-a"})
+	src := peerSource(cfg, peerSpec{pin: a, token: "boot-a"}, newScopeCell(nil))
 
 	// Below the threshold: always the real session, never the token.
 	for _, f := range []int{0, 1, 2} {
@@ -92,13 +92,13 @@ func TestPeerSourceStaleSessionFallback(t *testing.T) {
 
 	// No bootstrap token in the manifest → no common rendezvous to fall back to;
 	// the session is the only option no matter how long it fails.
-	noTok := peerSource(cfg, peerSpec{pin: a})
+	noTok := peerSource(cfg, peerSpec{pin: a}, newScopeCell(nil))
 	if att, _ := noTok(9); att.rendezvous != "secret-a" {
 		t.Fatalf("no token: must never fall back, got %+v", att)
 	}
 
 	// --lab → the pin no longer protects us, so the fallback is disabled.
-	insecure := peerSource(BuddyConfig{KnownPeers: path, Insecure: true}, peerSpec{pin: a, token: "boot-a"})
+	insecure := peerSource(BuddyConfig{KnownPeers: path, Insecure: true}, peerSpec{pin: a, token: "boot-a"}, newScopeCell(nil))
 	if att, _ := insecure(9); att.rendezvous != "secret-a" {
 		t.Fatalf("insecure: must not fall back to a public token, got %+v", att)
 	}
