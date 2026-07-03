@@ -66,7 +66,7 @@ func runBindingOverConn(conn *net.UDPConn, remote *net.UDPAddr, committer bool, 
 		return nil, errors.New("binding: timed out waiting for peer")
 	}
 	defer conn.SetReadDeadline(time.Time{})
-	return runBinding(committer, send, recv)
+	return RunBinding(committer, send, recv)
 }
 
 // bringUpWGDirect hands the freshly punched UDP socket to kernel WireGuard: it

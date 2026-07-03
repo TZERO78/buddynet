@@ -26,13 +26,17 @@ import (
 
 const bindLabel = "buddynet-bind-v1"
 
-// runBinding performs the ephemeral-DH + commitment exchange and returns a
+// RunBinding performs the ephemeral-DH + commitment exchange and returns a
 // 32-byte session binding to feed ComputeSAS (in place of TLS keying material).
 // committer must be deterministic and opposite on the two ends (the transport
 // already picks roles by "lower public key listens" — reuse that). send/recv
 // exchange one opaque message each; the caller supplies the transport (the
 // punched/relayed datagram path in production, an in-memory pair in tests).
-func runBinding(committer bool, send func([]byte) error, recv func() ([]byte, error)) ([]byte, error) {
+//
+// Exported so the lab pentest tool can drive the WireGuard-path SAS binding
+// against a simulated man in the middle, the same way it drives the QUIC control
+// plane and crypto.PairSecret — see lab/pentest/probe.
+func RunBinding(committer bool, send func([]byte) error, recv func() ([]byte, error)) ([]byte, error) {
 	var ePriv [32]byte
 	if _, err := rand.Read(ePriv[:]); err != nil {
 		return nil, err

@@ -32,7 +32,7 @@ const sasAlphabet = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 // sasDigest hashes both identities (in a fixed order, so both ends agree) plus a
 // per-session binding value (sessionID). sessionID is the TLS exported keying
-// material on the QUIC path and the ephemeral-DH binding from runBinding on the
+// material on the QUIC path and the ephemeral-DH binding from RunBinding on the
 // WireGuard path; either way it ties the digest to THIS connection, so a man in
 // the middle — who establishes a different session/binding to each side — makes
 // the two ends derive different digests and their SAS will not match.

@@ -49,10 +49,10 @@ func runBoth(t *testing.T, a, b *link) (sidA, sidB []byte) {
 	}
 	ch := make(chan res, 1)
 	go func() {
-		sid, err := runBinding(false, b.send, b.recv) // initiator
+		sid, err := RunBinding(false, b.send, b.recv) // initiator
 		ch <- res{sid, err}
 	}()
-	sidA, errA := runBinding(true, a.send, a.recv) // committer
+	sidA, errA := RunBinding(true, a.send, a.recv) // committer
 	if errA != nil {
 		t.Fatalf("committer: %v", errA)
 	}
@@ -89,11 +89,11 @@ func TestBindingMITMProducesDifferentSAS(t *testing.T) {
 	aliceCh := make(chan res, 1)
 	bobCh := make(chan res, 1)
 	// Alice is committer on her leg; Bob is initiator on his leg.
-	go func() { sid, _ := runBinding(true, aliceL.send, aliceL.recv); aliceCh <- res{sid} }()
-	go func() { sid, _ := runBinding(false, bobL.send, bobL.recv); bobCh <- res{sid} }()
+	go func() { sid, _ := RunBinding(true, aliceL.send, aliceL.recv); aliceCh <- res{sid} }()
+	go func() { sid, _ := RunBinding(false, bobL.send, bobL.recv); bobCh <- res{sid} }()
 	// Attacker plays initiator toward Alice and committer toward Bob.
-	go func() { _, _ = runBinding(false, attackerToAlice.send, attackerToAlice.recv) }()
-	go func() { _, _ = runBinding(true, attackerToBob.send, attackerToBob.recv) }()
+	go func() { _, _ = RunBinding(false, attackerToAlice.send, attackerToAlice.recv) }()
+	go func() { _, _ = RunBinding(true, attackerToBob.send, attackerToBob.recv) }()
 
 	sidAlice := (<-aliceCh).sid
 	sidBob := (<-bobCh).sid
@@ -115,7 +115,7 @@ func TestBindingCommitmentMismatchRejected(t *testing.T) {
 	a, b := newPair()
 	errCh := make(chan error, 1)
 	go func() {
-		_, err := runBinding(false, b.send, b.recv) // initiator verifies commitment
+		_, err := RunBinding(false, b.send, b.recv) // initiator verifies commitment
 		errCh <- err
 	}()
 
