@@ -353,6 +353,13 @@ firewall:
 It applies to both the handshake and relay roles on the same node. See
 [OPERATIONS.md — IP allowlists](OPERATIONS.md#ip-allowlists---allow-cidr).
 
+**Harden the whole host, not just BuddyNet.** Everything above secures *this
+service* — but a VPS with a public IP wants the usual baseline too: SSH keys only
+(no password login), automatic security updates, `fail2ban`, a locked-down user,
+and sane sysctl. For a self-sovereign, reproducible take on all of that, see
+Markus's **[server-baukasten](https://github.com/TZERO78/server-baukasten)** — the
+host-hardening toolkit this project is designed to sit on top of.
+
 ---
 
 ## Where to go next
@@ -365,3 +372,5 @@ It applies to both the handshake and relay roles on the same node. See
 - [WIREGUARD.md](WIREGUARD.md) / [BUDDYSHARE.md](BUDDYSHARE.md) — the opt-in
   kernel-WireGuard data plane and scoped SMB sharing (these run on the *buddies*,
   not the coordinator).
+- [server-baukasten](https://github.com/TZERO78/server-baukasten) — full host
+  hardening for the VPS this coordinator runs on (SSH, updates, fail2ban, users).
