@@ -5,7 +5,12 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v3.0.0] — 2026-07-04
+
+Phase 3. One theme: the WireGuard data plane arrives **scoped and secure by
+default**. Three breaking changes — WireGuard sharing is fail-closed
+(`--expose`), the control plane is encrypted by default (`--quic-handshake`),
+and the peers manifest is YAML (`peers migrate` converts) — each detailed below.
 
 ### Changed
 
@@ -246,7 +251,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v2.2.0...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v3.0.0...HEAD
+[v3.0.0]: https://github.com/TZERO78/buddynet/compare/v2.3.0...v3.0.0
+[v2.3.0]: https://github.com/TZERO78/buddynet/compare/v2.2.1...v2.3.0
+[v2.2.1]: https://github.com/TZERO78/buddynet/compare/v2.2.0...v2.2.1
 [v2.2.0]: https://github.com/TZERO78/buddynet/compare/v2.1.0...v2.2.0
 [v2.1.0]: https://github.com/TZERO78/buddynet/compare/v2.0.0...v2.1.0
 [v2.0.0]: https://github.com/TZERO78/buddynet/compare/v1.0.0...v2.0.0
