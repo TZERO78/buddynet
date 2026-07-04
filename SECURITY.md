@@ -211,6 +211,40 @@ investigating even though the process kept running.
   mode `0600`) as a safer alternative to TCP loopback in shared/container hosts.
 - **Forward secrecy.** Provided by TLS 1.3 by default.
 
+## One key, many roles — a reviewed reuse
+
+Every node has exactly **one** long-term Ed25519 identity key. From it BuddyNet
+derives, deterministically, an X25519 keypair (`internal/crypto/x25519.go`) that
+serves as the long-term key of more than one protocol at once: the NaCl **sealed
+box** for enrollment codes, the static-static DH behind the **rendezvous secret**,
+and — on the Phase 3 branch — the **WireGuard** static key. The same seed also
+signs (Ed25519) and seeds the virtual IP.
+
+The textbook reflex is "one key, one purpose." We deliberately keep the single
+shared key, because separating it would break the load-bearing invariant that a
+peer can recompute another peer's keys from the **pinned public key alone**, with
+no key exchange. A per-protocol key derived with `HKDF(seed, label)` needs the
+private seed, so the public half could no longer be derived non-interactively;
+giving each protocol its own exchanged/pinned public key would add a fresh key to
+distribute and pin — a **real** MITM surface — to defend against a **theoretical**
+cross-protocol concern that the design already neutralises.
+
+Why it is safe:
+
+- **Ed25519 sign + X25519 DH from one seed** is the construction libsodium
+  (`crypto_sign_ed25519_sk_to_curve25519`) and Signal use by design.
+- **Separation lives at each consumer's KDF, not at the key.** The rendezvous
+  secret runs the DH output through a **labelled** HKDF
+  (`buddynet-pair-secret-v1` ‖ both public keys); the sealed box is domain-fixed
+  by its own HSalsa20 construction and is the only NaCl-box user; WireGuard/Noise
+  IK binds the static key into its handshake transcript.
+- No shared signing oracle exists between the protocols.
+
+**Invariant for contributors:** any *new* consumer of the identity-derived X25519
+key MUST post-process the raw DH through a labelled KDF, and MUST NOT add a second
+public-key derivation for the same identity. This reuse is the designated item for
+an external crypto review before Phase 3 WireGuard merges to main.
+
 ## Handshake server transport — two ways, both spoof-proof
 
 The handshake control plane (the `REGISTER` → `PEER_LIST` exchange) can run over
