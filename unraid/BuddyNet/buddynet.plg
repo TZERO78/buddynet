@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.07.04">
+<!ENTITY version   "2026.07.04.1">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,21 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.07.04.1
+- **BuddyShare section** on the settings page — share folders with your buddy
+  over SMB, scoped: the buddy reaches ONLY Samba (:445) over the tunnel, and
+  inside Samba only the shares you grant. Clean separation of duties: the
+  plugin configures **only the tunnel scope** (enabling BuddyShare visibly
+  fills in WireGuard + port 445); **users, shares and permissions stay 100% in
+  Unraid's own UI** — this plugin never creates or changes users. The section
+  warns prominently about **Public shares** (visible to any SMB client, so
+  also to the buddy), checks whether the named share user exists, and shows
+  the exact server/user info the buddy enters on the other side (soft-mount
+  hint included). E2e lab-proven pattern (`lab/test-buddyshare.sh`, 8/8).
+- The BuddyShare section is **bilingual**: with a German language pack
+  installed and active it renders in German (own dictionary via the webGUI's
+  plugin-translation mechanism), otherwise English. No binary change (v3.0.0).
 
 ###2026.07.04
 - Pinned to buddynet **v3.0.0** — the Phase 3 release. The **WireGuard data
@@ -167,6 +182,27 @@ function v($cfg,$k,$d=''){ return htmlspecialchars(isset($cfg[$k])?$cfg[$k]:$d);
 $running = trim(shell_exec("/etc/rc.d/rc.buddynet status 2>/dev/null"));
 $last = trim(shell_exec("grep -aE 'ONLINE|OFFLINE|REACHABLE|DISCONNECTED|waiting for buddy|tunnel error|^error' /var/log/buddynet.log 2>/dev/null | tail -n 1"));
 $ident = trim(shell_exec("grep -aoE 'identity [A-Za-z0-9+/=]{40,}' /var/log/buddynet.log 2>/dev/null | tail -n 1 | cut -d' ' -f2"));
+// Our own virtual IP is a pure function of our identity key (identity IS
+// address, see crypto/keys.go): 10.66.X.Y with X,Y = SHA-256(pubkey)[0:2],
+// network/broadcast folded off. Needed for the BuddyShare mount info.
+$vip = '';
+if ($ident) {
+  $h = hash('sha256', base64_decode($ident), true);
+  $x = ord($h[0]); $y = ord($h[1]);
+  if ($x==0 && $y==0) $y = 1;
+  if ($x==255 && $y==255) $y = 254;
+  $vip = "10.66.$x.$y";
+}
+// Public shares are visible to ANY SMB client — including the buddy, the
+// moment the tunnel is up. Surface them prominently (Unraid's default for a
+// new share is Public). Missing shareSecurity means the default, i.e. Public.
+$pubshares = array();
+foreach ((array)glob("/boot/config/shares/*.cfg") as $f) {
+  $c = (array)@parse_ini_file($f);
+  $sec = strtolower($c['shareSecurity'] ?? 'public');
+  $exp = strtolower($c['shareExport'] ?? 'e');
+  if ($exp != '-' && $sec == 'public') $pubshares[] = basename($f, '.cfg');
+}
 // online state from the last meaningful log line
 if    (strpos($last,'✓ ONLINE')!==false || strpos($last,'REACHABLE')!==false) $online='🟢 online';
 elseif(strpos($last,'waiting')!==false)                                        $online='🟡 waiting for buddy';
@@ -207,6 +243,15 @@ function bnShow(id,b){var e=document.getElementById(id);
 function bnGen(id){var a=new Uint8Array(48);crypto.getRandomValues(a);
   var s=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_');
   var e=document.getElementById(id);e.value=s;e.type='text';}
+// BuddyShare needs the WireGuard plane and :445 in the scope. Never silently:
+// this ADJUSTS THE VISIBLE FIELDS so the user sees exactly what will apply.
+function bnShare(sel){
+  if(sel.value!=='enable') return;
+  var f=sel.form;
+  f.WIREGUARD.value='enable';
+  var e=f.EXPOSE;
+  if(!/(^|[,\s])(tcp\/)?445($|[,\s])/.test(e.value)) e.value=e.value?e.value+',445':'445';
+}
 </script>
 
 <form markdown="1" method="POST" action="/update.php" target="progressFrame">
@@ -271,6 +316,15 @@ WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGua
 Exposed ports (--expose, WireGuard only) — the port(s) your buddy may reach on THIS server over the tunnel, e.g. "873" or "873,8080" or "tcp/873,udp/51820"; "all" = explicit whole-host access. **Empty = NOTHING is exposed (fail-closed, secure default)** — your buddy cannot reach any service here until you name a port:
 : <input type="text" name="EXPOSE" value="<?=v($cfg,'EXPOSE')?>" placeholder="empty = nothing exposed (secure default)">
 
+_(BuddyShare — share folders with your buddy over SMB)_ (_(needs WireGuard; selecting Enabled fills in WireGuard + port 445 above, visibly)_):
+: <select name="BUDDYSHARE" onchange="bnShare(this)">
+  <option value="disable" <?=v($cfg,'BUDDYSHARE')=='disable'?'selected':''?>>_(Disabled)_</option>
+  <option value="enable"  <?=v($cfg,'BUDDYSHARE')=='enable'?'selected':''?>>_(Enabled)_</option>
+  </select>
+
+_(Share user for your buddy)_ (_(an Unraid user YOU create under Users — this plugin never creates or changes users)_):
+: <input type="text" name="SHARE_USER" maxlength="30" value="<?=v($cfg,'SHARE_USER')?>" placeholder="bob">
+
 &nbsp;
 : <input type="submit" value="Apply">
 
@@ -303,6 +357,41 @@ README and SECURITY.md.
 in a file on the array (e.g. `/mnt/user/appdata/buddynet/token`, `chmod 0600`),
 set "Token file" above and leave the Token field empty. The service then starts
 on array start, once that file is available.
+
+---
+####BuddyShare
+
+_(BuddyShare — your buddy reaches exactly ONE thing on this server, Samba on port 445, and inside Samba only the shares you grant to the share user. Everything else stays invisible, fail-closed.)_
+_(Folder rights are plain Unraid: set the share to Secure or Private and grant the share user Read-only or Read-Write under Shares.)_
+
+<?php if (count($pubshares)): ?>
+<div style="border:1px solid #c00;border-radius:4px;padding:.6em .8em;margin:.8em 0">
+<b>⚠ _(Public shares are visible to your buddy)_</b><br>
+_(These shares are set to Public, so ANY SMB client — including your buddy once the tunnel is up — can open them)_:
+<b><?=htmlspecialchars(implode(', ',$pubshares))?></b><br>
+_(If that is not intended, set them to Secure or Private under Shares. New Unraid shares are Public by default.)_
+</div>
+<?php endif; ?>
+
+**_(Setup — three steps, all with Unraid's own tools)_**
+_(1. Create the user under Users — Add User; this plugin never creates or changes users.)_
+_(2. Grant that user access per share under Shares — SMB Security, Secure or Private.)_
+_(3. Send the SMB password to your buddy over a channel you trust. The password only selects the Unraid user; the security boundary is the pinned, encrypted tunnel itself.)_
+
+<?php $su = v($cfg,'SHARE_USER');
+if ($su) {
+  $exists = preg_match('/^'.preg_quote($su,'/').':/m', (string)@file_get_contents('/etc/passwd'));
+  echo '<p>'.($exists
+    ? '✓ '._('Unraid user').' <b>'.htmlspecialchars($su).'</b> '._('exists')
+    : '✗ '._('Unraid user').' <b>'.htmlspecialchars($su).'</b> '._('does not exist yet — create it under Users')).'</p>';
+}
+if ($vip && $su): ?>
+<div style="border:1px solid #888;border-radius:4px;padding:.6em .8em;margin:.8em 0">
+<b>_(What your buddy enters on the other side)_</b><br>
+_(Server)_: <code>\\<?=$vip?>\&lt;share&gt;</code> &nbsp; _(User)_: <code><?=htmlspecialchars($su)?></code><br>
+_(On Unraid use the Unassigned Devices plugin — Add Remote SMB Share. Prefer a soft mount: a dropped tunnel then gives errors instead of a hanging WebGUI.)_
+</div>
+<?php endif; ?>
 
 ---
 ####Danger zone
@@ -392,7 +481,18 @@ EXPOSE="$(trim "${EXPOSE:-}")"
 
 is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
+install_lang() {
+  # Our German dictionary for the BuddyShare section — picked up by the webGUI's
+  # parse_plugin() when a German language pack is active. Re-copied here because
+  # boot-time install order of plugin vs language pack is not guaranteed.
+  if [ -d /usr/local/emhttp/languages/de_DE ] && [ -f /boot/config/plugins/buddynet/lang-de_DE-buddynet.txt ]; then
+    cp -f /boot/config/plugins/buddynet/lang-de_DE-buddynet.txt /usr/local/emhttp/languages/de_DE/buddynet.txt
+    rm -f /usr/local/emhttp/languages/de_DE/buddynet.dot
+  fi
+}
+
 start() {
+  install_lang
   [ "$SERVICE" = "enable" ] || { echo "disabled"; return 0; }
   is_running && { echo "running"; return 0; }
   [ -x "$BIN" ] || { echo "binary missing"; return 1; }
@@ -486,6 +586,40 @@ case "$1" in
   reset-identity) reset_identity ;;
   *)             echo "usage: $0 {start|stop|restart|status|rate|forget-buddy|reset-identity}" ;;
 esac
+]]>
+</INLINE>
+</FILE>
+
+<!-- German strings for the BuddyShare section. Loaded by the webGUI's own
+     parse_plugin() mechanism from languages/<locale>/buddynet.txt when a German
+     language pack is installed and active; falls back to English otherwise.
+     Kept on flash; copied into place at install and service start. -->
+<FILE Name="&plgPATH;/lang-de_DE-buddynet.txt">
+<INLINE>
+<![CDATA[
+; BuddyNet plugin — deutsche Übersetzung (BuddyShare-Sektion).
+; Schlüssel = englischer Text nach den Regeln von Translations.php
+; (Zeichen ?{}|&~![]()/\:*^."' entfernt, Mehrfach-Leerzeichen zusammengefasst).
+BuddyShare — share folders with your buddy over SMB=BuddyShare — Ordner per SMB mit deinem Buddy teilen
+needs WireGuard; selecting Enabled fills in WireGuard + port 445 above, visibly=braucht WireGuard; bei Aktivierung werden oben sichtbar WireGuard + Port 445 eingetragen
+Share user for your buddy=Share-User für deinen Buddy
+an Unraid user YOU create under Users — this plugin never creates or changes users=ein Unraid-User, den DU unter Users anlegst — dieses Plugin legt nie User an und ändert keine
+BuddyShare — your buddy reaches exactly ONE thing on this server, Samba on port 445, and inside Samba only the shares you grant to the share user Everything else stays invisible, fail-closed=BuddyShare — dein Buddy erreicht auf diesem Server genau EINE Sache, Samba auf Port 445, und innerhalb von Samba nur die Shares, die du dem Share-User gibst. Alles andere bleibt unsichtbar, fail-closed
+Folder rights are plain Unraid set the share to Secure or Private and grant the share user Read-only or Read-Write under Shares=Ordner-Rechte sind pures Unraid — stelle den Share auf Secure oder Private und vergib dem Share-User unter Shares Read-only oder Read-Write
+Public shares are visible to your buddy=Public-Shares sind für deinen Buddy sichtbar
+These shares are set to Public, so ANY SMB client — including your buddy once the tunnel is up — can open them=Diese Shares stehen auf Public — JEDER SMB-Client kann sie öffnen, auch dein Buddy, sobald der Tunnel steht
+If that is not intended, set them to Secure or Private under Shares New Unraid shares are Public by default=Falls das nicht gewollt ist, stelle sie unter Shares auf Secure oder Private. Neue Unraid-Shares sind standardmäßig Public
+Setup — three steps, all with Unraids own tools=Einrichtung — drei Schritte, alles mit Unraids Bordmitteln
+1 Create the user under Users — Add User; this plugin never creates or changes users=1. Lege den User unter Users — Add User an; dieses Plugin legt nie User an und ändert keine
+2 Grant that user access per share under Shares — SMB Security, Secure or Private=2. Vergib dem User pro Share Rechte unter Shares — SMB Security, Secure oder Private
+3 Send the SMB password to your buddy over a channel you trust The password only selects the Unraid user; the security boundary is the pinned, encrypted tunnel itself=3. Schick deinem Buddy das SMB-Passwort über einen Kanal, dem du vertraust. Das Passwort wählt nur den Unraid-User aus; die Sicherheitsgrenze ist der gepinnte, verschlüsselte Tunnel selbst
+What your buddy enters on the other side=Was dein Buddy auf der anderen Seite einträgt
+Server=Server
+User=User
+On Unraid use the Unassigned Devices plugin — Add Remote SMB Share Prefer a soft mount a dropped tunnel then gives errors instead of a hanging WebGUI=Auf Unraid nimm das Unassigned-Devices-Plugin — Add Remote SMB Share. Bevorzuge einen Soft-Mount — ein abgerissener Tunnel gibt dann Fehler statt einer hängenden WebGUI
+Unraid user=Unraid-User
+exists=existiert
+does not exist yet — create it under Users=existiert noch nicht — lege ihn unter Users an
 ]]>
 </INLINE>
 </FILE>
@@ -801,9 +935,18 @@ TOKEN_FILE="/mnt/user/appdata/buddynet/token"
 PEER_KEY=""
 LISTEN="127.0.0.1:9000"
 FORWARD="127.0.0.1:873"
+BUDDYSHARE="disable"
+SHARE_USER=""
 CFG
 fi
 chmod 0600 "$PLG/buddynet.cfg"
+
+# German strings for the BuddyShare section (webGUI parse_plugin mechanism);
+# silently skipped when no German language pack is installed.
+if [ -d /usr/local/emhttp/languages/de_DE ] && [ -f "$PLG/lang-de_DE-buddynet.txt" ]; then
+  cp -f "$PLG/lang-de_DE-buddynet.txt" /usr/local/emhttp/languages/de_DE/buddynet.txt
+  rm -f /usr/local/emhttp/languages/de_DE/buddynet.dot
+fi
 
 /etc/rc.d/rc.buddynet restart >/dev/null 2>&1 || true
 echo ""
@@ -819,6 +962,7 @@ echo "BuddyNet installed. Configure it under Tools -> BuddyNet."
 /etc/rc.d/rc.buddynet stop >/dev/null 2>&1 || true
 rm -f /usr/local/bin/buddynet /etc/rc.d/rc.buddynet
 rm -rf /usr/local/emhttp/plugins/buddynet
+rm -f /usr/local/emhttp/languages/*/buddynet.txt /usr/local/emhttp/languages/*/buddynet.dot
 # Clean uninstall: remove the config + binary from flash...
 rm -rf /boot/config/plugins/buddynet
 # ...and the identity key + trust store + peer cache from the array (leave a
