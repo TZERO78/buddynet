@@ -1,8 +1,9 @@
 # WireGuard data plane (`--wireguard`)
 
-> **Status:** Phase 3, on the `phase3/wireguard` integration branch — opt-in and
-> lab-validated by the project's own netns tests (`lab/test-wg-*.sh`), **not yet in
-> a tagged release**. The default data plane is still QUIC.
+> **Status:** shipped in **v3.0.0** — opt-in and lab-validated by the project's
+> own netns tests (`lab/test-wg-*.sh`). The default data plane is still QUIC.
+> The flagship use of the scoped door is **BuddyShare**
+> ([BUDDYSHARE.md](BUDDYSHARE.md)): SMB on `--expose 445`.
 
 > ## ⚠️ Sharing is SCOPED by default (`--expose`)
 >

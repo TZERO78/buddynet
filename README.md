@@ -125,6 +125,24 @@ mesh, use a solution built for that.
 
 <sup>One hub, five buddies (`bob alice steven markus sandra`) — `peers list`, reach a buddy by name (BuddyDNS), revoke one, and the other four keep tunneling. Reproduce: `lab/demo.sh`.</sup>
 
+## BuddyShare — share folders, back up to each other
+
+The reason BuddyNet exists: two people who back up to each other. **BuddyShare
+is scoped by default** — your buddy reaches exactly **one** thing on your
+server (Samba, port 445 over the tunnel), and inside Samba only the shares you
+grant their Unraid user. Everything else on your host stays invisible,
+fail-closed.
+
+```text
+you:   Users → add user "bob"  ·  Shares → grant bob per share  ·  plugin: BuddyShare = Enabled
+buddy: mounts \\10.66.x.y\share (Unassigned Devices / mount.cifs) → points any backup tool at it
+```
+
+No new file service, no new ACL system: Unraid's own SMB does the folders, the
+tunnel's fail-closed `--expose` does the rest. Users and rights stay entirely
+in Unraid's UI — the plugin only configures the tunnel scope. Full guide incl.
+revoke and honest caveats: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md).
+
 ## How it works
 
 - **Identity = address.** Each node has one Ed25519 key; its virtual IP is
@@ -199,6 +217,8 @@ its honest limits — is in **[SECURITY.md](SECURITY.md)**.
 | Doc | What it covers |
 |-----|---------------|
 | [docs/TWO-BUDDIES.md](docs/TWO-BUDDIES.md) | The two-buddy setup, end to end |
+| [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md) | **BuddyShare**: scoped folder sharing + mutual backup over SMB |
+| [docs/WIREGUARD.md](docs/WIREGUARD.md) | The kernel-WireGuard data plane and scoped exposure (`--expose`) |
 | [docs/PEERS.md](docs/PEERS.md) | **MultiPeer** (many buddies): `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
 | [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
 | [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
@@ -249,13 +269,13 @@ single `.bundle`.)
 ## Status & Roadmap
 
 The two-buddy setup is implemented and tested end to end. **MultiPeer** (many
-buddies at once — `--peers-file`, per-buddy VIP routing, live reload) is built
-and lab-validated for the v2.1 line. A **kernel-WireGuard data plane**
-(`--wireguard`, direct + relay + MultiPeer) is built and lab-validated on the
-`phase3/wireguard` integration branch — opt-in, not yet in a tagged release
-(see [docs/WIREGUARD.md](docs/WIREGUARD.md)). Peer-to-peer gossip remains
-deferred. Everything is additive on the v1 wire format, virtual IPs, and fallback
-chain.
+buddies at once — `--peers-file`, per-buddy VIP routing, live reload) shipped
+with v2.1. **v3.0.0** ships the **kernel-WireGuard data plane** (`--wireguard`,
+direct + relay + MultiPeer) with **scoped, fail-closed exposure** (`--expose`,
+see [docs/WIREGUARD.md](docs/WIREGUARD.md)) and **BuddyShare** on top
+([docs/BUDDYSHARE.md](docs/BUDDYSHARE.md)) — all opt-in; QUIC remains the
+default data plane. Peer-to-peer gossip remains deferred. Everything is
+additive on the v1 wire format, virtual IPs, and fallback chain.
 
 **Security posture**
 

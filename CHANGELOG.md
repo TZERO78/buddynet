@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **BuddyShare** — scoped folder sharing and mutual backup over SMB, built
+  entirely from shipped parts (no binary change): the buddy reaches only Samba
+  (`--expose 445`) over the tunnel, and inside Samba only the shares granted to
+  their Unraid user. Unraid plugin 2026.07.04.1 adds the BuddyShare section
+  (visible WG+445 pre-fill, Public-share warning, user-exists check, far-side
+  mount info; bilingual DE/EN via the webGUI's plugin-translation mechanism).
+  The plugin never creates or changes Unraid users — users, shares and rights
+  stay in Unraid's own UI. Docs: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md),
+  posture paragraph in [SECURITY.md](SECURITY.md), lab proof
+  `lab/test-buddyshare.sh`.
+
 ## [v3.0.0] — 2026-07-04
 
 Phase 3. One theme: the WireGuard data plane arrives **scoped and secure by

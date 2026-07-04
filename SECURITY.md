@@ -282,6 +282,31 @@ secret and pin buddies with `--peer-key`.
   it** — it is not a subnet router. The same end-to-end guarantees hold: the
   WireGuard tunnel is between the two identity-derived keys, and the relay forwards
   only sealed WireGuard packets (it is not a WireGuard peer and holds no key).
+- **BuddyShare (SMB over the scoped door) — posture.** BuddyShare exposes the
+  host's **Samba** to the paired buddy (`--expose 445`), nothing else. What that
+  means in threat-model terms:
+  - The buddy-reachable surface is smbd — a large, widely audited C codebase
+    with its own CVE history. It is reachable **only** by the pinned,
+    mutually-authenticated tunnel peer, never by the network at large; this is
+    not an open port 445. Still, a buddy who is compromised (or malicious) gets
+    to talk to your Samba — patch Unraid as usual, and grant the share user the
+    minimum rights (read-only where possible).
+  - **The SMB password is not a security boundary.** It selects which Unraid
+    user the buddy is (and thus their per-share rights); the boundary that keeps
+    everyone else out is the key-pinned, end-to-end-encrypted tunnel plus the
+    fail-closed scope. Consequence with several buddies: each can reach :445,
+    but each can only authenticate as the user whose password they hold.
+  - **Public shares bypass the user layer by definition** — any SMB client may
+    open them, so the paired buddy can too, the moment the tunnel is up. The
+    plugin warns prominently; the fix is Unraid's own share security (Secure/
+    Private). The tunnel-scope layer is unaffected either way.
+  - Two identities, one coupling: the buddy's BuddyNet key (tunnel) and their
+    Unraid share user (folders) are independent credentials; the coupling is
+    "only this key reaches :445". Revocation works per layer and each layer
+    alone suffices (see [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md)); note that an
+    already-established SMB session survives a scope removal until it
+    disconnects (the established-traffic rule) — disable the user or restart
+    the tunnel to cut it immediately.
 
 ## Lost identity keys
 
