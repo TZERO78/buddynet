@@ -48,7 +48,8 @@ import (
 // binds the static key into its transcript hash. The invariant to preserve when
 // touching this: any NEW consumer of this keypair MUST post-process the raw DH
 // through a labelled KDF and MUST NOT introduce a second public-key derivation.
-// Before Phase 3 WireGuard lands on main, this reuse is the item to put to an
+// This reuse is now LIVE across three consumers (sealed box, rendezvous secret,
+// and the shipped --wireguard data plane) and is the designated item for an
 // external crypto review. See SECURITY.md "One key, many roles".
 
 // X25519FromEd25519Public maps an Ed25519 public key to the equivalent X25519
