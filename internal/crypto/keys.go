@@ -17,7 +17,6 @@ import (
 	"net/netip"
 	"os"
 	"strings"
-	"syscall"
 )
 
 // VirtualSubnet is the BuddyNet overlay range. Addresses are assigned
@@ -90,16 +89,16 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 	// A key file must be a REAL file, never a symlink. os.ReadFile/Stat/Chmod and
 	// os.WriteFile all FOLLOW symlinks, so honoring a symlinked path would read,
 	// chmod, or clobber the LINK TARGET (e.g. a key path pointing at /etc/shadow —
-	// as root that would chmod the target to 0600).
-	//
-	// We open the file ONCE with O_NOFOLLOW and do every subsequent check (perms)
-	// and fix (chmod) on the returned descriptor — never re-deriving from the path.
-	// That closes the TOCTOU an Lstat-then-ReadFile / Stat-then-Chmod pair leaves
-	// open: a path swapped to a symlink between the check and the use can no longer
-	// redirect us to another file. O_NOFOLLOW makes the open itself fail (ELOOP) if
-	// the final component is a link; a missing path (ENOENT) falls through to
-	// creation. Fail-closed throughout.
-	f, oerr := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	// as root that would chmod the target to 0600). Refuse a symlink up front, and
+	// on Unix additionally open with O_NOFOLLOW (oNoFollow) so a path swapped to a
+	// symlink AFTER this check still cannot redirect the open — and the perm check
+	// and chmod below run on the returned descriptor, never re-deriving from the
+	// path, so they cannot be redirected either. On platforms without O_NOFOLLOW
+	// (Windows) this Lstat is the guard, matching the prior behaviour. Fail-closed.
+	if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("key %s is a symlink; refusing (a key file must be a real file, not a link to one)", path)
+	}
+	f, oerr := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0)
 	switch {
 	case oerr == nil:
 		defer f.Close()
@@ -133,7 +132,9 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 			return nil, false, fmt.Errorf("key %s: bad seed length %d (want %d)", path, len(seed), ed25519.SeedSize)
 		}
 		return ed25519.NewKeyFromSeed(seed), false, nil
-	case errors.Is(oerr, syscall.ELOOP):
+	case symlinkRefused(oerr):
+		// A symlink was swapped in between the Lstat above and this open; on Unix
+		// O_NOFOLLOW caught it (ELOOP). Refuse rather than follow it.
 		return nil, false, fmt.Errorf("key %s is a symlink; refusing (a key file must be a real file, not a link to one)", path)
 	case errors.Is(oerr, os.ErrNotExist):
 		_, priv, err = ed25519.GenerateKey(rand.Reader)
@@ -143,7 +144,7 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 		seed := base64.StdEncoding.EncodeToString(priv.Seed())
 		// O_CREATE|O_EXCL|O_NOFOLLOW: create a fresh real file or fail — never write
 		// THROUGH a symlink and never clobber a file that appeared in the meantime.
-		cf, cerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		cf, cerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|oNoFollow, 0o600)
 		if cerr != nil {
 			return nil, false, fmt.Errorf("create key %s: %w", path, cerr)
 		}

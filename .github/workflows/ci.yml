@@ -33,6 +33,16 @@ jobs:
       - name: build
         run: go build ./...
 
+      # Cross-compile every release target so a platform-specific break (e.g. a
+      # Unix-only syscall constant) fails CI here, not in the tag-triggered
+      # release build. Keep this matrix in sync with .github/workflows/release.yml.
+      - name: cross-compile (release targets)
+        run: |
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            echo "building $t"
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/buddynet
+          done
+
   scan:
     runs-on: ubuntu-latest
     steps:
