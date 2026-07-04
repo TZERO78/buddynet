@@ -16,6 +16,7 @@ import (
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	buddydns "github.com/tzero78/buddynet/internal/dns"
+	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/peer"
 	"github.com/tzero78/buddynet/internal/vip"
 )
@@ -104,6 +105,21 @@ type BuddyConfig struct {
 	// but the QUIC tunnel is only dialled when a client actually connects.
 	// Requires LocalListen to be set.
 	Lazy bool
+
+	// WireGuard selects the kernel WireGuard data plane (bnet0) for the peer
+	// tunnel instead of QUIC (Phase 3, opt-in). The partner is reachable natively
+	// at its VIP (the kernel routes 10.66/16 over bnet0), so -L/-forward are not
+	// used. Needs Linux + NET_ADMIN + the wireguard module on BOTH buddies; the
+	// SAS first-contact binding runs over the punched socket (no TLS EKM), and the
+	// reconnect secret is the static-DH PairSecret. Direct P2P only for now
+	// (relay-over-WireGuard is a later step). Fails closed if WG is unavailable.
+	WireGuard bool
+
+	// Expose is the global --expose scope for the WireGuard data plane: the
+	// port(s) the partner may reach on this host over bnetN. nil = fail-closed
+	// (nothing exposed). A per-buddy `expose` in the manifest overrides it.
+	// Scope.All is the explicit whole-host opt-out (the pre-scoping behavior).
+	Expose *nft.Scope
 }
 
 // attempt is the per-connection plan: which rendezvous token to register with,
@@ -115,6 +131,8 @@ type attempt struct {
 	inviteToken  string            // human token, for TOFU/session keying ("" on reconnect)
 	pin          ed25519.PublicKey // reconnect: partner key that MUST match (nil otherwise)
 	firstPairing bool              // ephemeral invite: derive & store a session on success
+	ifIndex      int               // WireGuard data plane: this buddy's interface is bnet{ifIndex} (one per buddy)
+	expose       *nft.Scope        // per-buddy WG exposure from the manifest (nil = inherit --expose, else fail-closed)
 }
 
 // node bundles everything a buddy needs that exists exactly ONCE per process,
@@ -298,7 +316,7 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	// Single-peer / first-pairing path: one reconnect loop. nextAttempt prefers a
 	// stored session (reconnect, pinning the recorded key) and otherwise pairs with
 	// the invite/legacy token; an ephemeral invite stores a session on success.
-	return peerLoop(ctx, cfg, nd, lt, func(int) (attempt, error) { return nextAttempt(cfg) }, time.Now())
+	return peerLoop(ctx, cfg, nd, lt, func(int) (attempt, error) { return nextAttempt(cfg) }, time.Now(), 0)
 }
 
 // Reconnect backoff bounds: start at reconnectBase, double up to reconnectMax,

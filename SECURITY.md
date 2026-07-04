@@ -61,22 +61,27 @@ partner." BuddyNet closes this with a trust hierarchy (strongest first):
 
    ```
    🔑 Safety check — first contact with this buddy.
-           K7QX2M
-   Do they match? [y/N]
+           your code:  K7QX2M
+   Type your buddy's code: _
    ```
 
-   Read it to your buddy over a **trusted out-of-band channel** (phone, Signal)
-   and confirm only if **both sides show the same code**. Because the code is
-   bound to the live TLS session (channel binding), a man in the middle — who
-   terminates a *different* TLS session to each side — makes the two codes
-   differ. This catches the MITM **at first contact**, not after the fact, and
-   it holds **even against a malicious handshake server**: a substituted key
-   yields a mismatching SAS. On confirm the key is pinned (indexed by a *hash* of
-   the token, never the token in clear) and later connects are checked silently.
+   Call your buddy over a **trusted out-of-band channel** (phone, Signal), read
+   them **your** code, and **type in the code they read to you**. Both buddies do
+   this, so the check is mutual. Because the code is bound to the live TLS session
+   (channel binding), a man in the middle — who terminates a *different* TLS
+   session to each side — makes the two codes differ, so what your buddy reads
+   will not match and the entry is rejected. This catches the MITM **at first
+   contact**, not after the fact, and it holds **even against a malicious
+   handshake server**: a substituted key yields a mismatching code. On a match the
+   key is pinned (indexed by a *hash* of the token, never the token in clear) and
+   later connects are checked silently.
 
-   > **The one assumption you cannot remove:** the SAS only protects you if a
-   > human actually compares it. Reflexively pressing `y` defeats it. For
-   > unattended links, use `--peer-key` instead.
+   > **Why type it, not press `y`:** requiring the code to be *entered* means it
+   > cannot be confirmed without actually receiving it out of band — a reflexive
+   > keypress no longer trusts an unverified key. The residual is a user who types
+   > their **own** displayed code instead of the one they heard; that is far more
+   > deliberate than a single `y`, but for unattended links use `--peer-key`, which
+   > removes the human step entirely.
 
 3. **`--lab`** — no verification at all. Must be set explicitly, logged
    loudly, **testing only.** Never use it on a daemon or a server-side host.
@@ -161,8 +166,8 @@ journalctl --namespace=buddynet | grep -E '(CONNECTED|DISCONNECTED|PAIRED|TRUST|
 # 3) Per-minute aggregates — only when active; ALERT segment on security counters:
 journalctl --namespace=buddynet | grep 'stats (last'
 #   stats (last 1m0s): role=handshake paired=.. challenged=.. rate-limited=.. dropped=..
-#                      [ALERT: new-pubkey=.. squat-rejected=.. replay=..]
-#   stats (last 1m0s): role=relay paired=.. challenged=.. rejected=.. [ALERT: leg-cap=..]
+#                      [ALERT: new-pubkey=.. squat-rejected=.. replay=.. panics=..]
+#   stats (last 1m0s): role=relay paired=.. challenged=.. rejected=.. [ALERT: leg-cap=.. panics=..]
 ```
 
 Each role tags its lines with a `SyslogIdentifier`, so you can narrow to one role
@@ -177,7 +182,11 @@ public guessing oracle) and a plain truncated hash on the buddy side.
 
 An `ALERT:` segment, any `SECURITY:` line, or a sustained spike in
 `rate-limited`/`dropped`/`rejected` is the signature of an attack being absorbed
-(a spoofed-source flood, a token-squat, or a replay attempt).
+(a spoofed-source flood, a token-squat, or a replay attempt). A non-zero
+`panics=` in the ALERT is the per-interval count of handler panics recovered by
+the safety net (see `panic-recovered` above): a rising value means a crafted
+input is reliably tripping a parser (ours or a dependency's) and is worth
+investigating even though the process kept running.
 
 ## Attacker capabilities
 
@@ -258,6 +267,21 @@ secret and pin buddies with `--peer-key`.
   integrity protection, but they live in a `0700` dir alongside the identity key:
   a local attacker with write access there already controls the node. Pinning and
   the SAS still hold regardless of cache contents.
+- **WireGuard overlay host scoping (`--wireguard`) — RESOLVED (scoped exposure).**
+  This was the documented residual risk of the WireGuard data plane: the VIP is a
+  real host address, so every service on `0.0.0.0` used to be reachable by the
+  paired buddy. It is now closed as a *property*: inbound on each `bnetN` is
+  **fail-closed by default** — a buddy reaches **only** the port(s) the operator
+  names with `--expose` (or per buddy via `expose:` in the manifest); without a
+  scope, nothing. Whole-host access requires the explicit `--expose all`. The
+  enforcement is in the kernel's nftables subsystem (private `buddynet` table,
+  programmed over raw nfnetlink — no dependence on any userspace firewall tool),
+  installed before the interface exists and refusing the tunnel if it cannot be
+  programmed — never fail-open. See [docs/WIREGUARD.md](docs/WIREGUARD.md).
+  BuddyNet still routes only the partner's VIP `/32`, **never the LANs/VLANs behind
+  it** — it is not a subnet router. The same end-to-end guarantees hold: the
+  WireGuard tunnel is between the two identity-derived keys, and the relay forwards
+  only sealed WireGuard packets (it is not a WireGuard peer and holds no key).
 
 ## Lost identity keys
 

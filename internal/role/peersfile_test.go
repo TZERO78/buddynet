@@ -60,6 +60,110 @@ func TestLoadPeersFileRejectsBadInput(t *testing.T) {
 	}
 }
 
+func TestLoadPeersFileYAML(t *testing.T) {
+	a, _, _ := ed25519.GenerateKey(rand.Reader)
+	b, _, _ := ed25519.GenerateKey(rand.Reader)
+	c, _, _ := ed25519.GenerateKey(rand.Reader)
+	aB64, bB64, cB64 := bcrypto.PubKeyB64(a), bcrypto.PubKeyB64(b), bcrypto.PubKeyB64(c)
+
+	path := filepath.Join(t.TempDir(), "peers.yaml")
+	writeFile(t, path, `# a manifest
+buddies:
+  - name: alice
+    key: `+aB64+`
+    token: boot-a
+    expose: [873, "udp/51820"]
+  - key: `+bB64+`
+    expose: all
+  - key: `+cB64+`
+`)
+	specs, err := loadPeersFile(path)
+	if err != nil {
+		t.Fatalf("loadPeersFile: %v", err)
+	}
+	if len(specs) != 3 {
+		t.Fatalf("want 3 specs, got %d", len(specs))
+	}
+	if !specs[0].pin.Equal(a) || specs[0].token != "boot-a" || specs[0].name != "alice" {
+		t.Fatalf("spec[0] = %+v", specs[0])
+	}
+	if specs[0].expose == nil || specs[0].expose.String() != "tcp/873,udp/51820" {
+		t.Fatalf("spec[0].expose = %v", specs[0].expose)
+	}
+	if specs[1].expose == nil || !specs[1].expose.All {
+		t.Fatalf("spec[1] should be expose:all, got %+v", specs[1].expose)
+	}
+	if specs[2].expose != nil {
+		t.Fatalf("spec[2] should inherit (nil expose), got %v", specs[2].expose)
+	}
+}
+
+func TestLoadPeersFileYAMLRejectsBadInput(t *testing.T) {
+	good := bcrypto.PubKeyB64(func() ed25519.PublicKey { p, _, _ := ed25519.GenerateKey(rand.Reader); return p }())
+	cases := map[string]string{
+		"unknown field":  "buddies:\n  - key: " + good + "\n    tokken: oops\n",
+		"missing key":    "buddies:\n  - name: alice\n",
+		"bad key":        "buddies:\n  - key: not-a-key\n",
+		"duplicate key":  "buddies:\n  - key: " + good + "\n  - key: " + good + "\n",
+		"bad expose":     "buddies:\n  - key: " + good + "\n    expose: [notaport]\n",
+		"empty expose":   "buddies:\n  - key: " + good + "\n    expose: []\n",
+		"expose scalar":  "buddies:\n  - key: " + good + "\n    expose: 873\n",
+		"bad name chars": "buddies:\n  - key: " + good + "\n    name: \"a b\"\n",
+	}
+	for name, content := range cases {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "peers.yaml")
+			writeFile(t, path, content)
+			if _, err := loadPeersFile(path); err == nil {
+				t.Fatalf("%s: expected an error", name)
+			}
+		})
+	}
+}
+
+// A legacy manifest converts in place; the YAML result parses to the same
+// specs, and `peers add/remove` refuse the legacy format before migration.
+func TestPeersMigrate(t *testing.T) {
+	a, _, _ := ed25519.GenerateKey(rand.Reader)
+	b, _, _ := ed25519.GenerateKey(rand.Reader)
+	aB64, bB64 := bcrypto.PubKeyB64(a), bcrypto.PubKeyB64(b)
+
+	path := filepath.Join(t.TempDir(), "peers")
+	writeFile(t, path, aB64+" boot-a\n"+bB64+"\n")
+
+	if err := PeersAdd(path, bB64, "", "", ""); err == nil {
+		t.Fatal("peers add on a legacy manifest must refuse and point at migrate")
+	}
+	if err := PeersMigrate(path); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if _, err := os.Stat(path + ".bak"); err != nil {
+		t.Fatalf("backup missing: %v", err)
+	}
+	specs, err := loadPeersFile(path)
+	if err != nil {
+		t.Fatalf("reload after migrate: %v", err)
+	}
+	if len(specs) != 2 || !specs[0].pin.Equal(a) || specs[0].token != "boot-a" || specs[1].token != "" {
+		t.Fatalf("migrated specs = %+v", specs)
+	}
+	// Idempotent: a second migrate is a no-op, and the file stays writable.
+	if err := PeersMigrate(path); err != nil {
+		t.Fatalf("second migrate: %v", err)
+	}
+	c, _, _ := ed25519.GenerateKey(rand.Reader)
+	if err := PeersAdd(path, bcrypto.PubKeyB64(c), "boot-c", "carol", "tcp/8080"); err != nil {
+		t.Fatalf("add after migrate: %v", err)
+	}
+	specs, err = loadPeersFile(path)
+	if err != nil || len(specs) != 3 {
+		t.Fatalf("after add: specs=%d err=%v", len(specs), err)
+	}
+	if specs[2].name != "carol" || specs[2].expose == nil || specs[2].expose.String() != "tcp/8080" {
+		t.Fatalf("added spec = %+v", specs[2])
+	}
+}
+
 func TestLoadPeersFileEmptyPath(t *testing.T) {
 	specs, err := loadPeersFile("")
 	if err != nil || specs != nil {

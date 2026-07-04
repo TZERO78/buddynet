@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **BREAKING — WireGuard sharing is now SCOPED and fail-closed by default
+  (`--expose`).** On the `--wireguard` data plane a buddy can now reach **only**
+  the port(s) you name with `--expose` (e.g. `--expose 873`, or per buddy via
+  `expose:` in the manifest) — **without the flag, nothing on your host is
+  reachable** over the tunnel (ping stays allowed for diagnosis). Anyone relying
+  on the previous whole-host behaviour must now say so explicitly with
+  `--expose all`. The scope is enforced in the kernel's nftables subsystem via a
+  private `table inet buddynet` (programmed over raw netlink — no dependence on
+  nft/iptables/ufw/firewalld being installed, no interference with an existing
+  firewall setup) and is installed before the interface comes up; if it cannot be
+  enforced, the tunnel refuses to start rather than exposing the host. See
+  [docs/WIREGUARD.md](docs/WIREGUARD.md).
+- **The `--peers-file` manifest is now YAML** — per-buddy fields outgrew the old
+  line format: each entry takes `key` (required), plus optional `name`, `token`
+  and `expose` (the per-buddy WireGuard scope, overriding `--expose`). The legacy
+  `<key> [token]` line format is still read for one release with a deprecation
+  warning; convert with the new **`peers migrate`** subcommand (the old file is
+  kept as `.bak`). `peers add` gains `--name` and `--expose`; `peers list` shows
+  the per-buddy scope. This adds `gopkg.in/yaml.v3` as the project's second
+  approved application dependency (after `miekg/dns`); the manifest is parsed
+  strictly (unknown fields are errors) with bounded size. See
+  [docs/PEERS.md](docs/PEERS.md).
+
+- **The handshake control plane is now QUIC/TLS 1.3 by default (security by
+  default).** Previously plain UDP (cleartext token) was the default and
+  `--quic-handshake` opted in; now encryption is on unless you explicitly opt out
+  with `--quic-handshake=false` (or `BUDDYNET_QUIC=0`). **Set the same on the server
+  and every buddy** — a QUIC buddy cannot pair with a plain-UDP server (and vice
+  versa), so when upgrading, upgrade/align both sides, or pass `--quic-handshake=false`
+  on both for the old behaviour.
+- **BuddyDNS names can no longer take the fingerprint-alias shape.** A `--name`
+  that is exactly 8 hexadecimal characters is now rejected: that shape is reserved
+  for the `<fp8>.buddy` fingerprint alias, so a peer's self-asserted name can no
+  longer shadow another peer's fingerprint entry in the resolver. A vanity name
+  like `deadbeef` is disallowed for this reason; `deadbeefx` or `web01` are fine.
+  See [docs/BUDDYDNS.md](docs/BUDDYDNS.md).
+- **systemd units gain a crash-loop circuit breaker.** `StartLimitIntervalSec=60`
+  / `StartLimitBurst=5` on the handshake, relay and buddy units: a deterministic
+  start failure now stops after 5 attempts instead of restarting forever under
+  `Restart=on-failure`. Transient network reconnects are unaffected (handled
+  in-process with jittered backoff).
+
+### Added
+
+- **Known-buddies control plane: QUIC client-key pinning in approval mode.** With
+  `--quic-handshake --authorized`, the handshake server now pins clients by key at
+  the **TLS handshake** — every buddy presents its Ed25519 identity certificate and
+  a key not on the allowlist is refused *before* it can send a `REGISTER` (the same
+  early rejection a firewall gives, enforced cryptographically; no PKI — the key is
+  pinned directly, mirroring how the buddy already pins the server key). Open mode
+  (no `--authorized`) is unchanged: any client may connect and pairing is gated by
+  the secret token at the application layer. See [docs/OPERATIONS.md](docs/OPERATIONS.md).
+  The control plane is always QUIC/plain — never WireGuard — so per-buddy endpoint
+  discovery and MultiPeer keep working.
+- **Kernel-WireGuard data plane (`--wireguard`, Phase 3).** Opt-in second data
+  plane (set on both buddies): instead of QUIC streams, the tunnel runs over a
+  kernel WireGuard interface and the partner is reachable natively at its VIP
+  (`10.66.X.Y`). The WireGuard X25519 keys and the VIP are derived deterministically
+  from the long-term Ed25519 identity, so `identity = key = VIP` carries onto the
+  data plane with nothing exchanged over the wire. Configured over raw netlink (no
+  `wg`/`ip` subprocess, zero new runtime dependencies). Reuses the entire control
+  plane and the direct→relay fallback chain — **no `protocol.Version` bump**.
+  - **Direct** (hole-punch → socket handoff to kernel WG, reusing the punched port
+    so the NAT mapping survives) and **relay** (the blind relay forwards the
+    encrypted WireGuard packets, never a WireGuard peer, holds no key).
+  - **First contact** is verified with a Short Authentication String bound to an
+    ephemeral-DH exchange over the punched UDP socket (RFC 6189), since there is no
+    TLS exporter on this path; pinned peers skip it. Reconnects use a deterministic
+    static-DH secret. Fails closed: WG unavailable / no path / rejected SAS → error,
+    never a silent fall back to another plane.
+  - **MultiPeer** (`--wireguard` + `--peers-file`): one interface per buddy
+    (`bnet0`, `bnet1`, …), since kernel WireGuard has one listen port per device.
+    Keeps every buddy peer-to-peer (no central hub/"switch") and the relay working
+    per buddy.
+  - `-L`/`-forward`/`--vip-listen` are not needed on this path (the VIP is native)
+    and are ignored with a `NOTE`.
+  - Lab-validated (own netns tests): `lab/test-wg-buddy.sh`, `test-wg-relay.sh`,
+    `test-wg-multipeer.sh`. See [docs/WIREGUARD.md](docs/WIREGUARD.md).
+  - On the `phase3/wireguard` integration branch; **not yet in a tagged release**.
+
+- **Recovered-panic count in the per-minute stats line.** The handshake and relay
+  `stats (last …)` line now reports `panics=N` in its `ALERT:` segment — the
+  per-interval number of request/connection handler panics contained by the safety
+  net. A reliably-triggerable parser panic is otherwise only logged once per
+  throttle window; a rising count is now a standing operational signal. See
+  [SECURITY.md](SECURITY.md).
+
+### Fixed
+
+- `tunnel.ControlServer.Close` is now idempotent (`sync.Once`): the previous
+  check-then-close on the done channel could double-close under concurrent callers
+  and panic ("close of closed channel"). Surfaced as a `-race` flake.
+
+### Security
+
+- **CI security tooling is pinned to exact versions.** `gosec` and `govulncheck`
+  are installed at `@v2.27.1` / `@v1.5.0` instead of `@latest`, verified against
+  the Go checksum database. A security tool runs in CI with repository/token
+  access, so an upstream compromise or a bad release can no longer be pulled in
+  automatically — matching how the GitHub Actions and the Docker base image are
+  already pinned by digest.
+
 ## [v2.3.0] — 2026-06-20
 
 ### Security

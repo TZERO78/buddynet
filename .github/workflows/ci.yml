@@ -43,9 +43,14 @@ jobs:
 
       # Known CVEs in our dependencies AND in the Go toolchain, filtered to the
       # code paths we actually call. High signal, low noise — blocking.
+      # Pinned to an exact version (not @latest): a security tool runs in CI with
+      # repo/token access, so an upstream compromise or a bad release must not be
+      # pulled automatically. The version is verified against the Go checksum
+      # database on install; bump it deliberately. (Matches how the Actions and
+      # Docker base image are pinned by digest elsewhere.)
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
           govulncheck ./...
 
       # Static security analysis. Several rules are excluded because they fire
@@ -69,5 +74,5 @@ jobs:
       # go.mod (go >= 1.25).
       - name: gosec
         run: |
-          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
           gosec -severity medium -exclude=G104,G115,G117,G123,G304,G402,G703 ./...

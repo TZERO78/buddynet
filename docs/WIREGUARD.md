@@ -1,0 +1,220 @@
+# WireGuard data plane (`--wireguard`)
+
+> **Status:** Phase 3, on the `phase3/wireguard` integration branch — opt-in and
+> lab-validated by the project's own netns tests (`lab/test-wg-*.sh`), **not yet in
+> a tagged release**. The default data plane is still QUIC.
+
+> ## ⚠️ Sharing is SCOPED by default (`--expose`)
+>
+> **A buddy can reach ONLY the port(s) you `--expose` — never your whole host.**
+> Without `--expose`, **nothing** on your host is reachable over the tunnel
+> (fail-closed; ping stays allowed for diagnosis). To share everything — the
+> pre-scoping behaviour — you must say so explicitly: `--expose all`.
+>
+> ```bash
+> buddynet --role=buddy ... --wireguard --expose 873          # buddy reaches ONLY tcp :873
+> buddynet --role=buddy ... --wireguard --expose tcp/873,udp/51820
+> buddynet --role=buddy ... --wireguard --expose all          # explicit whole-host access
+> ```
+>
+> - **Requirement:** kernel **nftables support** + `CAP_NET_ADMIN` — both already
+>   required for `--wireguard` on any current kernel. **No** userspace firewall
+>   tool is needed: BuddyNet does **not** depend on `nft`, `iptables`, `ufw` or
+>   `firewalld` being installed (it talks to the kernel directly over netlink).
+> - **Coexistence:** rules live in BuddyNet's own private `table inet buddynet`,
+>   never in the host's `filter`/ufw/firewalld tables. An existing firewall setup
+>   is not touched, and its reloads do not touch BuddyNet's scope. The host
+>   firewall can never *widen* the scope (a drop in any table wins) — and the
+>   reverse also holds: on a default-deny host firewall, tunnel traffic needs an
+>   allow there too (both layers must agree; defense in depth).
+> - **Fail-closed:** if the scope cannot be enforced (ancient pre-nftables
+>   kernel), the tunnel **refuses to come up** instead of silently exposing the
+>   host — `--expose all` is the explicit escape hatch.
+> - **Per buddy:** in MultiPeer, each manifest entry can carry its own `expose:`
+>   list — see [PEERS.md](PEERS.md). Precedence: per-buddy `expose` →
+>   `--expose` flag → fail-closed.
+
+BuddyNet can carry the tunnel over **kernel WireGuard** instead of QUIC. It is
+opt-in (`--wireguard`, set on **both** buddies) and changes only the *data plane* —
+the whole control plane (matchmaking, signed `PEER_LIST`, pinning/TOFU, the
+fallback chain, the blind relay, the 48-buddy cap) is unchanged. No protocol
+version bump: the wire format between buddy and server is identical.
+
+> **The control plane is always QUIC/plain — never WireGuard.** Matchmaking runs
+> over `--quic-handshake` (encrypted, source-validated, and — with `--authorized` —
+> pinning clients to the allowlist at the TLS handshake; see
+> [OPERATIONS.md](OPERATIONS.md) and [APPROVAL.md](APPROVAL.md)). Keeping control
+> off WireGuard is deliberate: the server would otherwise key peers by identity and
+> a buddy's N concurrent registrations would collide, breaking per-buddy endpoint
+> discovery and MultiPeer — the same reason Tailscale/Netbird keep their control
+> plane off WireGuard. `--wireguard` is purely the data plane.
+
+## Why WireGuard
+
+The QUIC path forwards TCP over streams (`-L`/`-forward`). WireGuard instead gives
+each node a real L3 overlay address: once the tunnel is up, the partner is
+reachable **natively at its virtual IP** (`10.66.X.Y`) for *any* protocol, with no
+per-connection plumbing. It is steadier for long-running mesh use (survives roaming
+and re-keys) — the motivation for Phase 3.
+
+## Identity is still address
+
+Nothing new is trusted. The WireGuard (X25519) key pair is **derived
+deterministically** from the node's long-term Ed25519 identity
+(`crypto.X25519FromEd25519Public/Private`), and the interface VIP is the same
+`10.66.X.Y = SHA-256(pubkey)` as everywhere else. So `identity = key = VIP` carries
+onto the data plane with **nothing exchanged over the wire** — two nodes that know
+each other's pinned Ed25519 key already agree on each other's WireGuard key and VIP.
+A roster claiming an inconsistent VIP is rejected exactly as on the QUIC path.
+
+The kernel interface is configured directly over **raw netlink** (no `wg`/`ip`
+subprocess, no `wireguard-tools` dependency), mirroring `internal/vip`'s approach
+and keeping the zero-runtime-dependency posture. See `internal/wg/`.
+
+## How a tunnel comes up
+
+The WG path walks the **same fallback chain** as QUIC — direct first, then a relay:
+
+1. **Register & verify** (unchanged): learn the partner's endpoint from the signed
+   `PEER_LIST`; run the identity/VIP/pinning checks.
+2. **Prime the path on one UDP socket:**
+   - **Direct** — hole-punch to the partner's candidates.
+   - **Relay** — bind a leg on the relay; the relay address becomes the endpoint.
+3. **First contact only (TOFU):** verify the partner with a **Short Authentication
+   String** bound to a fresh ephemeral-DH exchange run *over the punched UDP socket*
+   (RFC 6189), since there is no TLS exporter on this path. A rejected SAS stops —
+   it never falls back to another plane. Pinned peers (`--peer-key`, and all of
+   MultiPeer) skip the SAS.
+4. **Hand the socket to the kernel.** The punched socket is closed and kernel
+   WireGuard is brought up **reusing that same local port**, so the NAT mapping
+   survives the handoff (`lab/test-wg-handoff.sh`). Over a relay, the relay
+   blindly forwards the encrypted WireGuard packets between the two legs — it is
+   **not** a WireGuard peer and holds no key, exactly as it forwards QUIC.
+5. **Reconnects** use a deterministic static-DH secret (`crypto.PairSecret`) of the
+   two identities — no stored TLS material.
+
+`CONNECTED` logs the path, e.g. `via="direct P2P (WireGuard)"` or
+`via="handshake server as relay (WireGuard)"`.
+
+## Reaching the partner
+
+The interface (`bnet0`, …) is assigned this node's VIP as a `/32`, with an explicit
+`/32` route to the partner's VIP out that interface. So you simply talk to the
+partner's VIP directly:
+
+```
+http://10.66.40.12          # the partner's Unraid web UI, a Docker app, ssh, …
+```
+
+`-L` / `-forward` / `--vip-listen` are the QUIC stream-forwarding flags; on the WG
+path they are **not needed and ignored** (a `NOTE` is printed if set). Reach the
+partner at `<partner-vip>:<port>`.
+
+**Scope:** what is reachable is what the partner **`--expose`s** (see the box at
+the top): only the named port(s), nothing without the flag, the whole host only
+with an explicit `--expose all`. Independently of that, BuddyNet routes only the
+partner's VIP `/32` — it does **not** route the LANs/VLANs *behind* the partner.
+That is deliberate: BuddyNet connects two hosts, it is not a site-to-site / subnet
+router or a mesh VPN.
+
+## Scoped exposure — how it works
+
+WireGuard's own AllowedIPs is *address*-based cryptokey routing; it cannot scope
+*ports*. So BuddyNet gates inbound traffic on each `bnetN` in the kernel's
+nftables subsystem, programmed directly over raw nfnetlink (`internal/nft`, the
+same no-subprocess posture as the interface setup itself):
+
+```
+table inet buddynet {            # private table — never touches your firewall
+  chain in {                     # input hook, policy accept (host unaffected)
+    iifname "bnet0" ct state established,related accept
+    iifname "bnet0" tcp dport 873 accept        # one rule per exposed port
+    iifname "bnet0" meta l4proto icmp accept    # ping for diagnosis
+    iifname "bnet0" meta l4proto ipv6-icmp accept
+    iifname "bnet0" drop                        # the fail-closed floor
+  }
+}
+```
+
+- The scope is installed **before** the interface comes up — there is never a
+  window of whole-host access — and removed with it on teardown.
+- Established/related is allowed, so *your own* outbound connections to the buddy
+  always get their answers regardless of your scope.
+- Each buddy has its own interface, so each has its own scope (MultiPeer).
+- The whole table is rebuilt atomically on every change; a stale table from a
+  killed process is cleared on the next start. Only a global `nft flush ruleset`
+  removes it early — it is re-asserted on the next reconnect.
+- Your own reach *into* the buddy is decided by the **buddy's** scope, not yours
+  (egress is not filtered — this is inbound least-privilege, per host).
+
+## MultiPeer: one interface per buddy
+
+`--wireguard` combines with `--peers-file`. Each buddy gets its **own** WireGuard
+interface — `bnet0`, `bnet1`, … — not one shared device.
+
+This is forced by kernel WireGuard: a device has a single UDP listen port, and the
+direct hole-punch hands its punched socket's port to that device — so two buddies
+cannot share one device/port. One interface per buddy keeps every buddy on the
+proven single-peer path, which means:
+
+- **Peer-to-peer is preserved** — each tunnel still goes direct where it can; there
+  is no central hub/"switch" on the VPS that all traffic must cross.
+- **The relay still works per buddy** — each buddy has its own socket and thus its
+  own relay leg, with none of the demux collisions a single shared port would hit.
+
+The supervisor assigns each buddy a stable interface index, reconciled live on
+`SIGHUP` like the rest of the manifest.
+
+> A WireGuard **hub** on the VPS (the obvious "switch") was rejected on purpose: a
+> hub terminates WireGuard and therefore sees plaintext, which would break the
+> end-to-end and peer-to-peer properties that the blind relay exists to preserve.
+
+## Requirements
+
+- **Linux** with the `wireguard` kernel module and **`NET_ADMIN`** (root, or the
+  capability) to create the interface. BuddyNet probes this with `wg.Available()`
+  and **fails closed** if `--wireguard` is set but kernel WireGuard is unavailable —
+  it does not silently fall back to QUIC.
+- Set `--wireguard` on **both** buddies.
+- Not combinable with `--lazy` (a QUIC-stream-specific feature).
+
+## Security notes
+
+- All control-plane guarantees are unchanged: signed `PEER_LIST`, VIP↔key reject,
+  pinning/TOFU with a SAS on first contact, replay/cap protections, blind relay.
+- **Fails closed:** WG unavailable, no usable path, or a rejected SAS → an error,
+  never a silent switch to another data plane.
+- **Whole-host exposure: RESOLVED by scoped exposure.** The formerly documented
+  residual risk — every `0.0.0.0` service reachable by the buddy — is closed:
+  inbound on `bnetN` is **fail-closed by default** and opened per port with
+  `--expose` (per buddy in the manifest). `--expose all` restores the old
+  behaviour, as an explicit operator decision. Defense in depth still applies:
+  keep the services you do expose authenticated.
+- The relay never sees plaintext on this path either — it forwards sealed WireGuard
+  packets, just as it forwards QUIC.
+
+## Lab validation
+
+Run as root with the `wireguard` module loaded (netns labs):
+
+- `lab/test-wg-buddy.sh` — direct P2P over WireGuard + native VIP ping; confirms the
+  QUIC default still works (no regression).
+- `lab/test-wg-relay.sh` — the direct path firewalled off, so the tunnel runs over
+  the blind relay.
+- `lab/test-wg-multipeer.sh` — a full mesh of three buddies, each on its own
+  `bnet0`/`bnet1`, each pinging both partners' VIPs.
+- `lab/test-wg-expose.sh` — scoped exposure: the exposed port answers, everything
+  else is blocked, no `--expose` exposes nothing (fail-closed), `--expose all`
+  keeps whole-host reach, and the nft table is gone after teardown.
+- `lab/test-wg-firewalls.sh` — coexistence with the host's own firewall:
+  iptables-nft/iptables-legacy ACCEPTs cannot override the buddynet DROP, an
+  `iptables-restore` reload leaves the buddynet table alone, a ufw-style
+  default-deny additionally gates the tunnel (both layers must allow), and after
+  a global `nft flush ruleset` the scope is re-asserted on reconnect.
+- `lab/test-docker-firewalls.sh` — the same coexistence against REAL running
+  firewall daemons in Docker (`firewalld`, `ufw`, a host `nft` table, and none):
+  the tunnel forms, the exposed port is reachable, the unexposed port stays
+  blocked by BuddyNet's scope, and the `inet buddynet` table lives alongside the
+  host firewall's own tables (`inet firewalld` / `ip filter` / `inet hostfw`).
+
+See also `docs/ARCHITECTURE.md` (data-plane seam) and `SECURITY.md` (threat model).

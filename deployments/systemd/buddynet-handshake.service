@@ -5,6 +5,12 @@ Documentation=https://github.com/TZERO78/buddynet
 # PEER_LIST freshness), so wait for NTP/time-sync before serving.
 After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
+# Crash-loop circuit breaker: if the server fails to start 5 times within 60s
+# (a deterministic fault — bad config, an unbindable port, a reliably-fatal
+# input that even the per-request panic isolation cannot absorb), stop retrying
+# instead of restarting forever. Without this, Restart=on-failure loops tightly.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 # Listen address/port is configurable without editing this unit:

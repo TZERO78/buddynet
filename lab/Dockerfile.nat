@@ -1,0 +1,9 @@
+# A tiny NAT router for the CGNAT lab: forwards + MASQUERADEs LAN -> WAN.
+# NAT_MODE=cone (default) preserves the source port; NAT_MODE=symmetric uses
+# MASQUERADE --random-fully so the mapped port differs per destination — which is
+# what defeats hole-punching (the essence of hard/symmetric CGNAT).
+FROM alpine:3.21
+RUN apk add --no-cache iptables iproute2
+COPY lab/entrypoint-nat.sh /entrypoint-nat.sh
+RUN chmod +x /entrypoint-nat.sh
+ENTRYPOINT ["/bin/sh", "/entrypoint-nat.sh"]

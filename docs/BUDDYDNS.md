@@ -46,6 +46,11 @@ dig @127.0.0.153 alice.buddy    # direct query to the stub resolver
 - Must start and end with a letter or digit.
 - Maximum 63 characters (one DNS label).
 - The TLD is always `.buddy` — you only choose the label before it.
+- A label that is **exactly 8 hexadecimal characters** (`0–9`, `a–f`) is rejected:
+  that shape is reserved for the `<fp8>` fingerprint alias (below), so a
+  self-asserted name can never shadow another peer's fingerprint entry. (A vanity
+  name like `deadbeef` is disallowed for this reason; `deadbeefx` or `web01` are
+  fine.)
 
 ## Fingerprint fallback
 

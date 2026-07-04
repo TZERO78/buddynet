@@ -27,12 +27,12 @@ everyone who built and maintains these projects.
   server behind the `.buddy` stub resolver. The first external runtime dependency
   BuddyNet took on. Thank you, Miek Gieben and contributors.
 
-## Planned (v2)
+## Protocols we build on
 
-- **[wireguard-go](https://git.zx2c4.com/wireguard-go/)
-  (`golang.zx2c4.com/wireguard`)** — the userspace WireGuard implementation
-  earmarked for the v2 data-plane transport behind the same `Transport` seam.
-  Thank you, Jason A. Donenfeld and the WireGuard project.
+- **[WireGuard](https://www.wireguard.com/)** — the Phase-3 opt-in data plane
+  (`--wireguard`) brings up **kernel** WireGuard interfaces configured over raw
+  netlink (no Go dependency — the zero-dep invariant holds). Thank you, Jason A.
+  Donenfeld and the WireGuard project.
 
 ## Design inspiration
 

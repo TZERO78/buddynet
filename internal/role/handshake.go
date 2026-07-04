@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -386,17 +387,19 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		log.Printf("source allowlist ON: only %v may register", cfg.AllowCIDRs)
 	}
 
-	// Transport choice: QUIC validates the source address in its handshake
-	// (structural anti-reflection), plain UDP gets the same property from the
-	// address-validation cookie. Both reuse the same pairing core.
+	// Transport choice: QUIC validates the source address in its handshake (and, in
+	// approval mode, pins clients to the allowlist at the TLS handshake), plain UDP
+	// gets source validation from the address-validation cookie. Both reuse the same
+	// pairing core.
 	if cfg.QUIC {
 		log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
 		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl, cfg.AllowCIDRs)
 	}
 	log.Print("handshake control plane: UDP (source address validated by cookie)")
-	log.Print("WARNING: on plain UDP the REGISTER (incl. the pairing token) travels in CLEARTEXT — " +
-		"an on-path observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --lab). " +
-		"Pass --quic-handshake on the server AND every buddy to encrypt the control plane; always pin buddies with --peer-key.")
+	log.Print("WARNING: plain UDP is the LEGACY control plane (you opted out of the secure default with " +
+		"--quic-handshake=false): the REGISTER (incl. the pairing token) travels in CLEARTEXT — an on-path " +
+		"observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --lab). Drop " +
+		"--quic-handshake=false on the server AND every buddy to restore encryption; always pin buddies with --peer-key.")
 
 	buf := make([]byte, 1500)
 	for {
@@ -436,7 +439,20 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 // so a polling buddy makes progress). QUIC's handshake already validated the
 // source address, so no cookie is needed; the rate limiter still bounds load.
 func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
-	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
+	// In approval mode, pin clients to the allowlist during the TLS handshake so a
+	// non-allowlisted buddy is refused before it can send a REGISTER (the same early
+	// rejection kernel WireGuard gives). Open mode leaves client auth at the app layer.
+	var verifyClient func(ed25519.PublicKey) error
+	if authz != nil {
+		verifyClient = func(pub ed25519.PublicKey) error {
+			if authz.allowed(bcrypto.PubKeyB64(pub)) {
+				return nil
+			}
+			return errors.New("client key is not on the allowlist")
+		}
+		log.Print("approval mode: QUIC control pins clients to the allowlist at the TLS handshake")
+	}
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout, verifyClient)
 	if err != nil {
 		return err
 	}
@@ -512,6 +528,11 @@ type hsCounters struct {
 	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
 	squatRejected atomic.Int64 // 3rd-party register rejected on full slot (slot already squatted)
 	replay        atomic.Int64 // approval-mode registration signature replayed
+
+	// lastPanic is the process-wide recovered-panic total observed at the previous
+	// stats tick, so logLoop can report the per-interval delta. Touched only by the
+	// single logLoop goroutine, so it needs no atomic.
+	lastPanic int64
 }
 
 var hsStats hsCounters
@@ -530,13 +551,20 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
 		npk, sq, rp := c.newPubKey.Swap(0), c.squatRejected.Swap(0), c.replay.Swap(0)
-		if pa|ch|rl|dr|npk|sq|rp == 0 {
+		// Per-interval count of panics recovered by safe.Do/Go across the process. A
+		// non-zero delta means a crafted input reliably trips a parser (ours or a
+		// dependency's) — invisible otherwise, since each panic is only logged once
+		// per throttle window. Surfacing it here turns it into a standing signal.
+		total := safe.PanicCount()
+		pan := total - c.lastPanic
+		c.lastPanic = total
+		if pa|ch|rl|dr|npk|sq|rp == 0 && pan == 0 {
 			continue // idle interval: stay quiet
 		}
 		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d challenged=%d rate-limited=%d dropped=%d",
 			statsInterval, pa, ch, rl, dr)
-		if npk > 0 || sq > 0 || rp > 0 {
-			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d", npk, sq, rp)
+		if npk > 0 || sq > 0 || rp > 0 || pan > 0 {
+			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d panics=%d", npk, sq, rp, pan)
 		}
 		log.Print(line)
 	}

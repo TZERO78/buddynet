@@ -3,11 +3,9 @@ package crypto
 import (
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha512"
 	"encoding/base64"
 	"errors"
 
-	"filippo.io/edwards25519"
 	"golang.org/x/crypto/nacl/box"
 )
 
@@ -20,7 +18,7 @@ import (
 // SealCode encrypts code to the X25519 key derived from the server's Ed25519
 // public key. Output (base64): ephemeralPub(32) || nonce(24) || ciphertext.
 func SealCode(code string, serverEdPub ed25519.PublicKey) (string, error) {
-	recipient, err := ed25519PublicToX25519(serverEdPub)
+	recipient, err := X25519FromEd25519Public(serverEdPub)
 	if err != nil {
 		return "", err
 	}
@@ -49,7 +47,7 @@ func OpenCode(enc string, serverEdPriv ed25519.PrivateKey) (string, error) {
 	var epub, nonce [32]byte
 	copy(epub[:], raw[:32])
 	copy(nonce[:], raw[32:56])
-	priv := ed25519PrivateToX25519(serverEdPriv)
+	priv := X25519FromEd25519Private(serverEdPriv)
 	var n [24]byte
 	copy(n[:], nonce[:24])
 	msg, ok := box.Open(nil, raw[56:], &n, &epub, &priv)
@@ -57,28 +55,4 @@ func OpenCode(enc string, serverEdPriv ed25519.PrivateKey) (string, error) {
 		return "", errors.New("sealed code does not decrypt (wrong server key?)")
 	}
 	return string(msg), nil
-}
-
-// ed25519PublicToX25519 maps an Ed25519 public key to the equivalent X25519
-// (Montgomery) public key.
-func ed25519PublicToX25519(pub ed25519.PublicKey) ([32]byte, error) {
-	var out [32]byte
-	p, err := new(edwards25519.Point).SetBytes(pub)
-	if err != nil {
-		return out, err
-	}
-	copy(out[:], p.BytesMontgomery())
-	return out, nil
-}
-
-// ed25519PrivateToX25519 maps an Ed25519 private key to the matching X25519
-// private scalar (clamped SHA-512 of the seed, per the Ed25519 construction).
-func ed25519PrivateToX25519(priv ed25519.PrivateKey) [32]byte {
-	h := sha512.Sum512(priv.Seed())
-	var s [32]byte
-	copy(s[:], h[:32])
-	s[0] &= 248
-	s[31] &= 127
-	s[31] |= 64
-	return s
 }

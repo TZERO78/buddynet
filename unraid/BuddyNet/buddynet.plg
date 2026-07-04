@@ -237,6 +237,21 @@ Lazy tunnel (--lazy) — defer the tunnel until the first -L connection (needs -
   <option value="enable"  <?=v($cfg,'LAZY')=='enable'?'selected':''?>>Enabled</option>
   </select>
 
+Encrypt the control plane (--quic-handshake) — SECURE DEFAULT: encrypts matchmaking so the token never travels in cleartext; with an approval-mode server it also pins your key at the TLS handshake. Disable only for a legacy plain-UDP server. **Must be set the same way on the handshake server.**
+: <select name="QUIC_HANDSHAKE">
+  <option value="enable"  <?=v($cfg,'QUIC_HANDSHAKE')!='disable'?'selected':''?>>Enabled (secure default)</option>
+  <option value="disable" <?=v($cfg,'QUIC_HANDSHAKE')=='disable'?'selected':''?>>Disabled (legacy plain UDP)</option>
+  </select>
+
+WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGuard instead of QUIC; the partner is reachable natively at its VIP (10.66.X.Y). Needs the Buddy key above pinned:
+: <select name="WIREGUARD">
+  <option value="disable" <?=v($cfg,'WIREGUARD')=='disable'?'selected':''?>>Disabled</option>
+  <option value="enable"  <?=v($cfg,'WIREGUARD')=='enable'?'selected':''?>>Enabled</option>
+  </select>
+
+Exposed ports (--expose, WireGuard only) — the port(s) your buddy may reach on THIS server over the tunnel, e.g. "873" or "873,8080" or "tcp/873,udp/51820"; "all" = explicit whole-host access. **Empty = NOTHING is exposed (fail-closed, secure default)** — your buddy cannot reach any service here until you name a port:
+: <input type="text" name="EXPOSE" value="<?=v($cfg,'EXPOSE')?>" placeholder="empty = nothing exposed (secure default)">
+
 &nbsp;
 : <input type="submit" value="Apply">
 
@@ -354,6 +369,7 @@ SERVER="$(trim "${SERVER:-}")"; SERVER_KEY="$(trim "${SERVER_KEY:-}")"; TOKEN="$
 TOKEN_FILE="$(trim "${TOKEN_FILE:-}")"; PEER_KEY="$(trim "${PEER_KEY:-}")"
 LISTEN="$(trim "${LISTEN:-}")"; FORWARD="$(trim "${FORWARD:-}")"
 NAME="$(trim "${NAME:-}")"; DNS="$(trim "${DNS:-}")"; LAZY="$(trim "${LAZY:-}")"
+EXPOSE="$(trim "${EXPOSE:-}")"
 
 is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
@@ -379,12 +395,32 @@ start() {
   # the privileged 127.0.0.153:53 bind succeeds).
   [ -n "$NAME" ] && args+=(--name "$NAME")
   [ "$DNS" = "enable" ] && args+=(--dns)
+  # Encrypt the control plane (matchmaking) — the secure default. Pass the flag
+  # explicitly so the behaviour is the same regardless of the binary's default;
+  # only "disable" opts out to legacy plain UDP. Must match the handshake server.
+  if [ "$QUIC_HANDSHAKE" = "disable" ]; then
+    args+=(--quic-handshake=false)
+  else
+    args+=(--quic-handshake)
+  fi
   # Lazy needs -L (there is no listener to hold open without it); skip + warn.
   if [ "$LAZY" = "enable" ]; then
     if [ -n "$LISTEN" ]; then
       args+=(--lazy)
     else
       echo "WARNING: Lazy tunnel is enabled but no -L (Expose local port) is set — ignoring --lazy." >>"$LOG"
+    fi
+  fi
+  # WireGuard data plane: the peer tunnel runs over kernel WireGuard (the partner
+  # is reachable natively at its VIP). Control plane stays QUIC/plain.
+  if [ "$WIREGUARD" = "enable" ]; then
+    args+=(--wireguard)
+    # Scoped exposure: empty EXPOSE = fail-closed (buddy reaches nothing here).
+    # Say so in the log so the posture is visible, mirroring the daemon's own line.
+    if [ -n "$EXPOSE" ]; then
+      args+=(--expose "$EXPOSE")
+    else
+      echo "NOTE: WireGuard is scoped by default — no Exposed ports set, so your buddy reaches NOTHING on this server (fail-closed). Set e.g. 873, or 'all' for explicit whole-host access." >>"$LOG"
     fi
   fi
   # Prefer the token from a file on the array (real 0600 perms) over the flash

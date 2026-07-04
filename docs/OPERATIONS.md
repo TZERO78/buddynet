@@ -6,10 +6,13 @@ and the `--status` probe.
 
 ---
 
-## QUIC control plane (`--quic-handshake`)
+## QUIC control plane (`--quic-handshake`, the secure default)
 
-**Use `--quic-handshake` on every deployment.** It must be set identically on
-the handshake server and on every buddy that connects to it.
+**The control plane is encrypted with QUIC/TLS 1.3 by default** — security by
+default. You do not need to pass anything; it is on unless you explicitly opt out
+with `--quic-handshake=false` (or `BUDDYNET_QUIC=0`) on the handshake server **and**
+every buddy. Keep it on. The examples below pass `--quic-handshake` explicitly,
+which is fine (it just confirms the default).
 
 ```bash
 # Server
@@ -45,6 +48,37 @@ WARNING: on plain UDP the REGISTER (incl. the pairing token) travels in
 CLEARTEXT — use --quic-handshake on the server and every buddy to encrypt
 the control plane.
 ```
+
+### Locking the control plane to known buddies (`--authorized`)
+
+In **approval mode** (`--authorized <allowlist>`) the QUIC control plane pins
+clients by key at the **TLS handshake**: every buddy presents its Ed25519 identity
+certificate, and the server rejects any key not on the allowlist **before** it can
+send a `REGISTER`. A non-allowlisted node never reaches the matchmaking logic — the
+same early rejection a firewall gives, enforced cryptographically (no PKI; the key
+is pinned directly, mirroring how the buddy pins the server key). The server logs:
+
+```
+approval mode: QUIC control pins clients to the allowlist at the TLS handshake
+```
+
+```bash
+# Server: only allowlisted buddy keys may even open a control connection
+buddynet --role=handshake --quic-handshake \
+  --authorized /var/lib/buddynet/clients.txt --key /var/lib/buddynet/id.key
+
+# Approve a buddy (get its key with `buddynet identity` on that node):
+buddynet --authorized /var/lib/buddynet/clients.txt allowclient <buddy-key>
+```
+
+Without `--authorized` (open mode) the QUIC handshake still encrypts the exchange
+and validates the source, but any client may connect and pairing is gated only by
+the secret token at the application layer. See [APPROVAL.md](APPROVAL.md).
+
+> This is BuddyNet's "known buddies only" control plane. The data plane can run
+> over QUIC (default) or kernel WireGuard (`--wireguard`); the control plane is
+> always QUIC/plain — never WireGuard — so per-buddy endpoint discovery and
+> MultiPeer keep working (see [WIREGUARD.md](WIREGUARD.md)).
 
 ### Environment variable
 
@@ -122,6 +156,38 @@ relay address. Buddies try direct hole-punch first; if that fails within
 | `--relay-endpoint HOST:PORT` | Advertised to buddies as the relay-of-last-resort. Set when the handshake server also runs relay. |
 | `--allow-cidr CIDRS` | Drop relay datagrams from sources outside these networks (same syntax as above). |
 | `--ttl DURATION` | Idle timeout for relay sessions. Default 60 s. |
+
+---
+
+## WireGuard data plane (`--wireguard`)
+
+Opt-in (Phase 3): carry the tunnel over kernel WireGuard instead of QUIC, so the
+partner is reachable natively at its VIP. Full design and security notes in
+**[WIREGUARD.md](WIREGUARD.md)**; the operational essentials:
+
+- **Requirements.** Linux with the `wireguard` kernel module (`modprobe wireguard`)
+  and **`NET_ADMIN`** (root, or `AmbientCapabilities=CAP_NET_ADMIN` in the unit) to
+  create the interface. Set `--wireguard` on **both** buddies.
+- **Fails closed.** If `--wireguard` is set but kernel WireGuard is unavailable, the
+  buddy errors out — it does **not** silently fall back to QUIC.
+- **Interfaces.** One WireGuard interface per buddy: `bnet0` for a single partner,
+  `bnet0`, `bnet1`, … in MultiPeer (`--peers-file`). Each carries this node's VIP and
+  a `/32` route to that partner's VIP. They are torn down when the tunnel drops.
+- **Forwarding flags are ignored** on this path: the VIP is reachable directly, so
+  `-L`/`-forward`/`--vip-listen` print a `NOTE` and do nothing. Reach the partner at
+  `<partner-vip>:<port>`.
+- **Exposure is scoped by default (`--expose`).** A buddy can reach **only** the
+  port(s) you `--expose` (e.g. `--expose 873`, or per buddy via `expose:` in the
+  manifest); without it, nothing is reachable (fail-closed). `--expose all` restores
+  whole-host access explicitly. Only the partner's VIP `/32` is routed; LANs/VLANs
+  behind the buddy are not. See [WIREGUARD.md](WIREGUARD.md).
+- **Changing a scope at runtime.** A per-buddy `expose:` edit in the `--peers-file`
+  manifest takes effect on `SIGHUP`: the supervisor reprograms that buddy's `bnetN`
+  firewall scope **in place** — the tunnel stays up, no reconnect, the partner is
+  not involved (`SUPERVISOR: action=reload-rescope`). A tightened scope therefore
+  takes effect immediately, unlike a removed *buddy*, whose live tunnel lingers.
+  The global `--expose` flag is fixed for the process; change it with a restart.
+- `CONNECTED` logs `via="… (WireGuard)"`.
 
 ---
 
@@ -212,6 +278,23 @@ SUPERVISOR: action=reload-failed detail=…          # the manifest could not be
 LAZY: action=listening addr=… detail="tunnel deferred until first connection"
 LAZY: action=waking    detail="local connection arrived, dialing tunnel"   # a CONNECTED: line follows
 ```
+
+### Scoped exposure — `EXPOSE:` (`--wireguard --expose`)
+
+Logged once per buddy interface at WireGuard bring-up, so the effective
+least-privilege posture is visible without guessing (see docs/WIREGUARD.md).
+
+```
+EXPOSE: action=scoped        iface=bnet0 ports=tcp/873,udp/51820   # buddy reaches ONLY these ports here
+EXPOSE: action=fail-closed   iface=bnet0 detail="…"                # no --expose: nothing reachable (default)
+EXPOSE: action=whole-host    iface=bnet0 detail="explicit --expose all"   # opted out of scoping
+EXPOSE: action=remove-failed iface=bnet0 detail=…                 # teardown could not drop the rules
+```
+
+A scope that cannot be enforced (no kernel nftables support / missing
+`CAP_NET_ADMIN`) is fail-closed: the tunnel is refused, surfaced as
+`RECONNECT: action=error` with an actionable message (add `--expose <port>`, or
+`--expose all`), never a silent whole-host exposure.
 
 ### BuddyDNS — `BUDDYDNS:` (`--dns`)
 

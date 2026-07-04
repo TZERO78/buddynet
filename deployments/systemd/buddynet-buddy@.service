@@ -21,6 +21,12 @@ Documentation=https://github.com/TZERO78/buddynet
 # for NTP/time-sync before connecting.
 After=network-online.target time-sync.target
 Wants=network-online.target time-sync.target
+# Crash-loop circuit breaker: stop retrying after 5 failed starts within 60s
+# (a deterministic fault — bad env/config) instead of restarting forever. A
+# reconnect storm from a transient network fault is handled in-process (jittered
+# backoff), so this only trips on a genuine, repeating start failure.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 EnvironmentFile=/etc/buddynet/%i.env

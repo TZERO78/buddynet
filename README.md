@@ -142,8 +142,13 @@ mesh, use a solution built for that.
 - **Blind relay.** Buddies run their own QUIC/TLS end to end; a relay only
   forwards the encrypted packets, keyed by an opaque session token. It sees
   virtual IPs and ciphertext, never content.
-- **QUIC now, WireGuard later.** The data plane sits behind a `Transport`
-  interface; v1 ships QUIC (TLS 1.3), v2 can drop in WireGuard unchanged.
+- **QUIC by default, kernel WireGuard opt-in.** The default data plane is QUIC
+  (TLS 1.3). With `--wireguard` (Phase 3, Linux + `NET_ADMIN`) the tunnel runs over
+  kernel WireGuard instead and the partner is reachable natively at its VIP — same
+  control plane, same fallback chain. **WireGuard sharing is scoped by default:
+  a buddy reaches ONLY the port(s) you `--expose` (e.g. `--expose 873`), never
+  your whole host — full-host access requires an explicit `--expose all`.**
+  See **[docs/WIREGUARD.md](docs/WIREGUARD.md)**.
 - **Lazy tunnel (`--lazy`).** The `-L` TCP listener binds immediately; the
   QUIC tunnel is established on demand when the first connection arrives.
   Useful for backup tools (rsync, kopia) that are invoked infrequently.
@@ -157,9 +162,10 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   buddy prints its identity at startup). Without `--peer-key`, trust-on-first-use
   is used — but on that first connect both sides show a **Short Authentication
   String**: a 6-character code (e.g. `K7QX2M`) derived from both keys and the
-  live TLS session. Read it to your buddy over a trusted channel (phone, Signal);
-  confirm only if they match. A man in the middle makes the two sides show a
-  *different* code, so you catch it before any key is trusted. After that the key
+  live TLS session. Call your buddy over a trusted channel (phone, Signal), read
+  them your code and type in theirs (both sides do — it is mutual). A man in the
+  middle makes the two sides show a *different* code, so it will not match and you
+  catch it before any key is trusted. After that the key
   is pinned and checked silently. For daemons set `--no-interactive` and pin with
   `--peer-key` (an unknown key is then refused, never learned blind).
 - The token is a **bearer secret** — keep it off the command line (use a `0600`
@@ -244,9 +250,12 @@ single `.bundle`.)
 
 The two-buddy setup is implemented and tested end to end. **MultiPeer** (many
 buddies at once — `--peers-file`, per-buddy VIP routing, live reload) is built
-and lab-validated for the v2.1 line. Peer-to-peer gossip and the WireGuard
-transport remain on the v2 roadmap — all additive on the v1 wire format, virtual
-IPs, and fallback chain.
+and lab-validated for the v2.1 line. A **kernel-WireGuard data plane**
+(`--wireguard`, direct + relay + MultiPeer) is built and lab-validated on the
+`phase3/wireguard` integration branch — opt-in, not yet in a tagged release
+(see [docs/WIREGUARD.md](docs/WIREGUARD.md)). Peer-to-peer gossip remains
+deferred. Everything is additive on the v1 wire format, virtual IPs, and fallback
+chain.
 
 **Security posture**
 

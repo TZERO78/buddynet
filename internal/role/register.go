@@ -138,7 +138,7 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 	var derr error
 	for _, a := range serverAddrs {
 		dctx, dcancel := context.WithTimeout(ctx, 10*time.Second)
-		cli, derr = tunnel.DialControl(dctx, conn, a, serverPub, controlIdleTimeout)
+		cli, derr = tunnel.DialControl(dctx, conn, a, serverPub, priv, controlIdleTimeout)
 		dcancel()
 		if derr == nil {
 			break

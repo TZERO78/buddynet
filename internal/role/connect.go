@@ -128,12 +128,21 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 	if len(chain) == 0 {
 		return errors.New("no path to the partner (no candidates, no relay)")
 	}
+	// Deterministic relay session id: both buddies derive the same value, so a
+	// relay can splice their two legs by it. Used by both the QUIC and WG paths.
+	session := sessionToken(att.rendezvous, myPub, partner.PubKey)
+
+	// WireGuard data plane (Phase 3, opt-in): hand the socket to kernel WG instead
+	// of running QUIC, over the same fallback chain (direct, then relay). Fails
+	// closed (no silent fallback to another plane).
+	if cfg.WireGuard {
+		return runWG(ctx, cfg, nd, conn, att, partner, partnerPub, needSAS, chain, session)
+	}
 
 	// One QUIC transport over the socket; deterministic role: lower key listens.
 	tr := tunnel.NewQUIC(conn, priv, partnerPub, cfg.IdleTimeout)
 	defer tr.Close()
 	listening := myPub < partner.PubKey
-	session := sessionToken(att.rendezvous, myPub, partner.PubKey)
 
 	sess, used, err := dialChain(ctx, tr, conn, myID, chain, listening, session, cfg.PunchDur)
 	if err != nil {
@@ -156,7 +165,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		myEdPub := priv.Public().(ed25519.PublicKey)
 		sas := ComputeSAS(myEdPub, partnerPub, ekm)
 		if err := PromptSAS(sas, cfg.SASTimeout); err != nil {
-			logSASFailure(err, sess, used, partner, att.inviteToken)
+			logSASFailure(err, sess.RemoteAddr().String(), used, partner, att.inviteToken)
 			return err // Buddy stops the reconnect loop, key NOT stored
 		}
 		if err := trust.confirm(att.inviteToken, partnerPub); err != nil {
@@ -267,26 +276,39 @@ func dialChain(ctx context.Context, tr *tunnel.QUICTransport, conn *net.UDPConn,
 // primePath makes a path usable and returns the endpoint to dial. Direct
 // punches a hole to the partner; Relayed binds this node's leg on the relay and
 // uses the relay address as the endpoint.
-func primePath(conn *net.UDPConn, myID string, p relay.Path, session string, punchDur time.Duration) (string, error) {
+// primeOne readies a single fallback path on conn and returns the peer endpoint to
+// use: a hole-punch for Direct, a relay-leg bind for Relayed. Shared by the QUIC
+// dial loop (primePath) and the WireGuard path walk (primeWGPath).
+func primeOne(conn *net.UDPConn, myID string, p relay.Path, session string, punchDur time.Duration) (*net.UDPAddr, error) {
 	switch p.Kind {
 	case relay.Direct:
 		remote, err := tunnel.Punch(conn, myID, p.Candidates, punchDur)
 		if err != nil {
-			return "", fmt.Errorf("direct punch: %w", err)
+			return nil, fmt.Errorf("direct punch: %w", err)
 		}
-		return remote.String(), nil
+		return remote, nil
 	case relay.Relayed:
 		relayAddr, err := net.ResolveUDPAddr("udp", p.RelayEndpoint)
 		if err != nil {
-			return "", fmt.Errorf("resolve relay %q: %w", p.RelayEndpoint, err)
+			return nil, fmt.Errorf("resolve relay %q: %w", p.RelayEndpoint, err)
 		}
 		if err := relay.BindLeg(conn, relayAddr, session, 5*time.Second); err != nil {
-			return "", fmt.Errorf("relay bind: %w", err)
+			return nil, fmt.Errorf("relay bind: %w", err)
 		}
-		return relayAddr.String(), nil
+		return relayAddr, nil
 	default:
-		return "", errors.New("unknown path kind")
+		return nil, errors.New("unknown path kind")
 	}
+}
+
+// primePath primes one path for the QUIC dial loop, returning the endpoint as a
+// string for tunnel dialing.
+func primePath(conn *net.UDPConn, myID string, p relay.Path, session string, punchDur time.Duration) (string, error) {
+	addr, err := primeOne(conn, myID, p, session, punchDur)
+	if err != nil {
+		return "", err
+	}
+	return addr.String(), nil
 }
 
 // sessionToken derives the relay session id deterministically from the pairing
