@@ -238,7 +238,9 @@ go build -ldflags="-s -w" -o buddynet ./cmd/buddynet
 go test ./...
 ```
 
-Runs on Linux, macOS, Windows, and ARM64 (Raspberry Pi, Unraid). A deliberately
+Built for **Linux** — amd64 and ARM64 (Raspberry Pi, Unraid). The data plane
+(kernel WireGuard, nftables scoping, netlink VIP binding) and deployment (systemd,
+Unraid) are Linux-only, so released binaries are Linux amd64/arm64. A deliberately
 small, pinned dependency set (`quic-go`, `miekg/dns`, `golang.org/x/crypto`),
 gated by `govulncheck` in CI. Server side via Docker:
 
