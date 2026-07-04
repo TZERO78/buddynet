@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.06.20.3">
+<!ENTITY version   "2026.07.04">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,25 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.07.04
+- Pinned to buddynet **v3.0.0** — the Phase 3 release. The **WireGuard data
+  plane** (`--wireguard`) and **scoped exposure** (`--expose`) are now released:
+  the settings page's "WireGuard data plane" and "Exposed ports" fields now work
+  — with a **secure default**: with WireGuard enabled and no Exposed ports set,
+  your buddy reaches **NOTHING** on this server (fail-closed). Name a port
+  (e.g. `873`) to share exactly that, or `all` for explicit whole-host access.
+  Enforced in the kernel (own nftables table over raw netlink) — no
+  nft/iptables/ufw/firewalld needed, an existing firewall setup is not touched.
+  - **Breaking (control plane, both sides must match):** v3.0.0 encrypts the
+    matchmaking by default. The plugin already passes this flag explicitly per
+    its "Encrypt the control plane" setting, so plugin behaviour is unchanged —
+    but your **handshake server must also be on v3.0.0** (or both sides opt
+    into the legacy plain-UDP mode).
+  - First-contact safety check (SAS) is now **typed in** rather than
+    y/N-confirmed — does not affect this plugin (headless runs pinned via the
+    Buddy key); noted for CLI users.
+  - Checksum gate set to the v3.0.0 `buddynet-linux-amd64` sha256.
 
 ###2026.06.20.3
 - Pinned to buddynet **v2.3.0**. Adds a **hard limit of 48 buddies per node** (a
@@ -501,12 +520,12 @@ mkdir -p "$PLG"
 # NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
 # version and URL are hard-coded here on purpose.
 # MAINTAINER: bump both together on each new release (tag -> release.yml build).
-BINVER="v2.3.0"
+BINVER="v3.0.0"
 BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
 # SHA256 of the release binary; verified on every install so a corrupted or
 # tampered download is never installed. Matches buddynet-linux-amd64.sha256 of
 # the BINVER release — bump both together on each new release.
-BINSHA="f20f7e5ec9fb01ff5dd363c95998e4c02a3a0b8d546e94924a28bbab3fa58530"
+BINSHA="91ab04f262520e9486efbc54d5113200d992b6fc91f2513793c92364c3d93eca"
 verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
 
 # Download the buddynet binary to flash (only if missing or its checksum is wrong).
