@@ -30,6 +30,7 @@ import (
 // (e.g. the WireGuard handshake).
 func PairSecret(myPriv ed25519.PrivateKey, peerPub ed25519.PublicKey) ([]byte, error) {
 	myScalar := X25519FromEd25519Private(myPriv)
+	defer wipe(myScalar[:])
 	peerX, err := X25519FromEd25519Public(peerPub)
 	if err != nil {
 		return nil, err
@@ -38,6 +39,7 @@ func PairSecret(myPriv ed25519.PrivateKey, peerPub ed25519.PublicKey) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+	defer wipe(shared) // the raw DH output; only its HKDF-derived form leaves here
 
 	myPub := myPriv.Public().(ed25519.PublicKey)
 	lo, hi := []byte(myPub), []byte(peerPub)

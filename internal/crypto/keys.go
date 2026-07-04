@@ -10,11 +10,14 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/netip"
 	"os"
 	"strings"
+	"syscall"
 )
 
 // VirtualSubnet is the BuddyNet overlay range. Addresses are assigned
@@ -87,25 +90,37 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 	// A key file must be a REAL file, never a symlink. os.ReadFile/Stat/Chmod and
 	// os.WriteFile all FOLLOW symlinks, so honoring a symlinked path would read,
 	// chmod, or clobber the LINK TARGET (e.g. a key path pointing at /etc/shadow —
-	// as root that would chmod the target to 0600). Refuse it up front, fail-closed.
-	// Lstat catches a live OR dangling symlink (the create path would follow a
-	// dangling one into its target on write); a non-existent path returns an error
-	// here and falls through to normal creation.
-	if info, lerr := os.Lstat(path); lerr == nil && info.Mode()&os.ModeSymlink != 0 {
-		return nil, false, fmt.Errorf("key %s is a symlink; refusing (a key file must be a real file, not a link to one)", path)
-	}
-	data, rerr := os.ReadFile(path)
+	// as root that would chmod the target to 0600).
+	//
+	// We open the file ONCE with O_NOFOLLOW and do every subsequent check (perms)
+	// and fix (chmod) on the returned descriptor — never re-deriving from the path.
+	// That closes the TOCTOU an Lstat-then-ReadFile / Stat-then-Chmod pair leaves
+	// open: a path swapped to a symlink between the check and the use can no longer
+	// redirect us to another file. O_NOFOLLOW makes the open itself fail (ELOOP) if
+	// the final component is a link; a missing path (ENOENT) falls through to
+	// creation. Fail-closed throughout.
+	f, oerr := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	switch {
-	case rerr == nil:
-		if info, serr := os.Stat(path); serr == nil && info.Mode().Perm()&0o077 != 0 {
+	case oerr == nil:
+		defer f.Close()
+		info, serr := f.Stat()
+		if serr != nil {
+			return nil, false, serr
+		}
+		if info.Mode().Perm()&0o077 != 0 {
 			// The identity key is also the TLS cert key and the seed of the virtual
-			// IP — it must not be group/other-accessible. Tighten it in place rather
-			// than run with an exposed key; if even that fails, refuse instead of
-			// continuing with a readable private key (fail-closed, like SSH).
+			// IP — it must not be group/other-accessible. Tighten it in place (on the
+			// fd, not the path) rather than run with an exposed key; if even that
+			// fails, refuse instead of continuing with a readable private key
+			// (fail-closed, like SSH).
 			log.Printf("WARNING: key file %s had permissions %v (group/other access); tightening to 0600", path, info.Mode().Perm())
-			if cerr := os.Chmod(path, 0o600); cerr != nil {
+			if cerr := f.Chmod(0o600); cerr != nil {
 				return nil, false, fmt.Errorf("key %s has permissions %v (must be 0600) and could not be tightened: %w", path, info.Mode().Perm(), cerr)
 			}
+		}
+		data, rerr := io.ReadAll(f)
+		if rerr != nil {
+			return nil, false, fmt.Errorf("read key %s: %w", path, rerr)
 		}
 		// Tolerate a trailing newline/whitespace so a key written with `echo` or an
 		// editor still loads (StdEncoding would otherwise reject the newline and the
@@ -118,17 +133,29 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 			return nil, false, fmt.Errorf("key %s: bad seed length %d (want %d)", path, len(seed), ed25519.SeedSize)
 		}
 		return ed25519.NewKeyFromSeed(seed), false, nil
-	case os.IsNotExist(rerr):
+	case errors.Is(oerr, syscall.ELOOP):
+		return nil, false, fmt.Errorf("key %s is a symlink; refusing (a key file must be a real file, not a link to one)", path)
+	case errors.Is(oerr, os.ErrNotExist):
 		_, priv, err = ed25519.GenerateKey(rand.Reader)
 		if err != nil {
 			return nil, false, err
 		}
 		seed := base64.StdEncoding.EncodeToString(priv.Seed())
-		if werr := os.WriteFile(path, []byte(seed), 0o600); werr != nil {
+		// O_CREATE|O_EXCL|O_NOFOLLOW: create a fresh real file or fail — never write
+		// THROUGH a symlink and never clobber a file that appeared in the meantime.
+		cf, cerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		if cerr != nil {
+			return nil, false, fmt.Errorf("create key %s: %w", path, cerr)
+		}
+		if _, werr := cf.WriteString(seed); werr != nil {
+			cf.Close()
 			return nil, false, werr
+		}
+		if cerr := cf.Close(); cerr != nil {
+			return nil, false, cerr
 		}
 		return priv, true, nil
 	default:
-		return nil, false, rerr
+		return nil, false, oerr
 	}
 }

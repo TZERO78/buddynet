@@ -43,5 +43,6 @@ func X25519FromEd25519Private(priv ed25519.PrivateKey) [32]byte {
 	s[0] &= 248
 	s[31] &= 127
 	s[31] |= 64
+	wipe(h[:]) // the SHA-512 block holds the raw scalar material; drop it once copied
 	return s
 }

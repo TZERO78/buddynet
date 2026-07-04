@@ -31,6 +31,7 @@ func SealCode(code string, serverEdPub ed25519.PublicKey) (string, error) {
 		return "", err
 	}
 	ct := box.Seal(nil, []byte(code), &nonce, &recipient, epriv)
+	wipe(epriv[:]) // ephemeral sender scalar — done once the box is sealed
 	out := make([]byte, 0, 32+24+len(ct))
 	out = append(out, epub[:]...)
 	out = append(out, nonce[:]...)
@@ -51,6 +52,7 @@ func OpenCode(enc string, serverEdPriv ed25519.PrivateKey) (string, error) {
 	var n [24]byte
 	copy(n[:], nonce[:24])
 	msg, ok := box.Open(nil, raw[56:], &n, &epub, &priv)
+	wipe(priv[:]) // the server's derived X25519 scalar — drop it after decryption
 	if !ok {
 		return "", errors.New("sealed code does not decrypt (wrong server key?)")
 	}
