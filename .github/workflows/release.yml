@@ -20,12 +20,13 @@ jobs:
       id-token: write   # keyless cosign signing via the GitHub OIDC token
     strategy:
       matrix:
+        # BuddyNet is a Linux tool — the data plane (kernel WireGuard, nftables
+        # scoping, netlink VIP bind) and deployment (systemd, Unraid) are all
+        # Linux-only, so only Linux binaries are shipped. Keep this in sync with the
+        # cross-compile guard in ci.yml.
         include:
-          - { goos: linux,   goarch: amd64 }
-          - { goos: linux,   goarch: arm64 }   # Raspberry Pi, Unraid
-          - { goos: darwin,  goarch: amd64 }
-          - { goos: darwin,  goarch: arm64 }   # Apple Silicon
-          - { goos: windows, goarch: amd64 }
+          - { goos: linux, goarch: amd64 }
+          - { goos: linux, goarch: arm64 }   # Raspberry Pi, Unraid
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6

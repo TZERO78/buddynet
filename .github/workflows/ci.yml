@@ -33,6 +33,16 @@ jobs:
       - name: build
         run: go build ./...
 
+      # Cross-compile every shipped release target so an arch-specific break fails
+      # CI here, not in the tag-triggered release build. Keep in sync with the
+      # matrix in .github/workflows/release.yml (Linux only, by design).
+      - name: cross-compile (release targets)
+        run: |
+          for t in linux/amd64 linux/arm64; do
+            echo "building $t"
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/buddynet
+          done
+
   scan:
     runs-on: ubuntu-latest
     steps:
