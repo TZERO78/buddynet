@@ -137,6 +137,31 @@ sudo systemctl enable --now nftables
 sudo nft list table inet buddynet
 ```
 
+### Still on iptables? (the equivalent)
+
+nftables is the modern default, but plenty of hosts still run iptables — so
+BuddyNet ships the **exact same policy** as an iptables ruleset,
+[`deployments/iptables.rules`](../deployments/iptables.rules) (default-drop
+input; only SSH + the two rate-limited UDP ports):
+
+```bash
+# same SSH-lockout warning applies — check the --dport 22 line first
+sudo iptables-restore < deployments/iptables.rules
+
+# persist across reboot (Debian/Ubuntu):
+sudo apt install iptables-persistent    # or: netfilter-persistent save
+sudo netfilter-persistent save
+
+# IPv6: the same file works with ip6tables-restore — change the
+#   -A INPUT -p icmp -j ACCEPT
+# line to `-p icmpv6` first, then:
+sudo ip6tables-restore < deployments/iptables.rules   # (with the icmpv6 edit)
+```
+
+Pick **one** firewall system, not both — nftables *or* iptables, never two
+default-drop rulesets fighting over the input hook. Everything in
+*Recommendations & notes* below applies to either.
+
 **Recommendations & notes**
 
 - **`table inet`** covers IPv4 and IPv6 in one table — no separate ipv6 ruleset
@@ -160,6 +185,12 @@ sudo nft list table inet buddynet
 - **Don't forget your provider's cloud firewall.** Many VPS providers have a
   separate security-group/cloud firewall in their panel — open 51820/udp (and
   51821/udp if relaying) there too, or traffic never reaches the box.
+
+> **Verify it locally first.** [`lab/test-vps-howto.sh`](../lab/test-vps-howto.sh)
+> loads this exact ruleset in a throwaway network namespace and proves it
+> functionally — the two BuddyNet ports and SSH pass, everything else is dropped —
+> then runs a real coordinator + invite/join pairing. Run it before you trust the
+> rules on a box you SSH into.
 
 ---
 
