@@ -4,6 +4,11 @@ Deployment options, network-level controls, and the log schema for BuddyNet
 operators. Covers: QUIC control plane, IP allowlists, relay setup, log format,
 and the `--status` probe.
 
+> **New to this?** For a friendly, start-to-finish walkthrough of standing up your
+> own VPS coordinator — install & verify, a hardened nftables firewall, systemd,
+> connecting buddies, and maintenance — see **[VPS-HOWTO.md](VPS-HOWTO.md)**. This
+> page is the flag-by-flag reference behind it.
+
 ---
 
 ## QUIC control plane (`--quic-handshake`, the secure default)

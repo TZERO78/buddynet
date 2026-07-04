@@ -60,7 +60,9 @@ You have two ways to provide it:
 - **A small VPS** with a fixed public IP. The usual setup: run
   `--role=handshake,relay` on a cheap VPS *you* own. It coordinates and relays
   ciphertext only — it never sees your traffic. This is the
-  [Quickstart](#quickstart-two-sites-one-vps) below.
+  [Quickstart](#quickstart-two-sites-one-vps) below; for a full step-by-step
+  walkthrough (install, hardened firewall, systemd, maintenance) see
+  **[docs/VPS-HOWTO.md](docs/VPS-HOWTO.md)**.
 - **Your own connection, if it has a fixed public IP** (no CGNAT). Then you don't
   need a VPS at all — the machine on that line takes the `handshake` and `relay`
   roles itself, and your other buddies connect to it.
