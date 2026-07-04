@@ -1,0 +1,85 @@
+[Unit]
+# Stateless PUBLIC handshake coordinator, using the single-purpose
+# `buddynet-handshake` binary (no relay, no data path, no allowlist). Nothing is
+# written to disk: there is NO StateDirectory. The one secret — the Ed25519
+# identity buddies pin — is INJECTED read-only via LoadCredential from a source you
+# populate from your hardened secret store (never baked into the image). If the box
+# is compromised, its filesystem holds no key and no pairing metadata.
+Description=BuddyNet public handshake (stateless matchmaker)
+Documentation=https://github.com/TZERO78/buddynet
+After=network-online.target time-sync.target
+Wants=network-online.target time-sync.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Environment=BUDDYNET_LISTEN=[::]:51820
+
+# The identity key is injected read-only into $CREDENTIALS_DIRECTORY (a tmpfs
+# systemd manages), NOT stored in any writable path of this service. Populate the
+# source from your hardened store, e.g. a root-only file or a secrets mount:
+#   LoadCredential=id.key:/etc/buddynet-secret/id.key
+# Back that source up — losing the identity forces every buddy to re-pin.
+LoadCredential=id.key:/etc/buddynet-secret/id.key
+ExecStart=/usr/local/bin/buddynet-handshake --key ${CREDENTIALS_DIRECTORY}/id.key --listen ${BUDDYNET_LISTEN} --quic-handshake
+Restart=on-failure
+RestartSec=2
+
+# --- Logging: isolate + cap; keep it lean (no per-pairing metadata on a public
+# server — do NOT enable --debug here). ------------------------------------------
+LogNamespace=buddynet
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=buddynet-public-handshake
+LogRateLimitIntervalSec=10s
+LogRateLimitBurst=200
+
+# --- Identity: ephemeral user, unprivileged, no home, no shell --------------
+# Port 51820 is > 1024, so NO capabilities are needed to bind it.
+DynamicUser=yes
+PrivateUsers=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+KeyringMode=private
+UMask=0077
+
+# --- Filesystem: read-only everywhere; NO StateDirectory (nothing persisted) --
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+DevicePolicy=closed
+PrivateMounts=yes
+ProtectProc=invisible
+ProcSubset=pid
+
+# --- Kernel / host isolation ------------------------------------------------
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+# --- Syscall / address-family allowlist -------------------------------------
+RestrictAddressFamilies=AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# --- Resource ceilings (defense in depth vs. DoS) ---------------------------
+MemoryMax=128M
+TasksMax=32
+LimitNOFILE=1024
+# No core dumps: the identity key lives in process memory; a core would leak it.
+LimitCORE=0
+
+[Install]
+WantedBy=multi-user.target
