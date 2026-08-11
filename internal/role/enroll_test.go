@@ -172,6 +172,94 @@ func TestRegistrationMustMatchTLSKey(t *testing.T) {
 	}
 }
 
+// The binding must hold over a REAL QUIC connection, not just in the predicate:
+// an attacker connects with its own key and sends a REGISTER that is perfectly
+// valid on its own terms — correctly signed by the VICTIM's private key, naming
+// the victim's public key, carrying a valid enrollment code. The only thing wrong
+// with it is that it did not come over the victim's connection.
+//
+// It must be dropped, the connection closed, and nothing recorded for either key.
+func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
+	attacker, _ := testNode(t)
+	victim, _ := testNode(t)
+	srvAddr, srvPub, _, authz := enrollServer(t)
+	attacker.serverPub, victim.serverPub = srvPub, srvPub
+
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// The TLS handshake authenticates the ATTACKER's key.
+	cli, err := tunnel.DialControl(ctx, c, srvAddr, srvPub, attacker.priv, controlIdleTimeout)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	// Positive control first, on this very connection: the attacker's OWN
+	// registration is processed (it lands in pending), so anything that fails
+	// below fails because of the mismatch and nothing else.
+	const ownCode = "ATTACKER-OWN-CODE"
+	ownReg, err := buildRegister(BuddyConfig{Code: ownCode}, attacker, "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
+	_, err = cli.Roundtrip(rctx, ownReg)
+	rcancel()
+	if err != nil {
+		t.Fatalf("the attacker's own registration should have been processed: %v", err)
+	}
+	authz.mu.RLock()
+	_, ownPending := authz.pend[shortHash(ownCode)]
+	authz.mu.RUnlock()
+	if !ownPending {
+		t.Fatal("positive control failed: a well-formed registration did not reach the app layer")
+	}
+
+	// Now the impersonation. Signed by the victim's key, sent over the attacker's
+	// authenticated connection.
+	const victimCode = "VICTIM-CODE-XYZ"
+	forged, err := buildRegister(BuddyConfig{Code: victimCode}, victim, "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fctx, fcancel := context.WithTimeout(ctx, 5*time.Second)
+	resp, ferr := cli.Roundtrip(fctx, forged)
+	fcancel()
+	if ferr == nil && len(resp) > 0 {
+		t.Fatalf("a registration claiming another key was answered: %q", resp)
+	}
+
+	// Nothing may have been recorded for the victim.
+	authz.mu.RLock()
+	_, victimPending := authz.pend[shortHash(victimCode)]
+	pendCount := len(authz.pend)
+	authz.mu.RUnlock()
+	if victimPending {
+		t.Fatal("an enrollment code was pended against a key that never authenticated")
+	}
+	if pendCount != 1 {
+		t.Fatalf("pending holds %d entries, want only the attacker's own", pendCount)
+	}
+
+	// And the connection itself must be gone, not merely unanswered: a follow-up
+	// request on it must fail.
+	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer ncancel()
+	again, err := buildRegister(BuddyConfig{}, attacker, "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, err := cli.Roundtrip(nctx, again); err == nil && len(resp) > 0 {
+		t.Fatal("the connection survived an impersonation attempt; it must be closed")
+	}
+}
+
 // A stranger cannot bind an enrollment code to somebody else's public key: the
 // code is inside the registration signature AND the registration is bound to the
 // TLS-authenticated key, so the pending entry can only ever name the enrolling key.
