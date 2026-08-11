@@ -39,8 +39,10 @@ jobs:
       - name: cross-compile (release targets)
         run: |
           for t in linux/amd64 linux/arm64; do
-            echo "building $t"
-            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null ./cmd/buddynet
+            for c in ./cmd/buddynet ./cmd/buddynet-handshake; do
+              echo "building $c for $t"
+              GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build -o /dev/null "$c"
+            done
           done
 
   scan:

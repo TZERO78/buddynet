@@ -41,19 +41,23 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           version="${GITHUB_REF_NAME}"
-          ext=""; [ "$GOOS" = windows ] && ext=".exe"
-          out="buddynet-${GOOS}-${GOARCH}${ext}"
-          # -s -w strips symbol/debug info to keep the binary small; -trimpath
-          # makes the build reproducible.
-          go build -trimpath -ldflags="-s -w -X main.version=${version}" \
-            -o "dist/${out}" ./cmd/buddynet
-          ( cd dist && sha256sum "${out}" > "${out}.sha256" )
-          # Keyless Sigstore bundle (signature + cert + transparency-log proof in
-          # one file, cosign v4's default format), verifiable with:
-          #   cosign verify-blob --bundle <out>.bundle \
-          #     --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
-          #     --certificate-oidc-issuer https://token.actions.githubusercontent.com <out>
-          cosign sign-blob --yes --bundle "dist/${out}.bundle" "dist/${out}"
+          # Two binaries: the full multi-role `buddynet`, and the single-purpose
+          # `buddynet-handshake` for a stateless public matchmaker. Both are built,
+          # checksummed, and keyless-signed the same way.
+          for cmd in buddynet buddynet-handshake; do
+            out="${cmd}-${GOOS}-${GOARCH}"
+            # -s -w strips symbol/debug info to keep the binary small; -trimpath
+            # makes the build reproducible.
+            go build -trimpath -ldflags="-s -w -X main.version=${version}" \
+              -o "dist/${out}" "./cmd/${cmd}"
+            ( cd dist && sha256sum "${out}" > "${out}.sha256" )
+            # Keyless Sigstore bundle (signature + cert + transparency-log proof in
+            # one file, cosign v4's default format), verifiable with:
+            #   cosign verify-blob --bundle <out>.bundle \
+            #     --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+            #     --certificate-oidc-issuer https://token.actions.githubusercontent.com <out>
+            cosign sign-blob --yes --bundle "dist/${out}.bundle" "dist/${out}"
+          done
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
