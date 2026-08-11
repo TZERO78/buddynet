@@ -7,6 +7,110 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **This has to ship as a MAJOR release (v4.0.0).** `protocol.Version` goes 6 → 7
+> with no compatibility shim, so a v3.x buddy cannot pair with a v4 handshake
+> server or vice versa — that is a breaking change under SemVer, not a minor one.
+> The binary carries no version constant (it is stamped from the git tag via
+> `-X main.version=`), so nothing needs bumping in source; the decision is made at
+> tagging time. Remember the Unraid plugin bump afterwards (BINVER + a verified
+> BINSHA), and note that the plugin's users will need the server updated in step
+> with them — see the rollout instructions in `docs/PROTOCOL.md`.
+
+### Security
+
+- **Protocol 6 → 7 (BREAKING): per-attempt `REGISTER` nonce and a full-coverage
+  registration signature.** A buddy used to build its `REGISTER` once and re-send
+  the same signed bytes on every poll, while the server's replay cache keyed on
+  the signature — so the buddy's *own* second attempt looked like a replay and was
+  dropped. In approval mode that left a single-attempt window in which pairing
+  could work at all. Every attempt now carries a fresh 128-bit nonce, timestamp
+  and signature (UDP, QUIC, the retry after a cookie challenge, and once per
+  server address so a dual-stacked server's v4 and v6 datagrams do not collide),
+  and the replay cache is keyed on `(pubkey, nonce)`. The signature now covers
+  version, role, plaintext token, id, pubkey, virtual IP, name, timestamp, nonce
+  and the sealed enrollment code, so a captured code can no longer be grafted onto
+  another key. The server also derives the virtual IP from the public key instead
+  of trusting the claim. **Server and buddies must be upgraded together**; once the
+  source is validated, a mismatched client gets a version-stamped reply and
+  reports "update buddynet" instead of timing out silently. For a public server,
+  run v6 and v7 side by side on two ports and migrate buddies pair by pair —
+  see *Migrating a running server to v7* in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+  Deliberately no compatibility shim: a v6 signature does not cover the fields v7
+  relies on, so honouring one would mean accepting a weaker proof.
+
+- **The approval transition no longer opens a replay window.** Because unapproved
+  keys are (correctly) kept out of the replay cache, a registration captured while
+  a key was still an outsider stayed replayable for the rest of its freshness
+  window the moment the operator approved it. Nonces from unapproved keys are now
+  remembered in a **separate** pre-auth cache with its own cap, TTL and eviction,
+  and both caches are consulted once a key is approved — so a flood of outsiders
+  can still only ever evict each other, never an approved buddy's entry.
+
+  A timestamp comparison against the approval instant is kept as a second line of
+  defence but is **not** sufficient on its own, and was wrong as the only check:
+  the timestamp is the sender's to choose and may legitimately sit up to `regSkew`
+  in the *future*, so a registration dated `now + 59 s` and sent before approval
+  passes such a comparison afterwards. Only remembering the nonce closes it.
+
+- **Code-based enrollment works again over QUIC, and is bound to the TLS key.**
+  The QUIC control server refused any client key that was not already on the
+  allowlist, during the TLS handshake — which made `--code` enrollment impossible
+  on the default transport: an un-approved client could not complete the handshake,
+  so its encrypted code never reached the application layer, so the operator could
+  never approve it. TLS now *authenticates* every client (Ed25519 client
+  certificate + proof of possession) but *authorizes* none; the authenticated key
+  is handed up and `REGISTER.pubkey` must equal it, or the connection is closed
+  and nothing is stored. Unknown keys run under a much stricter rate limit than
+  approved ones.
+
+- **Cookie before decryption on the UDP control plane.** The sealed pairing token
+  was opened (X25519 + NaCl box) *before* the address-validation cookie was
+  checked, so an IP-spoofed source could reach a full asymmetric operation with a
+  single datagram. The cookie is now the gate ahead of everything asymmetric.
+
+- **Replay cache no longer floodable by outsiders.** The bounded cache was
+  populated before the allowlist check, so any stranger with a self-signed but
+  valid registration could fill it and evict entries protecting approved buddies.
+  Authorization now comes first: only approved keys occupy a slot.
+
+- **QUIC control connections bounded per source and in time.** Only a global cap
+  existed, so one host could fill it and lock everyone else out, and nothing
+  bounded how long a handshaked-but-idle connection could sit there. Adds a
+  per-source cap (address families normalised), a first-stream deadline, a
+  per-request read deadline, no server-side keepalive, guaranteed slot release on
+  every exit path, and throttled refusal logging.
+
+- **A peer is cached only after its identity is confirmed.** `peers.json` was
+  written as soon as the handshake server's roster passed its consistency checks —
+  before the tunnel existed and before the SAS. A hostile server or a token squat
+  could thereby get an unverified key cached and its self-asserted `.buddy` name
+  TOFU-pinned, and a first contact whose SAS the human *rejected* still left both
+  behind. Persistence now happens only after the data plane is up and, on first
+  contact, after the SAS is confirmed. Known and pinned peers are still refreshed
+  on every successful authenticated connection.
+
+- **The allowlist stays fail-closed when its file disappears.** The watcher
+  skipped the tick on any stat error, so deleting the allowlist left the
+  last-loaded keys authorized for the life of the process — revoking everyone with
+  `rm` did nothing, silently. A missing allowlist now means zero authorized
+  clients, warned once and reloaded when the file returns. `--authorized` alone
+  decides the mode; the docs claimed a missing file fell back to open mode and
+  have been corrected.
+
+### Known / deferred
+
+- **~100 unhandled-error sites (gosec G104) are still excluded wholesale.** The
+  exclusion is long-standing project policy (see `.github/workflows/ci.yml`) and
+  most sites are best-effort writes on UDP or on a stream that is being torn down
+  anyway. They have **not** been classified individually. The ones in the
+  production packages — `internal/role` (38) and `internal/tunnel` (16) — deserve
+  a pass of their own, keeping the exclusion only where a dropped error genuinely
+  cannot matter and handling the rest. Out of scope here so it does not ride along
+  with the remote- and approval-path fixes.
+- **`internal/tunnel/quic.go` still allows TLS session resumption** (gosec G123).
+  The control plane now disables it, because a resumed session does not re-run
+  `VerifyPeerCertificate`; the data plane was left alone in this changeset.
+
 ### Added
 
 - **BuddyShare** — scoped folder sharing and mutual backup over SMB, built

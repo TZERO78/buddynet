@@ -144,23 +144,32 @@ func TestReplayedDetectsRepeatAndStaysBounded(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newAuthorizer: %v", err)
 	}
-	// First sighting is fresh; an exact repeat within the window is a replay.
-	if a.replayed("sig-A") {
+	// First sighting is fresh; the same key reusing the same nonce is a replay.
+	if a.replayed("key-A", "nonce-1") {
 		t.Fatal("first sighting wrongly flagged as replay")
 	}
-	if !a.replayed("sig-A") {
-		t.Fatal("repeat of the same signature not detected as replay")
+	if !a.replayed("key-A", "nonce-1") {
+		t.Fatal("repeat of the same (key,nonce) not detected as replay")
 	}
-	// An empty signature (default mode) is never treated as a replay.
-	if a.replayed("") {
-		t.Fatal("empty signature wrongly flagged as replay")
+	// The same key with a FRESH nonce is ordinary polling, not a replay — this is
+	// what lets a buddy re-register once a second while waiting for its partner.
+	if a.replayed("key-A", "nonce-2") {
+		t.Fatal("same key with a new nonce must not be flagged as replay")
 	}
-	// A flood of distinct signatures must not grow the cache without bound.
-	for i := 0; i < maxReplaySigs*3; i++ {
-		a.replayed(fmt.Sprintf("flood-%d", i))
+	// The same nonce under a different key is a different registration entirely.
+	if a.replayed("key-B", "nonce-1") {
+		t.Fatal("different key with the same nonce must not be flagged as replay")
 	}
-	if got := len(a.recentSigs); got > maxReplaySigs {
-		t.Fatalf("replay cache = %d entries, exceeds cap %d", got, maxReplaySigs)
+	// A missing field (open/legacy mode) is never treated as a replay.
+	if a.replayed("", "nonce-1") || a.replayed("key-A", "") {
+		t.Fatal("an incomplete (key,nonce) wrongly flagged as replay")
+	}
+	// A flood of distinct nonces must not grow the cache without bound.
+	for i := 0; i < maxReplayRegs*3; i++ {
+		a.replayed("key-A", fmt.Sprintf("flood-%d", i))
+	}
+	if got := len(a.recentRegs); got > maxReplayRegs {
+		t.Fatalf("replay cache = %d entries, exceeds cap %d", got, maxReplayRegs)
 	}
 }
 
@@ -175,8 +184,7 @@ func TestVerifyRegistration(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pubB64 := base64.StdEncoding.EncodeToString(pub)
 	signed := func(token, id string, ts int64, signer ed25519.PrivateKey) protocol.Message {
-		sig := ed25519.Sign(signer, protocol.RegistrationPayload(token, id, pubB64, ts))
-		return protocol.Message{Type: protocol.TypeRegister, Token: token, ID: id, PubKey: pubB64, Ts: ts, RegSig: base64.StdEncoding.EncodeToString(sig)}
+		return signReg(t, signer, protocol.Message{Type: protocol.TypeRegister, Token: token, ID: id, PubKey: pubB64, Ts: ts})
 	}
 
 	if !verifyRegistration(signed("tok", "A", time.Now().Unix(), priv), time.Minute) {
@@ -187,6 +195,14 @@ func TestVerifyRegistration(t *testing.T) {
 	bad.Token = "other"
 	if verifyRegistration(bad, time.Minute) {
 		t.Fatal("tampered token accepted")
+	}
+	// A missing or malformed nonce is refused before the signature is even checked.
+	for name, nonce := range map[string]string{"missing": "", "too short": "AAA", "bad alphabet": "!!!!!!!!!!!!!!!!!!!!!!"} {
+		m := signed("tok", "A", time.Now().Unix(), priv)
+		m.Nonce = nonce
+		if verifyRegistration(m, time.Minute) {
+			t.Fatalf("registration with a %s nonce accepted", name)
+		}
 	}
 	// Stale timestamp rejected.
 	if verifyRegistration(signed("tok", "A", time.Now().Add(-5*time.Minute).Unix(), priv), time.Minute) {

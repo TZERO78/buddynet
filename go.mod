@@ -4,22 +4,22 @@ go 1.25.0
 
 // Build with a patched toolchain (stdlib CVEs fixed past 1.25.0); the `go`
 // minimum above stays 1.25.0 for compatibility. CI/release build with `stable`.
-toolchain go1.25.11
+toolchain go1.25.12
 
 require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/miekg/dns v1.1.72
-	github.com/quic-go/quic-go v0.60.0
-	golang.org/x/crypto v0.53.0
-	golang.org/x/term v0.44.0
+	github.com/quic-go/quic-go v0.61.0
+	golang.org/x/crypto v0.54.0
+	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
 	github.com/kr/text v0.2.0 // indirect
-	golang.org/x/mod v0.35.0 // indirect
-	golang.org/x/net v0.55.0 // indirect
-	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.46.0 // indirect
-	golang.org/x/tools v0.44.0 // indirect
+	golang.org/x/mod v0.37.0 // indirect
+	golang.org/x/net v0.56.0 // indirect
+	golang.org/x/sync v0.22.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/tools v0.47.0 // indirect
 )

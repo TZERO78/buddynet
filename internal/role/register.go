@@ -24,35 +24,31 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 	if cfg.QUIC {
 		return buddyRegisterQUIC(conn, serverAddrs, cfg, nd, rendezvous, timeout)
 	}
-	myID, myPub, myVIP, priv, serverPub := nd.id, nd.pub, nd.vip, nd.priv, nd.serverPub
-	ts := time.Now().Unix()
-	m := protocol.Message{
-		Type:      protocol.TypeRegister,
-		Ver:       protocol.Version,
-		Role:      protocol.RoleBuddy,
-		ID:        myID,
-		PubKey:    myPub,
-		VirtualIP: myVIP,
-		Name:      cfg.Name,
-		Ts:        ts,
-	}
-	setToken(&m, rendezvous, serverPub)
-	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
-	if cfg.Code != "" {
-		if enc, err := bcrypto.SealCode(cfg.Code, serverPub); err == nil {
-			m.CodeEnc = enc
-		}
-	}
-	reg, _ := json.Marshal(m)
+	serverPub := nd.serverPub
 
 	deadline := time.Now().Add(timeout)
 	next := time.Now()
 	var lastLog time.Time
 	var skewNoted bool
+	// Cookies are per SERVER ADDRESS: the challenge is bound to the source IP the
+	// server saw, and a dual-stack socket reaches a v4 and a v6 server address from
+	// two different source addresses. One shared cookie would keep the other stack
+	// permanently challenged; keyed per address, both validate independently.
+	cookies := map[string]string{}
 	buf := make([]byte, 1500)
 	for time.Now().Before(deadline) {
 		if !time.Now().Before(next) {
+			// Sign a FRESH registration for every datagram: new nonce, new timestamp,
+			// new signature. Re-sending one signed blob would make the server's
+			// (PubKey,Nonce) replay defense fire on our own traffic — both on the next
+			// poll and, since a dual-stacked server resolves to several addresses, on
+			// the v6 copy of the very same tick. One nonce per datagram keeps the two
+			// stacks independent, which is what lets the server observe BOTH candidates.
 			for _, a := range serverAddrs {
+				reg, err := buildRegister(cfg, nd, rendezvous, cookies[a.String()])
+				if err != nil {
+					return protocol.Peer{}, err
+				}
 				conn.WriteToUDP(reg, a)
 			}
 			next = time.Now().Add(time.Second)
@@ -62,7 +58,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 			}
 		}
 		conn.SetReadDeadline(next)
-		n, _, err := conn.ReadFromUDP(buf)
+		n, from, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			continue
 		}
@@ -70,12 +66,14 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		if json.Unmarshal(buf[:n], &r) != nil {
 			continue
 		}
-		// Address-validation challenge: adopt the cookie and re-register at once
-		// (proving return-routability) instead of waiting for the next tick.
+		// Address-validation challenge: adopt the cookie for the address that issued
+		// it and re-register at once (proving return-routability) instead of waiting
+		// for the next tick. The retry is a full re-sign — the cookie is not part of
+		// the signed payload, but the nonce and timestamp must still be fresh so the
+		// server does not see the follow-up as a replay of the challenged attempt.
 		if r.Type == protocol.TypeCookie {
-			if r.Cookie != "" && r.Cookie != m.Cookie {
-				m.Cookie = r.Cookie
-				reg, _ = json.Marshal(m)
+			if key := from.String(); r.Cookie != "" && r.Cookie != cookies[key] {
+				cookies[key] = r.Cookie
 				next = time.Now()
 			}
 			continue
@@ -110,26 +108,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 // is needed. Closing the control client leaves the socket open, so the caller
 // then hole-punches and runs the peer tunnel on the very same mapping.
 func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, nd *node, rendezvous string, timeout time.Duration) (protocol.Peer, error) {
-	myID, myPub, myVIP, priv, serverPub := nd.id, nd.pub, nd.vip, nd.priv, nd.serverPub
-	ts := time.Now().Unix()
-	m := protocol.Message{
-		Type:      protocol.TypeRegister,
-		Ver:       protocol.Version,
-		Role:      protocol.RoleBuddy,
-		ID:        myID,
-		PubKey:    myPub,
-		VirtualIP: myVIP,
-		Name:      cfg.Name,
-		Ts:        ts,
-	}
-	setToken(&m, rendezvous, serverPub)
-	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(rendezvous, myID, myPub, ts)))
-	if cfg.Code != "" {
-		if enc, err := bcrypto.SealCode(cfg.Code, serverPub); err == nil {
-			m.CodeEnc = enc
-		}
-	}
-	reg, _ := json.Marshal(m)
+	priv, serverPub := nd.priv, nd.serverPub
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
@@ -152,6 +131,14 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 	var lastLog time.Time
 	var skewNoted bool
 	for ctx.Err() == nil {
+		// One freshly signed registration per poll (see buddyRegister): the QUIC
+		// transport reuses a single connection, but each stream must carry its own
+		// nonce or the server sees the second poll as a replay. No cookie here —
+		// QUIC's own handshake validated the source address.
+		reg, berr := buildRegister(cfg, nd, rendezvous, "")
+		if berr != nil {
+			return protocol.Peer{}, berr
+		}
 		rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
 		resp, err := cli.Roundtrip(rctx, reg)
 		rcancel()
@@ -199,6 +186,46 @@ func noteSkew(d time.Duration, noted *bool) {
 	log.Printf("NOTE: server roster is signed but %s out of date — check the clock on this host and the server (NTP/time-sync); pairing needs them within ~60s", d.Round(time.Second))
 }
 
+// buildRegister marshals ONE registration attempt: a fresh nonce, a current
+// timestamp and a signature over both, plus the sealed token and (if enrolling)
+// the sealed enrollment code. cookie is the server's address-validation token on
+// the plain-UDP transport ("" on QUIC, which validates the address itself); it is
+// attached but NOT signed — the server checks it against its own HMAC key and the
+// packet's source IP.
+//
+// Every caller must call this per ATTEMPT, never once per session: the server
+// rejects a repeated (PubKey,Nonce) as a replay, which is exactly what a
+// re-marshalled cached registration would look like.
+func buildRegister(cfg BuddyConfig, nd *node, rendezvous, cookie string) ([]byte, error) {
+	nonce, err := protocol.NewNonce()
+	if err != nil {
+		return nil, fmt.Errorf("registration nonce: %w", err)
+	}
+	m := protocol.Message{
+		Type:      protocol.TypeRegister,
+		Ver:       protocol.Version,
+		Role:      protocol.RoleBuddy,
+		Token:     rendezvous, // signed in plaintext; replaced by TokenEnc on the wire below
+		ID:        nd.id,
+		PubKey:    nd.pub,
+		VirtualIP: nd.vip,
+		Name:      cfg.Name,
+		Ts:        time.Now().Unix(),
+		Nonce:     nonce,
+		Cookie:    cookie,
+	}
+	if cfg.Code != "" {
+		// Sealed BEFORE signing: CodeEnc is covered by the signature, so a captured
+		// enrollment code cannot be re-bound to a different public key.
+		if enc, serr := bcrypto.SealCode(cfg.Code, nd.serverPub); serr == nil {
+			m.CodeEnc = enc
+		}
+	}
+	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(nd.priv, protocol.RegistrationPayload(m)))
+	setToken(&m, rendezvous, nd.serverPub)
+	return json.Marshal(m)
+}
+
 // setToken puts the pairing rendezvous on a REGISTER, sealed to the server's
 // pinned identity key so it never travels in cleartext on the plain-UDP control
 // plane (an on-path observer sees only ciphertext). It falls back to the
@@ -207,6 +234,7 @@ func noteSkew(d time.Duration, noted *bool) {
 func setToken(m *protocol.Message, rendezvous string, serverPub ed25519.PublicKey) {
 	if enc, err := bcrypto.SealCode(rendezvous, serverPub); err == nil {
 		m.TokenEnc = enc
+		m.Token = "" // sealed form only on the wire; the signature still covers the plaintext
 		return
 	}
 	m.Token = rendezvous

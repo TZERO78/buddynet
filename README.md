@@ -293,3 +293,7 @@ additive on the v1 wire format, virtual IPs, and fallback chain.
 
 MIT — see [LICENSE](LICENSE). With thanks to the open-source projects BuddyNet
 builds on; see [CREDITS.md](CREDITS.md).
+
+## AI-assisted development
+
+This project was developed with the assistance of generative AI tools. AI was used as a development tool for code generation, review, documentation, and problem solving. The project owner remains responsible for the design, testing, and published software.

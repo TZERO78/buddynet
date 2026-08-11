@@ -84,7 +84,13 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 				fmt.Sprintf("roster claims vip %s but the key derives %s (hostile/buggy server, or a squat with a forged vip)", partner.VirtualIP, want))
 			return fmt.Errorf("partner virtual IP %s does not match its key (want %s)", partner.VirtualIP, want)
 		}
-		_ = reg.Upsert(partner) // cache for offline fallback next time
+		// NOTE: deliberately NOT persisted here. The roster has been checked for
+		// consistency, but nothing has yet PROVEN that the key on it belongs to the
+		// buddy we mean — that happens when the tunnel comes up (the partner has to
+		// hold the private key to complete the QUIC/WG handshake) and, on first
+		// contact, when the human confirms the SAS. Writing peers.json here would
+		// cache an unverified key and TOFU-pin an unverified .buddy name, both
+		// straight from a server-supplied roster. See rememberPeer below.
 		// Partner found and identity-verified — NOT "online" yet (the tunnel is not
 		// up until dialChain succeeds below; that emits CONNECTED).
 		log.Printf("CONNECT: action=partner-verified id=%s key=%s vip=%s cands=%d", partner.ID, keyTag(partner.PubKey), partner.VirtualIP, len(partner.Candidates))
@@ -164,7 +170,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		}
 		myEdPub := priv.Public().(ed25519.PublicKey)
 		sas := ComputeSAS(myEdPub, partnerPub, ekm)
-		if err := PromptSAS(sas, cfg.SASTimeout); err != nil {
+		if err := promptSAS(sas, cfg.SASTimeout); err != nil {
 			logSASFailure(err, sess.RemoteAddr().String(), used, partner, att.inviteToken)
 			return err // Buddy stops the reconnect loop, key NOT stored
 		}
@@ -172,6 +178,12 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 			return err
 		}
 	}
+
+	// Identity is now CONFIRMED: the session is up (which required the partner to
+	// hold the private key for partnerPub) and, on first contact, the human matched
+	// the SAS. Only now does the peer earn a place in the on-disk cache and in the
+	// .buddy name table. A failed SAS returns above, so nothing is written.
+	rememberPeer(reg, partner)
 
 	// Ephemeral invite/join: now that the partner is verified, derive a long-lived
 	// rendezvous secret from the channel binding and store it. From here on
@@ -235,6 +247,27 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 	log.Printf("DISCONNECTED: role=buddy partner=%s key=%s reason=%s duration=%s streams=%d",
 		partner.ID, keyTag(partner.PubKey), reason, time.Since(connectedAt).Round(time.Second), streams)
 	return ferr
+}
+
+// rememberPeer writes a peer into the offline cache (peers.json) and the .buddy
+// name table. Call it ONLY after the partner's identity has been confirmed:
+//
+//   - the data plane came up, which the partner could only do by holding the
+//     private key for the public key we pinned or were vouched, and
+//   - on first contact, the human confirmed the SAS over that same channel-bound
+//     session (a rejected SAS aborts before this point).
+//
+// An already-pinned or already-known peer is refreshed the same way, so a new
+// endpoint or a new LastSeen from an authenticated connection is kept. A cache
+// write is best-effort: losing it costs the offline fallback next time, never the
+// live tunnel, so a failure is logged rather than returned.
+func rememberPeer(reg *peer.Registry, p protocol.Peer) {
+	if p.PubKey == "" {
+		return
+	}
+	if err := reg.Upsert(p); err != nil {
+		log.Printf("NOTE: could not update the peer cache (%v) — the tunnel is unaffected, but the offline fallback may be stale", err)
+	}
 }
 
 // dialChain walks the fallback chain and returns the first session it can
