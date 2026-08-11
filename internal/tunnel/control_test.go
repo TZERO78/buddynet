@@ -235,7 +235,7 @@ func TestControlRequiresAClientCertificate(t *testing.T) {
 		MinVersion:            tls.VersionTLS13,
 		NextProtos:            []string{controlALPN},
 		VerifyPeerCertificate: pinnedPeerVerify(srvPub),
-	}, controlQUICConf(30*time.Second))
+	}, controlQUICConf(30*time.Second, true))
 	if err != nil {
 		return // refused during the handshake, as intended
 	}

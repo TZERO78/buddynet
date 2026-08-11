@@ -7,7 +7,9 @@ import (
 	"crypto/x509"
 	"errors"
 	"io"
+	"log"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -33,10 +35,33 @@ import (
 const controlALPN = "buddynet-ctrl/1"
 
 const (
-	maxControlReq  = 8192  // bound on a REGISTER read by the server
-	maxControlResp = 65536 // bound on a PEER_LIST read by the client
-	maxCtrlStreams = 16    // concurrent control streams a peer may open
-	maxCtrlConns   = 256   // concurrent QUIC control connections the server services
+	maxControlReq  = 8192 // bound on a REGISTER read by the server
+	maxControlResp = 65536
+	maxCtrlStreams = 16  // concurrent control streams a peer may open
+	maxCtrlConns   = 256 // concurrent QUIC control connections the server services
+
+	// maxCtrlConnsPerIP bounds concurrent control connections from ONE source
+	// address. The global cap alone is not enough: a single source can open
+	// connections up to it and lock every other buddy out, and QUIC's source-address
+	// validation makes those connections cheap to hold rather than impossible to
+	// make. A buddy needs exactly one control connection, so this is generous by an
+	// order of magnitude while still leaving 15/16 of the table for everyone else.
+	maxCtrlConnsPerIP = 16
+
+	// firstStreamTimeout bounds how long an accepted connection may sit without
+	// opening its first stream. A real buddy registers immediately; a connection
+	// that completes the handshake and then goes quiet is holding a slot for free.
+	firstStreamTimeout = 5 * time.Second
+
+	// controlReadTimeout bounds reading ONE request off a stream, so a peer cannot
+	// pin a goroutine (and a stream slot) by dribbling bytes or never half-closing.
+	controlReadTimeout = 5 * time.Second
+
+	// rejectLogInterval throttles the "at capacity" line. Refusals happen exactly
+	// when something is flooding us, so logging per refusal would let the flood
+	// write the disk full — the one line per interval says it is happening, and the
+	// suppressed count says how much.
+	rejectLogInterval = 30 * time.Second
 )
 
 // peerEd25519FromCerts extracts the peer's Ed25519 identity from the leaf
@@ -93,17 +118,26 @@ func requireEd25519Client(rawCerts [][]byte, _ [][]*x509.Certificate) error {
 	return err
 }
 
-func controlQUICConf(idle time.Duration) *quic.Config {
-	ka := idle / 4
-	if ka < 5*time.Second {
-		ka = 5 * time.Second
-	}
-	return &quic.Config{
+// controlQUICConf builds the control-plane QUIC config. keepalive must be true
+// only on the CLIENT: a server that sends keepalives keeps every connection alive
+// on its own initiative, including the ones an attacker opened and abandoned, so
+// they would never age out of the connection table. With it off, a silent peer
+// hits MaxIdleTimeout and the slot is reclaimed; a real buddy's own keepalive (and
+// its ~1/s polling) keeps its connection healthy either way.
+func controlQUICConf(idle time.Duration, keepalive bool) *quic.Config {
+	cfg := &quic.Config{
 		MaxIdleTimeout:       idle,
-		KeepAlivePeriod:      ka,
 		HandshakeIdleTimeout: 10 * time.Second,
 		MaxIncomingStreams:   maxCtrlStreams,
 	}
+	if keepalive {
+		ka := idle / 4
+		if ka < 5*time.Second {
+			ka = 5 * time.Second
+		}
+		cfg.KeepAlivePeriod = ka
+	}
+	return cfg
 }
 
 // ControlClient is a buddy's QUIC control connection to the handshake server.
@@ -127,7 +161,7 @@ func DialControl(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, se
 		Certificates:          []tls.Certificate{selfSignedCert(priv)}, // our identity, for server-side client pinning
 		VerifyPeerCertificate: pinnedPeerVerify(serverPub),
 	}
-	qc, err := tr.Dial(ctx, server, tlsConf, controlQUICConf(idle))
+	qc, err := tr.Dial(ctx, server, tlsConf, controlQUICConf(idle, true))
 	if err != nil {
 		tr.Close()
 		return nil, err
@@ -196,6 +230,74 @@ type ControlServer struct {
 	reqs      chan *ControlRequest
 	done      chan struct{}
 	closeOnce sync.Once
+
+	// Connection accounting. connMu guards all four fields so the global and
+	// per-source counters can never drift apart: they are taken together in admit
+	// and given back together in the release closure, which every exit path runs.
+	connMu    sync.Mutex
+	conns     int
+	perIP     map[string]int // normalized source IP -> open connections
+	rejected  int64          // refusals since the last logged line
+	lastLogAt time.Time
+}
+
+// ipKey normalizes a source address to one connection-accounting key. IPv4,
+// IPv6 and IPv4-mapped IPv6 must land on the SAME key, or a peer could double its
+// allowance simply by reaching us over a mapped address. The port is dropped: the
+// limit is per host, not per socket.
+func ipKey(a net.Addr) string {
+	ua, ok := a.(*net.UDPAddr)
+	if !ok {
+		return a.String()
+	}
+	if addr, ok := netip.AddrFromSlice(ua.IP); ok {
+		return addr.Unmap().String()
+	}
+	return ua.IP.String()
+}
+
+// admit reserves a connection slot for a source, returning the release closure.
+// The closure is idempotent, so calling it on several exit paths is safe and
+// missing it is the only real hazard — hence the single defer at the call site.
+func (s *ControlServer) admit(remote net.Addr) (release func(), ok bool) {
+	key := ipKey(remote)
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.conns >= maxCtrlConns || s.perIP[key] >= maxCtrlConnsPerIP {
+		s.rejected++
+		return nil, false
+	}
+	s.conns++
+	s.perIP[key]++
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			s.connMu.Lock()
+			defer s.connMu.Unlock()
+			s.conns--
+			if n := s.perIP[key] - 1; n <= 0 {
+				delete(s.perIP, key) // keep the map bounded by live connections only
+			} else {
+				s.perIP[key] = n
+			}
+		})
+	}, true
+}
+
+// noteRejection emits at most one "at capacity" line per rejectLogInterval,
+// carrying the number of refusals it stands for.
+func (s *ControlServer) noteRejection() {
+	s.connMu.Lock()
+	if time.Since(s.lastLogAt) < rejectLogInterval {
+		s.connMu.Unlock()
+		return
+	}
+	n := s.rejected
+	s.rejected = 0
+	s.lastLogAt = time.Now()
+	s.connMu.Unlock()
+	log.Printf("SECURITY: event=control-conn-refused count=%d detail=%q", n,
+		"control connection limit reached (per-source or global); shedding load")
 }
 
 // ListenControl starts a QUIC control listener on conn, presenting the server's
@@ -218,39 +320,46 @@ func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duratio
 		ClientAuth:            tls.RequireAnyClientCert,
 		VerifyPeerCertificate: requireEd25519Client,
 	}
-	ln, err := tr.Listen(tlsConf, controlQUICConf(idle))
+	ln, err := tr.Listen(tlsConf, controlQUICConf(idle, false))
 	if err != nil {
 		tr.Close()
 		return nil, err
 	}
-	s := &ControlServer{tr: tr, ln: ln, reqs: make(chan *ControlRequest), done: make(chan struct{})}
+	s := &ControlServer{tr: tr, ln: ln, reqs: make(chan *ControlRequest), done: make(chan struct{}), perIP: map[string]int{}}
 	go s.acceptConns()
 	return s, nil
 }
 
 func (s *ControlServer) acceptConns() {
-	// Cap concurrent connections so a flood of (source-validated) QUIC dials
-	// cannot grow goroutines/memory without bound. The per-stream rate limiter
-	// gates work inside a connection; this bounds the number of connections.
-	sem := make(chan struct{}, maxCtrlConns)
+	// Cap concurrent connections globally AND per source, so neither a broad flood
+	// of (source-validated) QUIC dials nor one host opening connection after
+	// connection can grow goroutines/memory or lock other buddies out. The rate
+	// limiter one layer up gates work INSIDE a connection; this bounds how many
+	// connections exist at all.
 	for {
 		qc, err := s.ln.Accept(context.Background())
 		if err != nil {
 			return // listener closed
 		}
-		select {
-		case sem <- struct{}{}:
-			go func() {
-				defer func() { <-sem }()
-				s.acceptStreams(qc)
-			}()
-		default:
+		release, ok := s.admit(qc.RemoteAddr())
+		if !ok {
+			s.noteRejection()
 			qc.CloseWithError(0, "server at capacity") // shed load instead of queuing unboundedly
+			continue
 		}
+		go func() {
+			defer release() // every exit path gives the slot back, exactly once
+			s.acceptStreams(qc)
+		}()
 	}
 }
 
 func (s *ControlServer) acceptStreams(qc *quic.Conn) {
+	// Closing here is what makes the slot accounting honest: the release closure
+	// runs when this returns, so the connection must actually be gone by then —
+	// including on the first-stream timeout below.
+	defer qc.CloseWithError(0, "")
+
 	// The authenticated client identity is a property of the CONNECTION, so it is
 	// extracted once here and carried on every request from it. ClientAuth is
 	// RequireAnyClientCert and VerifyPeerCertificate insists on an Ed25519 leaf, so
@@ -261,11 +370,22 @@ func (s *ControlServer) acceptStreams(qc *quic.Conn) {
 		qc.CloseWithError(0, "client identity unavailable")
 		return
 	}
+	// A real buddy registers immediately after connecting. Bound the wait for the
+	// FIRST stream so a connection that completes the handshake and then goes quiet
+	// releases its slot in seconds rather than at the idle timeout. Later streams
+	// are the ordinary polling cadence and only need the idle timeout.
+	first := true
 	for {
-		st, err := qc.AcceptStream(context.Background())
-		if err != nil {
-			return // connection closed
+		ctx, cancel := context.Background(), context.CancelFunc(func() {})
+		if first {
+			ctx, cancel = context.WithTimeout(ctx, firstStreamTimeout)
 		}
+		st, err := qc.AcceptStream(ctx)
+		cancel()
+		if err != nil {
+			return // connection closed, or no first stream in time
+		}
+		first = false
 		safe.Go("control.read", func() { s.readRequest(qc, clientKey, st) })
 	}
 }
@@ -284,11 +404,17 @@ func clientKeyOf(qc *quic.Conn) (ed25519.PublicKey, error) {
 }
 
 func (s *ControlServer) readRequest(qc *quic.Conn, clientKey ed25519.PublicKey, st *quic.Stream) {
+	// Bound the read: a peer that dribbles bytes, or that never half-closes its
+	// send side, would otherwise pin this goroutine and one of the connection's
+	// stream slots indefinitely. An incomplete request is closed, not queued.
+	_ = st.SetReadDeadline(time.Now().Add(controlReadTimeout))
 	payload, err := io.ReadAll(io.LimitReader(st, maxControlReq))
 	if err != nil {
+		st.CancelRead(0)
 		st.Close()
 		return
 	}
+	_ = st.SetReadDeadline(time.Time{})
 	req := &ControlRequest{Remote: qc.RemoteAddr(), ClientKey: clientKey, Payload: payload, st: st, qc: qc}
 	select {
 	case s.reqs <- req:
