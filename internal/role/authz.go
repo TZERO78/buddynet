@@ -60,6 +60,14 @@ const (
 	statErrorWindow = 5 * time.Minute
 )
 
+// acquireLock is the indirection the state writers call, so a test can drive the
+// LOCK FAILURE path deterministically — the one path that decides whether a
+// failed lock turns into a refused write or a silent unsynchronised one.
+// Production always uses lockFile; only tests reassign it, and they restore it
+// with t.Cleanup. The package's tests run sequentially, so no reader races with
+// the assignment.
+var acquireLock = lockFile
+
 // tightenPerms enforces 0600 on a sensitive allowlist/pending file: if it is
 // group/other-accessible (e.g. a config-management edit dropped the mode), warn
 // and chmod it back — the same policy the identity key uses. fi is the stat of
@@ -121,6 +129,8 @@ type authorizer struct {
 	// lastStatWarn throttles the "cannot read the allowlist" warning, which would
 	// otherwise repeat on every poll for as long as the condition lasts.
 	lastStatWarn time.Time
+	// lastPendWarn throttles the failed-pending-write warning the same way.
+	lastPendWarn time.Time
 	// pendDirty means the pending FILE does not reflect the map: a write failed, or
 	// a concurrent writer may have clobbered it. Without this a lost entry was
 	// PERMANENT — recordPending only wrote when the entry was new, so the client
@@ -566,7 +576,22 @@ func (a *authorizer) persistPending() {
 	// writeMu orders our own writers against each other and says nothing about that
 	// one, so without this an operator approving a code could still drop an entry
 	// the server wrote in between (or have its own write dropped).
-	defer lockAllowlist(a.pendDB)()
+	//
+	// A lock we cannot take means we must NOT write: another process is mid-update,
+	// which is precisely the case this exists for. The state stays dirty, so the
+	// next registration retries — an enrolling client sends one about once a second.
+	unlock, lerr := acquireLock(a.pendDB)
+	if lerr != nil {
+		a.mu.Lock()
+		a.pendDirty = true
+		a.mu.Unlock()
+		a.notePendWriteError(lerr)
+		return
+	}
+	defer unlock()
+
+	// Snapshot INSIDE both locks: taking it earlier would let a slower writer
+	// rename an older set over a newer one.
 	a.mu.RLock()
 	snapshot := clonePending(a.pend)
 	a.mu.RUnlock()
@@ -576,9 +601,27 @@ func (a *authorizer) persistPending() {
 	a.pendDirty = err != nil
 	a.mu.Unlock()
 	if err != nil {
-		log.Printf("WARNING: could not persist pending enrollments to %s (%v) — "+
-			"`allowclient <CODE>` may not find a waiting client until this succeeds; retrying on the next registration", a.pendDB, err)
+		a.notePendWriteError(err)
 	}
+}
+
+// notePendWriteError reports a failed pending write, throttled: the write is
+// retried on every subsequent registration, and an enrolling client sends one
+// about once a second, so an unthrottled line would fill the log for as long as
+// the condition lasts.
+func (a *authorizer) notePendWriteError(err error) {
+	a.mu.Lock()
+	quiet := time.Since(a.lastPendWarn) < statErrorWindow
+	if !quiet {
+		a.lastPendWarn = time.Now()
+	}
+	a.mu.Unlock()
+	if quiet {
+		return
+	}
+	log.Printf("WARNING: could not persist pending enrollments to %s (%v) — "+
+		"`allowclient <CODE>` may not find a waiting client until this succeeds; "+
+		"retrying on the next registration", a.pendDB, err)
 }
 
 // prunePendingLocked drops enrollment entries past pendingTTL, so the pruned set
@@ -645,7 +688,11 @@ func ApproveKey(path, key, label string) error {
 	if !validPubKey(key) {
 		return fmt.Errorf("not a valid base64 Ed25519 public key: %q", key)
 	}
-	defer lockAllowlist(path)() // serialise concurrent approve/revoke (lost-update guard)
+	unlock, lerr := acquireLock(path) // serialise concurrent approve/revoke (lost-update guard)
+	if lerr != nil {
+		return fmt.Errorf("cannot lock the allowlist for update: %w", lerr)
+	}
+	defer unlock()
 	keys, _, err := readAuthorized(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
@@ -694,7 +741,11 @@ func ListKeys(path string) error {
 }
 
 func RevokeKey(path, key string) error {
-	defer lockAllowlist(path)() // serialise concurrent approve/revoke (lost-update guard)
+	unlock, lerr := acquireLock(path) // serialise concurrent approve/revoke (lost-update guard)
+	if lerr != nil {
+		return fmt.Errorf("cannot lock the allowlist for update: %w", lerr)
+	}
+	defer unlock()
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -779,7 +830,11 @@ func AllowClient(authorizedPath, code string) error {
 	// approve/revoke commands take, so a concurrent operator invocation cannot lose
 	// this update. (The server's own writes go through persistPending; the lock is
 	// what keeps the two processes from interleaving.)
-	defer lockAllowlist(pendPath)()
+	unlock, lerr := acquireLock(pendPath)
+	if lerr != nil {
+		return fmt.Errorf("cannot lock the pending file for update: %w", lerr)
+	}
+	defer unlock()
 	pend, err := readPending(pendPath)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -1,8 +1,10 @@
 package role
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,4 +175,89 @@ func TestAtomicWriteLeavesNoTempFiles(t *testing.T) {
 func writeStateForTest(path string, i int) error {
 	body := "writer-" + strings.Repeat(string(rune('a'+i%26)), 4096) + "-end"
 	return atomicfile.Write(path, []byte(body), 0o600)
+}
+
+// A lock we cannot take must REFUSE the write, not fall back to an unsynchronised
+// one: the moment the lock is contended is exactly the moment another process is
+// mid-update. The earlier lockAllowlist returned a no-op unlock on failure, so
+// the caller wrote anyway — best-effort in the one case where best-effort is
+// wrong.
+func TestPendingWriteFailsClosedWhenTheLockCannotBeTaken(t *testing.T) {
+	nd, srvPriv := testNode(t)
+	authz := newTestAuthorizer(t, srvPriv)
+	pub := srvPriv.Public().(ed25519.PublicKey)
+
+	first, err := bcrypto.SealCode("FIRST-CODE", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz.recordPending(first, nd.pub)
+	before, err := os.ReadFile(authz.pendDB)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("setup: the first entry must be on disk (%v)", err)
+	}
+
+	// 1. Lock acquisition fails, deterministically.
+	saved := acquireLock
+	var attempts int
+	acquireLock = func(string) (func(), error) {
+		attempts++
+		return nil, errors.New("simulated: lock held by another process")
+	}
+	t.Cleanup(func() { acquireLock = saved })
+
+	second, err := bcrypto.SealCode("SECOND-CODE", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz.recordPending(second, nd.pub)
+
+	if attempts == 0 {
+		t.Fatal("the write path never tried to take the lock")
+	}
+	// 2./3. The file is untouched — no unprotected atomic write happened.
+	after, err := os.ReadFile(authz.pendDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("the pending file was written without the lock:\n before %q\n after  %q", before, after)
+	}
+	// And no stray temp file was left behind either.
+	entries, err := os.ReadDir(filepath.Dir(authz.pendDB))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Fatalf("an unprotected write left a temp file: %s", e.Name())
+		}
+	}
+	// 4. The state is dirty, so the next attempt will retry.
+	authz.mu.RLock()
+	dirty := authz.pendDirty
+	authz.mu.RUnlock()
+	if !dirty {
+		t.Fatal("a refused write did not mark the pending state dirty — the entry would never be retried")
+	}
+
+	// 5. With the lock available again, the CURRENT full snapshot is persisted —
+	//    both codes, not just the one that failed.
+	acquireLock = saved
+	authz.recordPending(second, nd.pub)
+	final, err := os.ReadFile(authz.pendDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, code := range []string{"FIRST-CODE", "SECOND-CODE"} {
+		if !strings.Contains(string(final), shortHash(code)) {
+			t.Errorf("after the lock came back, %s is missing from the file: %q", code, final)
+		}
+	}
+	authz.mu.RLock()
+	stillDirty := authz.pendDirty
+	authz.mu.RUnlock()
+	if stillDirty {
+		t.Error("the state is still dirty after a successful write")
+	}
 }

@@ -2,6 +2,6 @@
 
 package role
 
-// lockAllowlist is a no-op on Windows (no flock); the allowlist admin
+// lockFile is a no-op on Windows (no flock); the admin
 // subcommands are not expected to run concurrently there.
-func lockAllowlist(path string) (unlock func()) { return func() {} }
+func lockFile(path string) (unlock func(), err error) { return func() {}, nil }
