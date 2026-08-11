@@ -236,6 +236,12 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 	log.Printf("CONNECTED: role=buddy partner=%s key=%s vip=%s via=%q remote=%s",
 		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, used.Desc+" (WireGuard)", remoteAP)
 
+	// Identity confirmed (the interface is up with the partner's key as its sole
+	// peer, and on first contact the SAS was matched above): only now is the peer
+	// written to the offline cache and the .buddy name table — same rule as the
+	// QUIC path.
+	rememberPeer(nd.reg, partner)
+
 	if att.firstPairing {
 		if serr := saveSession(cfg.KnownPeers, att.inviteToken, partner.PubKey, secret); serr != nil {
 			return fmt.Errorf("persist session: %w", serr)
