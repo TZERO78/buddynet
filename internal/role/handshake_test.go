@@ -705,3 +705,53 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 		t.Fatalf("A got %+v, want peer B/%s", got.Peers, pkB)
 	}
 }
+
+// The paired-once latch must be released with the token, or two things break: it
+// grows until maxTokens while the tokens behind it are long gone, and a pair that
+// separates and pairs AGAIN is never announced a second time. The eviction path
+// released it; the reaper did not.
+func TestPairedLatchIsReleasedWhenTheTokenIsReaped(t *testing.T) {
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	xB64 := base64.StdEncoding.EncodeToString(xPub)
+	tokenLogKey = []byte("test-log-key")
+
+	pair := func(reg *hsRegistry) string {
+		t.Helper()
+		return captureLog(t, func() {
+			pairRegister(reg, nil, "", v4(1000), signReg(t, aPriv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: aB64}))
+			pairRegister(reg, nil, "", v4(2000), signReg(t, xPriv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: "X", PubKey: xB64}))
+		})
+	}
+
+	// A TTL short enough that one reap tick clears the bucket.
+	reg := newHSRegistry(50 * time.Millisecond)
+	if out := pair(reg); !contains(out, "PAIRED:") {
+		t.Fatal("setup: the first pairing must be logged")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reg.reap(ctx)
+	if !waitFor(t, 3*time.Second, func() bool {
+		reg.mu.Lock()
+		defer reg.mu.Unlock()
+		return len(reg.waiting) == 0
+	}) {
+		t.Fatal("the reaper never dropped the expired token")
+	}
+
+	reg.mu.Lock()
+	latched := len(reg.pairedLogged)
+	reg.mu.Unlock()
+	if latched != 0 {
+		t.Errorf("the paired-once latch still holds %d token(s) after the reaper cleared them — it leaks", latched)
+	}
+	// And a genuine RE-pairing of the same token is announced again.
+	if out := pair(reg); !contains(out, "PAIRED:") {
+		t.Error("a token that paired again after expiring was never logged — the latch is permanent")
+	}
+}

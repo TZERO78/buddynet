@@ -346,6 +346,7 @@ func (r *hsRegistry) reap(ctx context.Context) {
 				delete(r.waiting, token)
 				delete(r.seenPKs, token)        // release pubkey history when the session is gone
 				delete(r.intruderWarned, token) // and its one-shot warning latch
+				delete(r.pairedLogged, token)   // and the paired-once latch
 			}
 		}
 		r.mu.Unlock()
