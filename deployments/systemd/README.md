@@ -46,7 +46,7 @@ sudo systemctl edit buddynet-handshake     # add: [Service] Environment=BUDDYNET
 ```
 
 The handshake control plane defaults to UDP (with a source-address cookie, so the
-server is never a reflector). To use QUIC instead, set `Environment=BUDDYNET_QUIC=1`
+server is never a reflector). To use QUIC instead, set `Environment=
 on the handshake unit **and** in every buddy's `.env` — the transport must match
 on both ends.
 

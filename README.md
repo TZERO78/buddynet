@@ -75,34 +75,31 @@ keep current.)
 
 ## Quickstart (two sites, one VPS)
 
-**1 — On the VPS,** run the bootstrap server with `--quic-handshake` and grab the
+**1 — On the VPS,** run the bootstrap server with and grab the
 key to pin:
 
 ```bash
 buddynet --role=handshake,relay \
     --key /var/lib/buddynet/id.key \
     --relay-endpoint vps.example:51821 \
-    --quic-handshake
 buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
 ```
 
-> **Always use `--quic-handshake`.** Without it the pairing token travels in
-> cleartext over the public internet. Set it identically on the server and on
-> every buddy. See [docs/OPERATIONS.md](docs/OPERATIONS.md#quic-control-plane---quic-handshake).
+> **The control plane is always encrypted.** Matchmaking runs over QUIC/TLS 1.3;
+> the pairing token never travels in the clear and there is nothing to configure.
+> See [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 **2 — Inviter** (e.g. the machine being backed up *to*, running an rsync daemon):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake --invite --forward 127.0.0.1:873
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --invite --forward 127.0.0.1:873
 # prints a one-time TOKEN, then waits for your buddy to join
 ```
 
 **3 — Joiner** (the machine doing the backup):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake --join=TOKEN -L 127.0.0.1:9000 &
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=TOKEN -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
@@ -152,11 +149,9 @@ revoke and honest caveats: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md).
 - **Signed matchmaking.** The handshake server learns peers' public endpoints,
   pairs two that share a token, and hands back a **signed** `PEER_LIST`. No
   tunnel data ever flows through it.
-- **Encrypted control plane.** Use `--quic-handshake` (server + every buddy) to
-  run matchmaking over QUIC/TLS 1.3 — the pairing token stays encrypted in
-  transit. Plain UDP is available for constrained environments but sends the token
-  in cleartext. QUIC also validates source addresses structurally (no extra
-  round-trip), so the server is never a reflector.
+- **Encrypted control plane.** Matchmaking runs over QUIC/TLS 1.3, always — the
+  pairing token stays encrypted in transit. QUIC also validates source addresses
+  structurally (no extra round-trip), so the server is never a reflector.
 - **Fallback chain.** Direct P2P → known relay → handshake-as-relay → cached
   peer (works even if the server is offline).
 - **Blind relay.** Buddies run their own QUIC/TLS end to end; a relay only
@@ -189,12 +184,12 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   is pinned and checked silently. For daemons set `--no-interactive` and pin with
   `--peer-key` (an unknown key is then refused, never learned blind).
 - The token is a **bearer secret** — keep it off the command line (use a `0600`
-  file or `BUDDYNET_TOKEN`).
+  file or `--join`).
 - Optional allowlist (approval mode) on the handshake server, with sealed
   enrollment codes so a code can't be read off the wire.
 - The bootstrap server is hardened against abuse: source-address validation,
   global + per-source rate limits, bounded in-memory state, and replay rejection
-  in approval mode. `--quic-handshake` (recommended default) encrypts the control
+  in approval mode. (recommended default) encrypts the control
   plane and validates source addresses without a cookie round-trip.
 - Restrict **who** can reach a server role with `--allow-cidr` (comma-separated
   CIDRs; relay **and** handshake). Disallowed sources are dropped before any

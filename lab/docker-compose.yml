@@ -61,6 +61,8 @@ services:
     entrypoint: ["/entrypoint-a.sh"]
     command:
       - --role=buddy
+      - --join
+      - "lab-test-token-42"
       - --key
       - /var/lib/buddynet/id.key
       - --forward
@@ -74,7 +76,6 @@ services:
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
       BUDDYNET_LAB: "1"
       # Shared pairing token — same on both buddies
-      BUDDYNET_TOKEN: "lab-test-token-42"
     depends_on:
       - server
     volumes:
@@ -92,6 +93,8 @@ services:
     image: buddynet-lab-buddy
     command:
       - --role=buddy
+      - --join
+      - "lab-test-token-42"
       - --key
       - /var/lib/buddynet/id.key
       - --L
@@ -102,7 +105,6 @@ services:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
       BUDDYNET_LAB: "1"
-      BUDDYNET_TOKEN: "lab-test-token-42"
     depends_on:
       - server
     ports:

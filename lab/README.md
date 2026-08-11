@@ -192,7 +192,7 @@ After `down -v` the next `./setup.sh` generates a fresh server identity.
 In production you would:
 - Run `server` on a VPS with a real public IP (see `deployments/docker-compose.yml`)
 - Run buddies on separate machines behind NAT
-- Use `--invite` / `--join` instead of a shared `--token` for one-time pairing
+- Use `--invite` / `--join` instead of a shared `--join` for one-time pairing
 - Remove `--lab` and pin `--peer-key` or use the TOFU/SAS flow
 
 The lab uses `--lab` and a fixed shared token to avoid interactive prompts.

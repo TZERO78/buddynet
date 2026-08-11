@@ -129,7 +129,7 @@ handshake.
 ## Handshake transport (UDP or QUIC)
 
 The matchmaking control plane (`REGISTER` → `PEER_LIST`) runs over one of two
-transports, chosen with `--quic-handshake` and set the **same** on the server and
+transports, chosen with and set the **same** on the server and
 every buddy. Both validate the source address before the server does any work, so
 neither can be turned into a reflector; they differ only in how:
 
@@ -139,7 +139,7 @@ neither can be turned into a reflector; they differ only in how:
   spoofed source never receives the challenge, so it can never be answered. No
   TLS certificate, and the buddy's single UDP socket is untouched — so hole
   punching and the peer tunnel are unaffected.
-- **QUIC (`--quic-handshake`).** The exchange rides QUIC, whose handshake
+- **QUIC.** The exchange rides QUIC, whose handshake
   validates the address itself (no cookie needed). The server presents its
   identity cert; the buddy pins it by `--server-key`. The buddy runs the QUIC
   control connection on its **shared** socket and closes it before punching, so

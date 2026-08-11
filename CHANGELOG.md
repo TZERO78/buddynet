@@ -7,7 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+> **Breaking: `protocol.Version` 7 → 8, and two flags are gone.** A v4 buddy
+> cannot pair with a v5 handshake server, or the other way round — a MAJOR
+> release under SemVer. Upgrade the server and every buddy together, or run v7
+> and v8 side by side on two ports and migrate pair by pair (see *Migrating a
+> running server* in [docs/PROTOCOL.md](docs/PROTOCOL.md)).
+
+### Removed (Breaking)
+
+- **The plain-UDP control plane is gone; matchmaking is QUIC/TLS 1.3 only.**
+  `--quic-handshake` and `BUDDYNET_QUIC` are removed from both binaries — there
+  is nothing left to select. With the transport go its address-validation cookie
+  (`TypeCookie`, `Message.cookie`) and the cleartext pairing token: `Message.token`
+  now carries `json:"-"`, so it never leaves the process. `token_enc`, sealed to
+  the server's pinned key, is the only form on the wire, and the server requires it.
+
+  The cookie only ever reproduced what QUIC's handshake does anyway, while the
+  `REGISTER` — pairing token included — travelled in the clear. That is what made
+  an on-path token squat possible, and with it the roster and candidate poisoning
+  that follows. Both open-mode findings from the v4 security audit were reachable
+  **only** on that transport. The RELAY keeps its own cookie: a relay bind is
+  always plain UDP.
+
+- **`--token` (and `BUDDYNET_TOKEN`) is removed.** Pairing is one-time only:
+  `--invite` mints a token, `--join` carries the one your buddy gave you, and both
+  retire it after the first pairing in favour of the stored session secret.
+  `--token` was a long-lived bearer secret replayed on every reconnect, so anyone
+  who ever learned it — an old chat message, a shell history, a backup — could
+  squat the pairing for as long as the pair existed. The mechanism is unchanged:
+  `--join` already fed the same internal path, so this removes a flag and a
+  failure mode, not a code path. `--status` now takes `--join <TOKEN>` (or runs
+  where a session is already stored).
+
+### Fixed
+
+- **A sealing failure no longer falls back to a cleartext token.** `setToken`
+  used to drop the pairing token onto the wire unsealed if `SealCode` failed —
+  i.e. exactly when something was already wrong. It returns an error now; there
+  is no cleartext field left to fall back to either.
+
+### Changed
+
+- The Unraid plugin loses its *Encrypt the control plane* option (there is only
+  one control plane now) and passes the pairing token as `--join`.
+- The lab scripts, compose files and the pentest probe follow: the probe drops
+  every scenario that targeted the UDP plane. Those attacks are not untested now,
+  they are **unreachable** — QUIC will not carry a connection without a valid
+  Ed25519 client certificate, and the server binds `REGISTER.pubkey` to it. A
+  QUIC-native scenario set is separate work.
 
 ## [v4.0.0] — 2026-08-11
 
@@ -133,7 +180,7 @@ _Nothing yet._
 
 Phase 3. One theme: the WireGuard data plane arrives **scoped and secure by
 default**. Three breaking changes — WireGuard sharing is fail-closed
-(`--expose`), the control plane is encrypted by default (`--quic-handshake`),
+(`--expose`), the control plane is encrypted by default,
 and the peers manifest is YAML (`peers migrate` converts) — each detailed below.
 
 ### Changed
@@ -162,11 +209,10 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
   [docs/PEERS.md](docs/PEERS.md).
 
 - **The handshake control plane is now QUIC/TLS 1.3 by default (security by
-  default).** Previously plain UDP (cleartext token) was the default and
-  `--quic-handshake` opted in; now encryption is on unless you explicitly opt out
-  with `--quic-handshake=false` (or `BUDDYNET_QUIC=0`). **Set the same on the server
+  default).** Previously plain UDP (cleartext token) was the default and opted in; now encryption is on unless you explicitly opt out
+  with (or. **Set the same on the server
   and every buddy** — a QUIC buddy cannot pair with a plain-UDP server (and vice
-  versa), so when upgrading, upgrade/align both sides, or pass `--quic-handshake=false`
+  versa), so when upgrading, upgrade/align both sides, or
   on both for the old behaviour.
 - **BuddyDNS names can no longer take the fingerprint-alias shape.** A `--name`
   that is exactly 8 hexadecimal characters is now rejected: that shape is reserved
@@ -182,8 +228,7 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 
 ### Added
 
-- **Known-buddies control plane: QUIC client-key pinning in approval mode.** With
-  `--quic-handshake --authorized`, the handshake server now pins clients by key at
+- **Known-buddies control plane: QUIC client-key pinning in approval mode.** With --authorized`, the handshake server now pins clients by key at
   the **TLS handshake** — every buddy presents its Ed25519 identity certificate and
   a key not on the allowlist is refused *before* it can send a `REGISTER` (the same
   early rejection a firewall gives, enforced cryptographically; no PKI — the key is

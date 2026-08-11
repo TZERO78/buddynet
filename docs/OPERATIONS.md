@@ -11,24 +11,22 @@ and the `--status` probe.
 
 ---
 
-## QUIC control plane (`--quic-handshake`, the secure default)
+## QUIC control plane, the secure default)
 
 **The control plane is encrypted with QUIC/TLS 1.3 by default** — security by
 default. You do not need to pass anything; it is on unless you explicitly opt out
-with `--quic-handshake=false` (or `BUDDYNET_QUIC=0`) on the handshake server **and**
-every buddy. Keep it on. The examples below pass `--quic-handshake` explicitly,
+with (or on the handshake server **and**
+every buddy. Keep it on. The examples below explicitly,
 which is fine (it just confirms the default).
 
 ```bash
 # Server
 buddynet --role=handshake \
   --key /var/lib/buddynet/id.key \
-  --quic-handshake
 
 # Every buddy
 buddynet --role=buddy \
-  --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake \
+  --server vps.example:51820 --server-key SERVER_KEY \ \
   ...
 ```
 
@@ -37,22 +35,16 @@ buddynet --role=buddy \
 | Property | Plain UDP | QUIC |
 |---|---|---|
 | REGISTER confidentiality | **Cleartext** — token travels in the clear | Encrypted (TLS 1.3) |
-| Source-address validation | Cookie round-trip (UDP overhead) | Built into QUIC handshake |
-| Reflection/amplification | Cookie mitigates, still needs a round-trip | Prevented structurally |
-| Connection overhead | One RTT for cookie + one for REGISTER | ~1 RTT amortised |
+The control plane is QUIC/TLS 1.3, and there is no alternative to choose: the
+whole `REGISTER` exchange — pairing token included — is inside TLS, and only the
+server can read it. Source addresses are validated by the QUIC handshake itself,
+so the server can never be turned into a reflector and no extra round-trip is
+needed for it.
 
-On plain UDP the `REGISTER` message — including the pairing token — travels
-**in cleartext** over the public internet. A passive observer on your path to
-the VPS can read the token. With `--quic-handshake` the entire control
-exchange is inside TLS 1.3; only the server can read the token.
-
-The server logs a `WARNING` when plain UDP is used:
-
-```
-WARNING: on plain UDP the REGISTER (incl. the pairing token) travels in
-CLEARTEXT — use --quic-handshake on the server and every buddy to encrypt
-the control plane.
-```
+Until v5 a plain-UDP transport existed alongside it, with an application-layer
+cookie for source validation and the `REGISTER` in cleartext. It is removed: the
+cookie only reproduced what QUIC does anyway, while the cleartext token was what
+made an on-path pairing squat possible in the first place.
 
 ### Locking the control plane to known buddies (`--authorized`)
 
@@ -69,7 +61,7 @@ approval mode: QUIC control pins clients to the allowlist at the TLS handshake
 
 ```bash
 # Server: only allowlisted buddy keys may even open a control connection
-buddynet --role=handshake --quic-handshake \
+buddynet --role=handshake \
   --authorized /var/lib/buddynet/clients.txt --key /var/lib/buddynet/id.key
 
 # Approve a buddy (get its key with `buddynet identity` on that node):
@@ -88,7 +80,7 @@ the secret token at the application layer. See [APPROVAL.md](APPROVAL.md).
 ### Environment variable
 
 ```bash
-export BUDDYNET_QUIC=1   # equivalent to --quic-handshake
+export   # equivalent to
 ```
 
 ---
@@ -102,8 +94,7 @@ deployments.
 
 ```bash
 buddynet --role=handshake,relay \
-  --allow-cidr 203.0.113.0/24,198.51.100.0/24 \
-  --quic-handshake \
+  --allow-cidr 203.0.113.0/24,198.51.100.0/24 \ \
   --key /var/lib/buddynet/id.key
 ```
 
@@ -146,7 +137,6 @@ buddynet --role=handshake,relay \
   --relay-listen [::]:51821 \
   --relay-endpoint vps.example:51821 \
   --key /var/lib/buddynet/id.key \
-  --quic-handshake
 ```
 
 When `--relay-endpoint` is set, every `PEER_LIST` sent to buddies includes the
@@ -326,7 +316,6 @@ The `via=` field in `CONNECTED` tells you which path the tunnel used:
 ### Operational warnings — `WARNING:` and `NOTE:`
 
 ```
-WARNING: on plain UDP the REGISTER … travels in CLEARTEXT — use --quic-handshake
 WARNING: key file PATH has permissions MODE, expected 0600
 WARNING: generated a NEW identity at PATH — buddies must pin the new key
 NOTE: --reauth-interval is 0 (off): a server-side revocation will NOT tear down a direct tunnel
@@ -379,7 +368,7 @@ is never opened — the caller sees `connection refused`.
 ```bash
 buddynet --role=buddy \
   --server vps.example:51820 --server-key KEY \
-  --join=TOKEN --quic-handshake \
+  --join=TOKEN \
   -L 127.0.0.1:5432 --forward 10.66.0.2:5432 \
   --lazy
 ```

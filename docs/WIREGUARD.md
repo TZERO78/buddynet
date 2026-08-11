@@ -42,7 +42,7 @@ fallback chain, the blind relay, the 48-buddy cap) is unchanged. No protocol
 version bump: the wire format between buddy and server is identical.
 
 > **The control plane is always QUIC/plain — never WireGuard.** Matchmaking runs
-> over `--quic-handshake` (encrypted, source-validated, and — with `--authorized` —
+> over (encrypted, source-validated, and — with `--authorized` —
 > pinning clients to the allowlist at the TLS handshake; see
 > [OPERATIONS.md](OPERATIONS.md) and [APPROVAL.md](APPROVAL.md)). Keeping control
 > off WireGuard is deliberate: the server would otherwise key peers by identity and

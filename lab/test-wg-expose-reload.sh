@@ -84,7 +84,7 @@ sudo ip netns exec ns-a "$BN" --role=buddy \
 A_PID=$!; PIDS="$PIDS $A_PID"
 
 # B pins A and probes.
-sudo ip netns exec ns-b env BUDDYNET_TOKEN="$TOKEN" "$BN" --role=buddy \
+sudo ip netns exec ns-b "$BN" --join "$TOKEN" --role=buddy \
 	--server 10.50.0.10:51820 --server-key "$SRVPUB" --key "$D/b.key" \
 	--peer-key "$APUB" --known-peers "$D/b.kp" --peers "$D/b.pj" \
 	--no-interactive --wireguard --expose all >"$D/b.log" 2>&1 &

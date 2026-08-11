@@ -10,11 +10,11 @@ wire or is signed lives there and nowhere else.
   buddies must run the same version. Notable bumps: **v3** added the relay bind
   address-validation cookie (see "Relay bind handshake"), **v4** widened the
   virtual IP to a `/16` (`10.66.X.Y`), **v6** lets the pairing token travel sealed
-  to the server's pinned key (`token_enc`) instead of in cleartext, **v7** adds
+  to the server's pinned key (`token_enc`) instead of in cleartext, **v7** added
   the per-attempt `nonce` and widens the registration signature to cover every
   field the server acts on.
 
-> **v7 is a breaking change with no compatibility shim.** A v6 registration
+> **v8 is a breaking change with no compatibility shim.** A v6 registration
 > signature does not cover `ver`, `role`, `virtual_ip`, `name`, `nonce` or
 > `code_enc`, so it cannot be verified under v7 — and it is *not* accepted under
 > the old rules. Once the source address is validated, a mismatched client is
@@ -73,7 +73,7 @@ candidate and the same NAT mapping is reused for the tunnel.
 | Field | Meaning |
 |---|---|
 | `token` | the **rendezvous secret** the server pairs on: a one-time invite token on first pairing, or the derived session secret on later reconnects (see *Pairing secret* below). The server treats it as opaque. |
-| `token_enc` | the same rendezvous secret, but **sealed to the server's pinned key** (NaCl sealed box; v6). Preferred over cleartext `token` so an on-path observer on plain UDP sees only ciphertext; the server unseals it to the same value. |
+| `token_enc` | the rendezvous secret, **sealed to the server's pinned key** (NaCl sealed box; v6). Since v8 this is the ONLY form on the wire — the cleartext `token` field is no longer serialised; the server unseals this to the value the signature covers. |
 | `role` | `buddy` / `relay` |
 | `id` | ephemeral per-run id (dedupes a peer's v4+v6 registrations) |
 | `pubkey` | base64 Ed25519 identity |
@@ -110,14 +110,12 @@ a second, and sends one datagram per server address, so every one of those
 datagrams must be signed anew. Re-sending a cached registration is
 indistinguishable from an attacker replaying a captured one, and is refused.
 
-**Address validation.** On the plain-UDP transport a `REGISTER` without a valid
-`cookie` is answered only with a `COOKIE` message — `HMAC(subkey, epoch‖src-IP)`,
-smaller than the request, never a useful amplifier — and the server does no
-further work. The buddy echoes it in `cookie` on its next `REGISTER`; a spoofed
-source can never receive the challenge, so it can never be answered. With
-`--quic-handshake` the exchange instead rides QUIC, whose handshake validates the
-source address before any work and makes the cookie unnecessary. Either way the
-server never emits a `PEER_LIST` to an unvalidated address.
+**Address validation.** The control plane is QUIC/TLS 1.3: the handshake proves
+return-routability before the server does any work, so an IP-spoofed sender can
+never make it reflect a `PEER_LIST`. Until v8 a plain-UDP transport with an
+application-layer cookie provided the same property; it is removed, and with it
+`TypeCookie` and `Message.cookie`. (The RELAY keeps its own cookie — a relay bind
+is always plain UDP.)
 
 ```
 REGISTER (no cookie) ─▶ server
@@ -174,7 +172,7 @@ session_secret = base64url( EKM("buddynet-session-rendezvous-v1", sort(pubA,pubB
 ```
 
 It is **never transmitted** and becomes the `token` in REGISTER on every later
-reconnect, so the invite is retired after first use. `--token` is the legacy mode:
+reconnect, so the invite is retired after first use. `--join` is the legacy mode:
 a fixed token reused as the rendezvous secret on every connect (no session
 secret). See [SECURITY.md](../SECURITY.md).
 

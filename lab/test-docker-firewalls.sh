@@ -69,7 +69,7 @@ FAIL=0
 run_buddy() { # $1 name, $2 firewall, $3 keydir, $4 peerpub, $5 services, $6 expose
 	docker run -d --name "$1" --network "$NET" --privileged \
 		-e FIREWALL="$2" -e SERVICES="$5" -e LAB_SUBNET="$SUBNET" \
-		-e BUDDYNET_TOKEN="$TOKEN" -v "$3":/var/lib/buddynet "$IMG" \
+		-e X_UNUSED=1 -v "$3":/var/lib/buddynet "$IMG" \
 		--role=buddy --server "$SRVIP:51820" --server-key "$SRVPUB" \
 		--key /var/lib/buddynet/id.key --peer-key "$4" --no-interactive \
 		--wireguard --expose "$6" >/dev/null

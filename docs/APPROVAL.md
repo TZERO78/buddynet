@@ -10,12 +10,12 @@ pending and silently dropped.
 BuddyNet separates **authentication** ("which key is this?") from
 **authorization** ("may that key pair?"), and they run at different layers:
 
-| Layer | With `--quic-handshake` | On plain UDP |
-|---|---|---|
-| **Authentication** | TLS 1.3 client certificate: every client must present an Ed25519 identity **and prove possession** of its private key in the handshake. `REGISTER.pubkey` must then equal that authenticated key, or the connection is closed and nothing is stored. | The `reg_sig` key-ownership proof on the `REGISTER` itself. |
-| **Authorization** | Application layer, per `REGISTER`: allowlisted → pair; unknown **with** a valid enrollment code → recorded as pending; unknown without one → refused. | Identical. |
+| Layer | How |
+|---|---|
+| **Authentication** | Two independent proofs. TLS 1.3 client certificate: every client must present an Ed25519 identity **and prove possession** of its private key in the handshake; `REGISTER.pubkey` must then equal that authenticated key, or the connection is closed and nothing is stored. On top of that, every `REGISTER` carries the `reg_sig` key-ownership proof, which the server verifies unconditionally. |
+| **Authorization** | Application layer, per `REGISTER`: allowlisted → pair; unknown **with** a valid enrollment code → recorded as pending; unknown without one → refused. |
 
-Either way, **only allowlisted keys can pair.**
+**Only allowlisted keys can pair.**
 
 > **Why authorization is not done at the TLS handshake.** It used to be: the QUIC
 > server refused any client key that was not already on the allowlist. That made
@@ -44,8 +44,7 @@ Start the handshake server with `--authorized`:
 
 ```bash
 buddynet --role=handshake \
-  --key /var/lib/buddynet/id.key \
-  --quic-handshake \
+  --key /var/lib/buddynet/id.key \ \
   --authorized /etc/buddynet/authorized_clients
 ```
 
@@ -102,8 +101,7 @@ approves the code without ever seeing the raw key.
 
    ```bash
    buddynet --role=buddy \
-     --server vps.example:51820 --server-key SERVER_KEY \
-     --quic-handshake \
+     --server vps.example:51820 --server-key SERVER_KEY \ \
      --key /var/lib/buddynet/id.key \
      --code MY_ENROLLMENT_CODE \
      --join=TOKEN -L 127.0.0.1:9000
@@ -269,8 +267,7 @@ For a private fleet you can add a network-level pre-filter on top of the allowli
 ```bash
 buddynet --role=handshake \
   --authorized /etc/buddynet/authorized_clients \
-  --allow-cidr 10.0.0.0/8,192.168.0.0/16 \
-  --quic-handshake \
+  --allow-cidr 10.0.0.0/8,192.168.0.0/16 \ \
   --key /var/lib/buddynet/id.key
 ```
 

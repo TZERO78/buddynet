@@ -219,7 +219,7 @@ The handshake unit stores its identity key under `/var/lib/buddynet-handshake/`
 sudo systemctl edit buddynet-handshake
 # add:
 #   [Service]
-#   Environment=BUDDYNET_QUIC=1
+#   Environment=
 ```
 
 Without this, a `REGISTER` (including the pairing token) travels in **cleartext**
@@ -263,12 +263,10 @@ invite** (valid 15 min or until first pairing):
 
 ```bash
 # On machine A — mint an invite (prints a TOKEN):
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake --invite
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --invite
 
 # On machine B — join with that token:
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake --join=TOKEN
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=TOKEN
 ```
 
 On first contact each side shows a 6-character **safety code** — read yours to
@@ -327,7 +325,7 @@ outsiders are rejected at the TLS handshake, before they reach any logic:
 ```bash
 sudo systemctl edit buddynet-handshake
 #   [Service]
-#   Environment=BUDDYNET_QUIC=1
+#   Environment=
 #   ExecStart=                       # reset, then re-specify with --authorized
 #   ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} \
 #     --key ${STATE_DIRECTORY}/id.key \

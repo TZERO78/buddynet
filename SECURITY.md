@@ -94,7 +94,7 @@ adversary."
 | Active network MITM (not the server) | Cannot impersonate a peer — pinned mutual auth, and the SAS catches a first-contact substitution (§4.2–§4.3). | **Safe** |
 | Malicious / compromised **handshake server** | Cannot impersonate a buddy: a substituted key fails the SAS (or is refused by `--peer-key`). Can deny service. | **Mitigated** |
 | A **relay** in the data path | Sees only ciphertext; cannot read or inject (QUIC/WireGuard auth). | **Safe** |
-| Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. The token (and the reconnect rendezvous secret) is **sealed to the server's pinned key** (`TokenEnc`) even on plain UDP. | **Mitigated** |
+| Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. The token (and the reconnect rendezvous secret) is **sealed to the server's pinned key** (`TokenEnc`), and the control plane is TLS 1.3 on top of that. | **Mitigated** |
 | Spoofed-source flood / reflection on the **handshake server** | Source address validated first (UDP cookie or QUIC) before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier (§5.2–§5.3). | **Mitigated** |
 | Spoofed-source reflection / traffic-laundering through a **relay** | A bind binds no leg until the source echoes an address-validation cookie (reply smaller than the bind); a spoofed source can never validate, so attacker data can never be forwarded to a victim address. | **Mitigated** |
 | **Malicious / compromised paired buddy** (WireGuard plane) | Reaches only the port(s) you `--expose`; without a scope, nothing (fail-closed). It is a *trusted* peer by construction — treat what you expose as reachable by a hostile peer and keep it patched and least-privileged (§6.3). | **Scoped** |
@@ -218,7 +218,7 @@ The pairing secret is split so the value that actually travels is short-lived:
   the invite token is retired after first use. So a leaked invite is worthless
   after 15 min or after the first connect, and the long-lived secret never
   appears in a chat log or on the wire.
-- **`--token`** is the legacy mode: a single fixed token used for rendezvous on
+- **`--join`** is the legacy mode: a single fixed token used for rendezvous on
   every reconnect (no session secret). Fine for scripted/daemon setups,
   especially together with `--peer-key`.
 
@@ -307,7 +307,7 @@ that proof is obtained.
   layer: zero extra dependencies, no TLS certificate, and the buddy's single
   socket is untouched (so hole punching and the peer tunnel are unaffected).
 
-- **QUIC (`--quic-handshake`).** The control plane runs over QUIC, which validates
+- **QUIC.** The control plane runs over QUIC, which validates
   the source address in its own handshake before the server does any work. The
   cost is a TLS certificate: the server presents its self-signed identity cert and
   the buddy pins it by `--server-key` — the same TOFU model already used for peer
@@ -315,8 +315,7 @@ that proof is obtained.
   **shared** UDP socket and tears it down before punching, so the same NAT mapping
   still carries the peer tunnel.
 
-Set the **same** transport on the server and every buddy (`--quic-handshake`, or
-`BUDDYNET_QUIC=1`); a mismatch simply fails to connect. On both transports the
+Set the **same** transport on the server and every buddy, or; a mismatch simply fails to connect. On both transports the
 global + per-source rate limits and the bounded registry caps still apply.
 
 **Confidentiality of a `REGISTER`.** Plain UDP `REGISTER`s are otherwise cleartext
@@ -324,7 +323,7 @@ JSON, but the one secret in them — the pairing token (and, on reconnect, the
 rendezvous secret) — is **sealed to the server's pinned identity key** (`TokenEnc`,
 a NaCl sealed box), so an on-path observer sees only ciphertext where the secret
 would be. The rest of a `REGISTER` (id, pubkey, virtual IP, name) is non-secret
-identity data. `--quic-handshake` additionally encrypts the *whole* exchange.
+identity data. additionally encrypts the *whole* exchange.
 Either way, the partner is still pinned by key and verified by SAS; treat the
 token as a bearer secret and pin buddies with `--peer-key`.
 
@@ -341,11 +340,10 @@ token as a bearer secret and pin buddies with `--peer-key`.
   nonce inside its signature; a bounded cache rejects a repeated
   `(pubkey, nonce)` within the freshness window. Only **approved** keys occupy a
   cache slot, so an outsider cannot flood it and evict a real buddy's entry.
-- **Expensive crypto behind source validation.** On the plain-UDP transport the
-  address-validation cookie is checked *before* anything asymmetric runs — the
-  sealed token, the registration signature and the sealed enrollment code are all
-  unreachable from an unvalidated (and therefore spoofable) source. The only
-  crypto ahead of it is the cookie's own HMAC.
+- **Expensive crypto behind source validation.** QUIC validates the source
+  address in its own handshake before the server spends anything on a
+  registration, so a spoofed sender never reaches the signature verification or
+  the sealed-token open.
 - **Control-connection caps.** The QUIC control listener bounds connections
   globally **and per source address** (IPv4/IPv6/IPv4-mapped normalised), demands
   a first stream within seconds, and puts a read deadline on every request, so

@@ -99,7 +99,7 @@ fi
 start_buddy() { # name code peer-key extra-args...
 	local name=$1 code=$2 peerkey=$3; shift 3
 	"$BIN" --role=buddy --server "127.0.0.1:$PORT" --server-key "$SRVKEY" \
-		--key "$DIR/$name.key" --token "$TOKEN" --code "$code" \
+		--key "$DIR/$name.key" --join "$TOKEN" --code "$code" \
 		--peer-key "$peerkey" --peers "$DIR/$name-peers.json" \
 		--known-peers "$DIR/$name-known_peers" \
 		--reauth-interval 10s "$@" >"$DIR/$name.log" 2>&1 &

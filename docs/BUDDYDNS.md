@@ -9,15 +9,13 @@ that runs `--dns`.
 ```bash
 # Machine A — announces itself as "alice", runs the resolver
 buddynet --role=buddy \
-  --server VPS:51820 --server-key SERVER_KEY \
-  --quic-handshake \
+  --server VPS:51820 --server-key SERVER_KEY \ \
   --invite --forward 127.0.0.1:873 \
   --name alice --dns
 
 # Machine B — announces itself as "bob", runs the resolver
 buddynet --role=buddy \
-  --server VPS:51820 --server-key SERVER_KEY \
-  --quic-handshake \
+  --server VPS:51820 --server-key SERVER_KEY \ \
   --join=TOKEN -L 127.0.0.1:9000 \
   --name bob --dns
 

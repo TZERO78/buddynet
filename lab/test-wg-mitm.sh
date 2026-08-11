@@ -83,7 +83,7 @@ sudo ip netns exec ns-b iptables -A INPUT  -s 10.50.0.20 -j DROP
 # first-contact SAS is computed and printed; we scrape it, then kill the buddy.
 run_buddy_tofu() { # $1 ns, $2 keyfile, $3 logfile, $4 store-suffix
 	sudo ip netns exec "ns-$1" script -qec \
-		"env BUDDYNET_TOKEN=$TOKEN $BN --role=buddy --server 10.50.0.10:51820 \
+		"$BN --role=buddy --join $TOKEN --server 10.50.0.10:51820 \
 		 --server-key $SRVPUB --key $2 --known-peers $D/$4.kp --peers $D/$4.pj \
 		 --sas-timeout 25s --wireguard" "$3" </dev/null >/dev/null 2>&1 &
 	PIDS="$PIDS $!"

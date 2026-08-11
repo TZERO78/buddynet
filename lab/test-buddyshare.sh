@@ -121,7 +121,7 @@ start_server() {
 }
 
 run_buddy() { # $1 ns, $2 keyfile, $3 peerpub, $4 extra-flags, $5 logfile
-	sudo ip netns exec "ns-$1" env BUDDYNET_TOKEN="$TOKEN" "$BN" --role=buddy \
+	sudo ip netns exec "ns-$1" "$BN" --join "$TOKEN" --role=buddy \
 		--server 10.50.0.10:51820 --server-key "$SRVPUB" \
 		--key "$2" --peer-key "$3" --known-peers "$D/$1.kp" --peers "$D/$1.pj" --no-interactive $4 >"$5" 2>&1 &
 	PIDS="$PIDS $!"

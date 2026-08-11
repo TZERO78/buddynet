@@ -17,21 +17,18 @@ Run the bootstrap server and print the key your buddies will pin:
 buddynet --role=handshake,relay \
     --key /var/lib/buddynet/id.key \
     --relay-endpoint vps.example:51821 \
-    --quic-handshake
 buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
 ```
 
-`--quic-handshake` must be set identically on the server **and** on every buddy
-(or `BUDDYNET_QUIC=1`). Without it the pairing token travels in cleartext over
-the public internet. See [OPERATIONS.md](OPERATIONS.md#quic-control-plane---quic-handshake).
+The control plane is QUIC/TLS 1.3 and needs no configuration: the pairing token
+never travels in the clear. See [OPERATIONS.md](OPERATIONS.md).
 
 ## Pairing two buddies
 
 **Inviter** (e.g. the machine being backed up *to*, running an rsync daemon):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake \
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
     --invite --forward 127.0.0.1:873
 # prints a one-time TOKEN and waits for the buddy to join
 ```
@@ -39,8 +36,7 @@ buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
 **Joiner** (the machine doing the backup):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake \
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
     --join=TOKEN -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
@@ -57,13 +53,12 @@ next to the partner key. From then on just rerun **without a token** — each si
 reconnects via the stored session secret:
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake \
-    -L 127.0.0.1:9000        # no --join/--token: reconnects via the stored session
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
+    -L 127.0.0.1:9000        # no --join: reconnects via the stored session
 ```
 
 For scripted/daemon setups that prefer one fixed reusable token, use the legacy
-`--token` instead (ideally with `--peer-key`).
+`--join` instead (ideally with `--peer-key`).
 
 ## First contact: the safety check (SAS)
 
@@ -99,7 +94,7 @@ buddynet --role=buddy ... --peer-key <buddy-identity>
 ```
 
 The token is a **bearer secret** — keep it out of argv (use a `0600` file or
-`BUDDYNET_TOKEN`). On an allowlist server, enroll with `--code <code>` and have
+`--join`). On an allowlist server, enroll with `--code <code>` and have
 the operator approve it:
 
 ```bash
@@ -109,7 +104,7 @@ buddynet --role=handshake --authorized clients.txt allowclient <code>
 ## Checking the link
 
 ```bash
-buddynet --role=buddy --server ... --server-key ... --token ... --status
+buddynet --role=buddy --server ... --server-key ... --join ... --status
 ```
 
 It prints one human-readable line and exits with a distinct code, so a script
