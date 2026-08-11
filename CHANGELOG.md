@@ -7,14 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-> **This has to ship as a MAJOR release (v4.0.0).** `protocol.Version` goes 6 → 7
-> with no compatibility shim, so a v3.x buddy cannot pair with a v4 handshake
-> server or vice versa — that is a breaking change under SemVer, not a minor one.
-> The binary carries no version constant (it is stamped from the git tag via
-> `-X main.version=`), so nothing needs bumping in source; the decision is made at
-> tagging time. Remember the Unraid plugin bump afterwards (BINVER + a verified
-> BINSHA), and note that the plugin's users will need the server updated in step
-> with them — see the rollout instructions in `docs/PROTOCOL.md`.
+_Nothing yet._
+
+## [v4.0.0] — 2026-08-11
+
+> **Breaking: `protocol.Version` 6 → 7, with no compatibility shim.** A v3.x
+> buddy cannot pair with a v4 handshake server, or the other way round — hence a
+> MAJOR release under SemVer. Once the source address is validated a mismatched
+> client is answered with a version-stamped reply and reports "update buddynet"
+> instead of timing out. **Upgrade the handshake server and every buddy
+> together**, or run v6 and v7 side by side on two ports and migrate pair by
+> pair — see *Migrating a running server to v7* in
+> [docs/PROTOCOL.md](docs/PROTOCOL.md). Unraid users need the plugin bumped
+> (BINVER + a verified BINSHA) in step with the server.
+
+### Added
+
+- **`buddynet-handshake` — a second, single-purpose binary for a stateless public
+  matchmaker.** It runs the handshake control plane and nothing else: no relay, no
+  data path, no client roles, and no writable state beyond its identity key. The
+  point is a public rendezvous server whose blast radius is as small as the job
+  allows — it cannot be talked into forwarding traffic or terminating a tunnel,
+  because that code is not in the binary. The full multi-role `buddynet` is
+  unchanged and still the right choice everywhere else. Releases now build,
+  checksum and keyless-sign **both** binaries (linux/amd64 and linux/arm64); the
+  existing asset name `buddynet-linux-amd64` is unchanged, so the Unraid plugin's
+  checksum gate keeps working.
 
 ### Security
 
@@ -110,19 +128,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`internal/tunnel/quic.go` still allows TLS session resumption** (gosec G123).
   The control plane now disables it, because a resumed session does not re-run
   `VerifyPeerCertificate`; the data plane was left alone in this changeset.
-
-### Added
-
-- **BuddyShare** — scoped folder sharing and mutual backup over SMB, built
-  entirely from shipped parts (no binary change): the buddy reaches only Samba
-  (`--expose 445`) over the tunnel, and inside Samba only the shares granted to
-  their Unraid user. Unraid plugin 2026.07.04.1 adds the BuddyShare section
-  (visible WG+445 pre-fill, Public-share warning, user-exists check, far-side
-  mount info; bilingual DE/EN via the webGUI's plugin-translation mechanism).
-  The plugin never creates or changes Unraid users — users, shares and rights
-  stay in Unraid's own UI. Docs: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md),
-  posture paragraph in [SECURITY.md](SECURITY.md), lab proof
-  `lab/test-buddyshare.sh`.
 
 ## [v3.0.0] — 2026-07-04
 
