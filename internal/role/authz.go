@@ -561,6 +561,12 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 func (a *authorizer) persistPending() {
 	a.writeMu.Lock()
 	defer a.writeMu.Unlock()
+	// The ADVISORY FILE lock as well, not just the in-process one: `allowclient`
+	// runs in a separate process and does its own read-modify-write of this file.
+	// writeMu orders our own writers against each other and says nothing about that
+	// one, so without this an operator approving a code could still drop an entry
+	// the server wrote in between (or have its own write dropped).
+	defer lockAllowlist(a.pendDB)()
 	a.mu.RLock()
 	snapshot := clonePending(a.pend)
 	a.mu.RUnlock()
