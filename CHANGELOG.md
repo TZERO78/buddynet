@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+> **This has to ship as a MAJOR release (v4.0.0).** `protocol.Version` goes 6 → 7
+> with no compatibility shim, so a v3.x buddy cannot pair with a v4 handshake
+> server or vice versa — that is a breaking change under SemVer, not a minor one.
+> The binary carries no version constant (it is stamped from the git tag via
+> `-X main.version=`), so nothing needs bumping in source; the decision is made at
+> tagging time. Remember the Unraid plugin bump afterwards (BINVER + a verified
+> BINSHA), and note that the plugin's users will need the server updated in step
+> with them — see the rollout instructions in `docs/PROTOCOL.md`.
+
 ### Security
 
 - **Protocol 6 → 7 (BREAKING): per-attempt `REGISTER` nonce and a full-coverage
