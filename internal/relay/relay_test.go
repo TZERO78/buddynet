@@ -195,6 +195,13 @@ func TestChainCachedOnlyWhenNoLiveCandidates(t *testing.T) {
 // the parser accepts, the challenge it may draw must be strictly smaller than the
 // bind. The old tests only ever used a realistic 22-character token, so the
 // smallest accepted bind (17 bytes against a 23-byte challenge) went unnoticed.
+//
+// WHAT THIS DOES NOT COVER: the `len(chal) < reqLen` gate in Server.bind. Since
+// MinSessionTokenLen was introduced (same commit), the smallest ADMITTED bind is
+// already larger than the challenge, so removing that gate leaves this test green
+// — it holds the property, not the gate. The gate is defense in depth, kept
+// because the property must not depend on one constant staying where it is; it
+// has no mutation coverage of its own and none is claimed.
 func TestChallengeIsSmallerThanEveryAcceptedBind(t *testing.T) {
 	s := NewServer(2*time.Second, nil, 0, 0)
 	chal := len(MarshalChallenge(s.freshCookie(net.IPv4(198, 51, 100, 7))))
