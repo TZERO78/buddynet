@@ -261,3 +261,75 @@ func TestPendingWriteFailsClosedWhenTheLockCannotBeTaken(t *testing.T) {
 		t.Error("the state is still dirty after a successful write")
 	}
 }
+
+// The lock orders the writes; it does not make the server's memory the truth.
+// This is the sequence a working flock does NOT prevent:
+//
+//  1. the server holds an older state in memory,
+//  2. the CLI (`allowclient`) modifies the same file correctly, under the lock,
+//  3. the server then takes the lock,
+//  4. the server writes its stale memory,
+//  5. the CLI's change is lost — the approved code is RESURRECTED as pending.
+//
+// The server must therefore read the file under the lock and merge, contributing
+// only what it added itself, rather than overwriting with its own map.
+func TestServerWriteDoesNotResurrectAnApprovedCode(t *testing.T) {
+	nd, srvPriv := testNode(t)
+	authz := newTestAuthorizer(t, srvPriv)
+	pub := srvPriv.Public().(ed25519.PublicKey)
+	allowPath := authz.path
+
+	const approved = "CODE-TO-APPROVE"
+	sealedApproved, err := bcrypto.SealCode(approved, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. The server learns the pending code and persists it.
+	authz.recordPending(sealedApproved, nd.pub)
+	if data, rerr := os.ReadFile(authz.pendDB); rerr != nil || !strings.Contains(string(data), shortHash(approved)) {
+		t.Fatalf("setup: the pending entry is not on disk (%v, %q)", rerr, data)
+	}
+
+	// 2. The operator approves it. AllowClient removes it from the file, under the
+	//    same lock the server uses.
+	if err := AllowClient(allowPath, approved); err != nil {
+		t.Fatalf("AllowClient: %v", err)
+	}
+	afterApprove, err := os.ReadFile(authz.pendDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(afterApprove), shortHash(approved)) {
+		t.Fatalf("setup: allowclient did not remove the entry: %q", afterApprove)
+	}
+
+	// 3./4. The server still has it in memory and now writes — triggered by an
+	//       unrelated second enrollment, exactly as it would be in production.
+	other, err := bcrypto.SealCode("SOME-OTHER-CODE", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz.recordPending(other, nd.pub)
+
+	// 5. The approved code must NOT be back.
+	final, err := os.ReadFile(authz.pendDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(final), shortHash(approved)) {
+		t.Errorf("the server's stale memory resurrected an already-approved code:\n%q\n"+
+			"the operator's `allowclient` was undone by the next registration", final)
+	}
+	// ...and the unrelated entry the server was actually persisting is there.
+	if !strings.Contains(string(final), shortHash("SOME-OTHER-CODE")) {
+		t.Errorf("the server's own new entry was lost in the merge: %q", final)
+	}
+	// The in-memory view is realigned too, or the next write would resurrect it.
+	authz.mu.RLock()
+	_, stillInMemory := authz.pend[shortHash(approved)]
+	authz.mu.RUnlock()
+	if stillInMemory {
+		t.Error("the approved code is still in the server's map — the next write brings it back")
+	}
+}

@@ -131,6 +131,10 @@ type authorizer struct {
 	lastStatWarn time.Time
 	// lastPendWarn throttles the failed-pending-write warning the same way.
 	lastPendWarn time.Time
+	// pendAdded holds the entries THIS PROCESS added since its last successful
+	// write. It is what gets merged into the file's own content, instead of
+	// overwriting the file with our whole map — see persistPending.
+	pendAdded map[string]pendingEntry
 	// pendDirty means the pending FILE does not reflect the map: a write failed, or
 	// a concurrent writer may have clobbered it. Without this a lost entry was
 	// PERMANENT — recordPending only wrote when the entry was new, so the client
@@ -161,6 +165,7 @@ func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error
 		keys:        map[string]string{},
 		logged:      map[string]time.Time{},
 		pend:        map[string]pendingEntry{},
+		pendAdded:   map[string]pendingEntry{},
 		recentRegs:  map[string]time.Time{},
 		preAuthRegs: map[string]time.Time{},
 		approvedAt:  map[string]time.Time{},
@@ -544,7 +549,11 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 			}
 		}
 	}
-	a.pend[h] = pendingEntry{Key: key, Seen: time.Now()}
+	entry := pendingEntry{Key: key, Seen: time.Now()}
+	a.pend[h] = entry
+	if isNew || a.pendDirty {
+		a.pendAdded[h] = entry // ours to contribute at the next write
+	}
 	dirty := a.pendDirty
 	a.mu.Unlock()
 	// Persist when the entry is new OR when the file is known to be out of sync.
@@ -590,14 +599,57 @@ func (a *authorizer) persistPending() {
 	}
 	defer unlock()
 
-	// Snapshot INSIDE both locks: taking it earlier would let a slower writer
-	// rename an older set over a newer one.
+	// READ-MODIFY-WRITE, not overwrite. Holding the lock only orders the writes;
+	// it does not make our in-memory map the truth. `allowclient` removes an entry
+	// under the same lock, and a server that then wrote its own snapshot would
+	// RESURRECT the approved code — the operator's change lost despite the lock
+	// working exactly as intended.
+	//
+	// So the FILE is authoritative for what other processes did, and we contribute
+	// only what we added ourselves since the last successful write.
+	onDisk, rerr := readPending(a.pendDB)
+	if rerr != nil && !os.IsNotExist(rerr) {
+		a.mu.Lock()
+		a.pendDirty = true
+		a.mu.Unlock()
+		a.notePendWriteError(rerr)
+		return
+	}
+
 	a.mu.RLock()
-	snapshot := clonePending(a.pend)
+	merged := clonePending(onDisk)
+	contributed := make([]string, 0, len(a.pendAdded))
+	for h, e := range a.pendAdded {
+		merged[h] = e
+		contributed = append(contributed, h)
+	}
 	a.mu.RUnlock()
 
-	err := writePending(a.pendDB, snapshot)
+	err := writePending(a.pendDB, merged)
 	a.mu.Lock()
+	if err == nil {
+		// Retire exactly what THIS write carried. Clearing the whole map would drop a
+		// contribution that recordPending added while we were writing — it does not
+		// hold writeMu, only a.mu, and briefly.
+		for _, h := range contributed {
+			delete(a.pendAdded, h)
+		}
+		// Realign the in-memory view with the file, so an entry `allowclient` removed
+		// does not linger and reappear at the next write. Entries still queued in
+		// pendAdded stay: they are ours and not on disk yet.
+		for h := range a.pend {
+			_, onDiskNow := merged[h]
+			_, stillQueued := a.pendAdded[h]
+			if !onDiskNow && !stillQueued {
+				delete(a.pend, h)
+			}
+		}
+		for h, e := range merged {
+			if _, known := a.pend[h]; !known {
+				a.pend[h] = e
+			}
+		}
+	}
 	a.pendDirty = err != nil
 	a.mu.Unlock()
 	if err != nil {

@@ -33,6 +33,19 @@ import (
 //
 // The caller is responsible for serialising writers; this only makes one write
 // indivisible to readers.
+//
+// TRUST DOMAIN (gosec flags the two variable-path opens below as G304). Every
+// path reaching this function is an operator-supplied flag or a value derived
+// from one — --authorized and its ".pending" sibling, --peers, --known-peers, or
+// the XDG defaults behind them. No component of any path comes from the network:
+// the control plane influences the CONTENT of these files (a pending entry, a
+// cached peer), never their location. A caller who can choose the path is already
+// the operator, and holds --key as well.
+//
+// The two opens are also symlink-safe by construction rather than by check:
+// O_CREATE|O_EXCL refuses to follow (or reuse) an existing symlink at the temp
+// path, and rename(2) replaces a symlink at the target instead of writing through
+// it. The directory open is read-only and used solely for fsync.
 // Write replaces path with data.
 func Write(path string, data []byte, perm os.FileMode) error {
 	dir := filepath.Dir(path)
