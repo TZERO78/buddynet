@@ -8,6 +8,7 @@ package peer
 
 import (
 	"encoding/json"
+	"github.com/tzero78/buddynet/internal/atomicfile"
 	"log"
 	"os"
 	"path/filepath"
@@ -157,8 +158,10 @@ func shortKey(pubkey string) string {
 	return pubkey[:8]
 }
 
-// save atomically rewrites peers.json (write tmp, rename). A memory-only
-// registry (empty path) is a no-op.
+// save atomically rewrites peers.json. A memory-only registry (empty path) is a
+// no-op. Writers are serialised by the caller holding no lock at this point but
+// entering through Upsert, which snapshots under r.mu; the write itself is
+// indivisible to readers (unique temp file, fsync, rename, directory fsync).
 func (r *Registry) save(list []protocol.Peer) error {
 	if r.path == "" {
 		return nil
@@ -170,9 +173,5 @@ func (r *Registry) save(list []protocol.Peer) error {
 	if err != nil {
 		return err
 	}
-	tmp := r.path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, r.path)
+	return atomicfile.Write(r.path, data, 0o600)
 }

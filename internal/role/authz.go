@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"github.com/tzero78/buddynet/internal/atomicfile"
 	"log"
 	"os"
 	"sort"
@@ -87,6 +88,13 @@ type authorizer struct {
 	// limiter, so a stranger flood can never eat an allowlisted buddy's budget.
 	enroll *ratelimit.Limiter
 
+	// writeMu serialises PERSISTENCE. It is taken before mu and held across the
+	// file write, so two writers can never rename their snapshots out of order —
+	// which is how an older pending set used to overwrite a newer one. mu itself is
+	// NOT held across the write: it serves allowed() and replayed() on every packet,
+	// so putting disk I/O under it would trade a lost update for a stall.
+	writeMu sync.Mutex
+
 	mu         sync.RWMutex
 	keys       map[string]string
 	mtime      time.Time
@@ -113,6 +121,12 @@ type authorizer struct {
 	// lastStatWarn throttles the "cannot read the allowlist" warning, which would
 	// otherwise repeat on every poll for as long as the condition lasts.
 	lastStatWarn time.Time
+	// pendDirty means the pending FILE does not reflect the map: a write failed, or
+	// a concurrent writer may have clobbered it. Without this a lost entry was
+	// PERMANENT — recordPending only wrote when the entry was new, so the client
+	// re-registering every second changed nothing and `allowclient <CODE>` stayed
+	// broken until the TTL expired or the server restarted.
+	pendDirty bool
 }
 
 // Enrollment ceilings. An enrolling client sends one REGISTER per second and only
@@ -521,18 +535,43 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 		}
 	}
 	a.pend[h] = pendingEntry{Key: key, Seen: time.Now()}
-	snapshot := clonePending(a.pend)
+	dirty := a.pendDirty
 	a.mu.Unlock()
+	// Persist when the entry is new OR when the file is known to be out of sync.
+	// The dirty case is what makes a lost entry recoverable: the enrolling client
+	// re-registers about once a second, and each of those attempts now repairs the
+	// file instead of finding "already in the map" and doing nothing.
+	if isNew || dirty {
+		a.persistPending()
+	}
 	if isNew {
-		if err := writePending(a.pendDB, snapshot); err != nil {
-			log.Printf("pending write: %v", err)
-		}
 		// Do NOT log the cleartext enrollment code — it is a bearer secret and the
 		// log may be shipped off-box. The public key is a non-secret identifier, so
 		// approve by key; the code is also persisted in the 0600 .pending file for
 		// anyone who prefers code-based approval.
 		log.Printf("AUTHZ: action=pending key=%s code=%s — approve with: buddynet --role=handshake --authorized %s approve %s",
 			keyTag(key), shortHash(code), a.path, key)
+	}
+}
+
+// persistPending writes the pending set to disk with the snapshot taken INSIDE
+// writeMu, so a slower writer can never rename an older set over a newer one. A
+// failure marks the file dirty, so the next registration retries rather than
+// leaving the operator with a code that `allowclient` cannot find.
+func (a *authorizer) persistPending() {
+	a.writeMu.Lock()
+	defer a.writeMu.Unlock()
+	a.mu.RLock()
+	snapshot := clonePending(a.pend)
+	a.mu.RUnlock()
+
+	err := writePending(a.pendDB, snapshot)
+	a.mu.Lock()
+	a.pendDirty = err != nil
+	a.mu.Unlock()
+	if err != nil {
+		log.Printf("WARNING: could not persist pending enrollments to %s (%v) — "+
+			"`allowclient <CODE>` may not find a waiting client until this succeeds; retrying on the next registration", a.pendDB, err)
 	}
 }
 
@@ -678,14 +717,10 @@ func RevokeKey(path, key string) error {
 	if out != "" {
 		out += "\n"
 	}
-	// Atomic replace (tmp + rename) so the inotify reload never observes a
-	// truncated allowlist mid-rewrite: a concurrent reader sees either the old or
-	// the new file, never a torn one.
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(out), 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
+	// Atomic replace so the reload never observes a truncated allowlist mid-rewrite:
+	// a concurrent reader sees either the old or the new file, never a torn one —
+	// and a crash cannot leave an allowlist that authorises nobody.
+	if err := atomicfile.Write(path, []byte(out), 0o600); err != nil {
 		return err
 	}
 	fmt.Printf("revoked %d entr(y/ies): %s\n", removed, key)
@@ -729,15 +764,16 @@ func writePending(path string, m map[string]pendingEntry) error {
 	for code, e := range m {
 		fmt.Fprintf(&b, "%s %s %d\n", code, e.Key, e.Seen.Unix())
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	return atomicfile.Write(path, []byte(b.String()), 0o600)
 }
 
 func AllowClient(authorizedPath, code string) error {
 	pendPath := authorizedPath + ".pending"
+	// Read-modify-write of the pending file under the SAME advisory lock the
+	// approve/revoke commands take, so a concurrent operator invocation cannot lose
+	// this update. (The server's own writes go through persistPending; the lock is
+	// what keeps the two processes from interleaving.)
+	defer lockAllowlist(pendPath)()
 	pend, err := readPending(pendPath)
 	if err != nil {
 		if os.IsNotExist(err) {
