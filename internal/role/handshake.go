@@ -447,6 +447,18 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		"observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --lab). Drop " +
 		"--quic-handshake=false on the server AND every buddy to restore encryption; always pin buddies with --peer-key.")
 
+	return serveRegisterUDP(ctx, conn, rl, cfg.AllowCIDRs, func(src *net.UDPAddr, raw []byte) {
+		handleRegister(conn, reg, priv, authz, cfg.RelayEndpoint, src, raw)
+	})
+}
+
+// serveRegisterUDP is the plain-UDP read loop: one datagram in, one REGISTER
+// handled. handle is a parameter rather than a fixed call so the panic isolation
+// below can be exercised with a handler that panics on purpose — a parameter
+// leaves no package-level state for a test to mutate, and therefore no race and
+// nothing an attacker could reach.
+func serveRegisterUDP(ctx context.Context, conn *net.UDPConn, rl *ratelimit.Limiter,
+	allowed []netip.Prefix, handle func(src *net.UDPAddr, raw []byte)) error {
 	buf := make([]byte, 1500)
 	for {
 		n, src, err := conn.ReadFromUDP(buf)
@@ -460,7 +472,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		}
 		// Source allowlist (optional): drop a disallowed source before anything,
 		// even the rate limiter — a private server need not spend a cycle on it.
-		if !cidrAllowed(cfg.AllowCIDRs, src.IP) {
+		if !cidrAllowed(allowed, src.IP) {
 			continue
 		}
 		// Gate before any parsing or crypto so a flood is dropped cheaply and the
@@ -474,9 +486,7 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		copy(raw, buf[:n])
 		// One malformed datagram must drop that packet, never the read loop /
 		// process (panic isolation for a 24/7 public server).
-		safe.Do("handshake.register", func() {
-			handleRegister(conn, reg, priv, authz, cfg.RelayEndpoint, src, raw)
-		})
+		safe.Do("handshake.register", func() { handle(src, raw) })
 	}
 }
 
