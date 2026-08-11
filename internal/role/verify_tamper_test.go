@@ -24,15 +24,16 @@ func signedRegister(t *testing.T) (protocol.Message, ed25519.PrivateKey) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ts := time.Now().Unix()
-	m := protocol.Message{
-		Token:  "rendezvous-token",
-		ID:     "buddy-a",
-		PubKey: base64.StdEncoding.EncodeToString(pub),
-		Ts:     ts,
-	}
-	m.RegSig = base64.StdEncoding.EncodeToString(
-		ed25519.Sign(priv, protocol.RegistrationPayload(m.Token, m.ID, m.PubKey, m.Ts)))
+	m := signReg(t, priv, protocol.Message{
+		Type:      protocol.TypeRegister,
+		Role:      protocol.RoleBuddy,
+		Token:     "rendezvous-token",
+		ID:        "buddy-a",
+		PubKey:    base64.StdEncoding.EncodeToString(pub),
+		VirtualIP: "10.66.7.8",
+		Name:      "buddy-a-name",
+		Ts:        time.Now().Unix(),
+	})
 	return m, priv
 }
 
@@ -66,7 +67,17 @@ func TestVerifyRegistrationRejectsTampering(t *testing.T) {
 		"tampered ID":          func(m *protocol.Message) { m.ID = "buddy-evil" },
 		"tampered token":       func(m *protocol.Message) { m.Token = "other-token" },
 		"tampered timestamp":   func(m *protocol.Message) { m.Ts++ },
-		"pubkey not base64":    func(m *protocol.Message) { m.PubKey = "@@@" },
+		"tampered version":     func(m *protocol.Message) { m.Ver++ },
+		"tampered role":        func(m *protocol.Message) { m.Role = protocol.RoleRelay },
+		"tampered virtual ip":  func(m *protocol.Message) { m.VirtualIP = "10.66.9.9" },
+		"tampered name":        func(m *protocol.Message) { m.Name = "impostor" },
+		"injected code":        func(m *protocol.Message) { m.CodeEnc = "grafted-enrollment-code" },
+		"swapped nonce": func(m *protocol.Message) {
+			n, _ := protocol.NewNonce()
+			m.Nonce = n
+		},
+		"dropped nonce":     func(m *protocol.Message) { m.Nonce = "" },
+		"pubkey not base64": func(m *protocol.Message) { m.PubKey = "@@@" },
 		"pubkey wrong length": func(m *protocol.Message) {
 			m.PubKey = base64.StdEncoding.EncodeToString([]byte("too-short"))
 		},
@@ -102,15 +113,13 @@ func TestVerifyRegistrationRejectsStaleAndFuture(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-			ts := time.Now().Add(delta).Unix()
-			m := protocol.Message{
+			m := signReg(t, priv, protocol.Message{
+				Type:   protocol.TypeRegister,
 				Token:  "rendezvous-token",
 				ID:     "buddy-a",
 				PubKey: base64.StdEncoding.EncodeToString(pub),
-				Ts:     ts,
-			}
-			m.RegSig = base64.StdEncoding.EncodeToString(
-				ed25519.Sign(priv, protocol.RegistrationPayload(m.Token, m.ID, m.PubKey, m.Ts)))
+				Ts:     time.Now().Add(delta).Unix(),
+			})
 			if verifyRegistration(m, skew) {
 				t.Fatalf("%s REGISTER (still validly signed) was accepted", name)
 			}

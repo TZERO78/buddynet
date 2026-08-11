@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -370,6 +369,15 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 			return err
 		}
 		log.Printf("approval mode ON: only allowlisted clients may pair (%d approved)", authz.count())
+		if authz.count() == 0 {
+			// Fail-closed, and say so: --authorized decides the mode, the file's
+			// existence decides only WHO is allowed. Zero entries means nobody pairs
+			// until a key is approved — never a silent fallback to open mode.
+			log.Printf("WARNING: the allowlist %s is empty or missing — NO client can pair yet. "+
+				"Approve one with: buddynet --role=handshake --authorized %s approve <CLIENT_KEY> "+
+				"(or --authorized %s allowclient <CODE> for code-based enrollment)",
+				cfg.Authorized, cfg.Authorized, cfg.Authorized)
+		}
 		go authz.watch(ctx)
 	} else {
 		log.Print("approval mode OFF: any client that knows a token may pair. A token-holder can " +
@@ -439,20 +447,15 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 // so a polling buddy makes progress). QUIC's handshake already validated the
 // source address, so no cookie is needed; the rate limiter still bounds load.
 func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
-	// In approval mode, pin clients to the allowlist during the TLS handshake so a
-	// non-allowlisted buddy is refused before it can send a REGISTER (the same early
-	// rejection kernel WireGuard gives). Open mode leaves client auth at the app layer.
-	var verifyClient func(ed25519.PublicKey) error
+	// The TLS handshake AUTHENTICATES every client (Ed25519 client certificate,
+	// proof of possession) but authorizes none: enrollment needs an unknown key to
+	// be able to deliver its sealed code, which a TLS-layer allowlist gate makes
+	// impossible. The allowlist decision happens in pairRegister instead.
 	if authz != nil {
-		verifyClient = func(pub ed25519.PublicKey) error {
-			if authz.allowed(bcrypto.PubKeyB64(pub)) {
-				return nil
-			}
-			return errors.New("client key is not on the allowlist")
-		}
-		log.Print("approval mode: QUIC control pins clients to the allowlist at the TLS handshake")
+		log.Print("approval mode: QUIC control authenticates every client by key at the TLS handshake; " +
+			"the allowlist decision (allow / enroll with a code / refuse) is made per REGISTER")
 	}
-	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout, verifyClient)
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
 	if err != nil {
 		return err
 	}
@@ -491,6 +494,28 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		req.Reply(nil)
 		return
 	}
+	// Bind the registration to the identity the TLS handshake actually proved. A
+	// REGISTER claiming any other public key is not a failed authorization, it is a
+	// forgery attempt: drop the connection and store NOTHING — no pending
+	// enrollment, no peer, no roster entry.
+	if !registrationMatchesTLSKey(m, req.ClientKey) {
+		hsStats.keyMismatch.Add(1)
+		hsDebugf("closing control conn from %s: REGISTER claims key %s but the TLS handshake authenticated %s",
+			src, keyTag(m.PubKey), keyTag(bcrypto.PubKeyB64(req.ClientKey)))
+		req.Drop("registration key does not match the authenticated client key")
+		return
+	}
+	// QUIC validated the source address in its own handshake, so an incompatible
+	// client can be told so directly.
+	if m.Ver != protocol.Version {
+		hsStats.dropped.Add(1)
+		if b, err := json.Marshal(replyIncompatible()); err == nil {
+			req.Reply(b)
+		} else {
+			req.Reply(nil)
+		}
+		return
+	}
 	if !resolveToken(&m, priv) {
 		hsStats.dropped.Add(1)
 		req.Reply(nil)
@@ -527,7 +552,9 @@ type hsCounters struct {
 	dropped       atomic.Int64 // malformed / over-cap / failed proof
 	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
 	squatRejected atomic.Int64 // 3rd-party register rejected on full slot (slot already squatted)
-	replay        atomic.Int64 // approval-mode registration signature replayed
+	replay        atomic.Int64 // approval-mode registration replayed (key+nonce reused)
+	keyMismatch   atomic.Int64 // REGISTER claimed a key other than the TLS-authenticated one
+	enrollLimited atomic.Int64 // unknown-key enrollment attempt refused by the enrollment rate limit
 
 	// lastPanic is the process-wide recovered-panic total observed at the previous
 	// stats tick, so logLoop can report the per-interval delta. Touched only by the
@@ -551,6 +578,7 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
 		npk, sq, rp := c.newPubKey.Swap(0), c.squatRejected.Swap(0), c.replay.Swap(0)
+		km, el := c.keyMismatch.Swap(0), c.enrollLimited.Swap(0)
 		// Per-interval count of panics recovered by safe.Do/Go across the process. A
 		// non-zero delta means a crafted input reliably trips a parser (ours or a
 		// dependency's) — invisible otherwise, since each panic is only logged once
@@ -558,13 +586,16 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		total := safe.PanicCount()
 		pan := total - c.lastPanic
 		c.lastPanic = total
-		if pa|ch|rl|dr|npk|sq|rp == 0 && pan == 0 {
+		if pa|ch|rl|dr|npk|sq|rp|km|el == 0 && pan == 0 {
 			continue // idle interval: stay quiet
 		}
 		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d challenged=%d rate-limited=%d dropped=%d",
 			statsInterval, pa, ch, rl, dr)
-		if npk > 0 || sq > 0 || rp > 0 || pan > 0 {
-			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d panics=%d", npk, sq, rp, pan)
+		if el > 0 {
+			line += fmt.Sprintf(" enroll-limited=%d", el)
+		}
+		if npk > 0 || sq > 0 || rp > 0 || km > 0 || pan > 0 {
+			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d key-mismatch=%d panics=%d", npk, sq, rp, km, pan)
 		}
 		log.Print(line)
 	}
@@ -581,18 +612,37 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 		hsDebugf("drop invalid datagram from %s", src)
 		return
 	}
-	if !resolveToken(&m, priv) {
-		hsStats.dropped.Add(1)
-		hsDebugf("drop register with undecryptable sealed token from %s", src)
-		return
-	}
 	// A REGISTER without a valid cookie gets only a (smaller) challenge and no
 	// further work. A spoofed source never receives the cookie, so it can never
 	// complete this step — closing reflection before any crypto or PEER_LIST.
+	//
+	// This check comes FIRST, before the sealed token is opened. Unsealing runs
+	// X25519 + NaCl box, orders of magnitude more expensive than an HMAC compare,
+	// and it must not be reachable from an unvalidated (and therefore spoofable)
+	// source: otherwise a flood of garbage TokenEnc blobs buys an attacker a full
+	// asymmetric operation per packet. Everything downstream of here — unsealing,
+	// signature verification, the sealed enrollment code — is only reached by a
+	// source that has proven return-routability.
 	if !validCookie(m.Cookie, src.IP) {
 		hsStats.challenged.Add(1)
 		sendCookie(conn, src)
-		hsDebugf("challenged unvalidated register token=%s from %s", logTag(m.Token), src)
+		hsDebugf("challenged unvalidated register id=%s from %s", m.ID, src)
+		return
+	}
+	// Source validated: an incompatible client now gets a clear answer rather than
+	// silence. Nothing else is done with the message.
+	if m.Ver != protocol.Version {
+		hsStats.dropped.Add(1)
+		if b, err := json.Marshal(replyIncompatible()); err == nil {
+			conn.WriteToUDP(b, src)
+		}
+		return
+	}
+	// Source validated and version agreed: only now is it worth an asymmetric
+	// operation to recover the sealed pairing token.
+	if !resolveToken(&m, priv) {
+		hsStats.dropped.Add(1)
+		hsDebugf("drop register with undecryptable sealed token from %s", src)
 		return
 	}
 	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
@@ -626,10 +676,26 @@ func parseRegister(raw []byte) (protocol.Message, bool) {
 	case !validField(m.Token):
 		return m, false
 	}
-	if m.Ver != protocol.Version {
-		return m, false
-	}
+	// NOTE: the protocol version is deliberately NOT checked here. A mismatched
+	// client is answered with an explicit incompatibility reply (see
+	// replyIncompatible) instead of being dropped in silence, so the operator sees
+	// "update buddynet" rather than an unexplained failure to pair. Callers check
+	// it only once the source address is validated.
 	return m, true
+}
+
+// replyIncompatible answers a client speaking a different protocol version with a
+// version-stamped, EMPTY PEER_LIST. Both buddy transports compare Ver before they
+// look at the roster or its signature, so this surfaces as
+// "server speaks vN, we speak vM — update buddynet" instead of a silent timeout.
+//
+// v7 is a breaking change (the registration signature covers new fields), and an
+// older client is NOT served under the old rules — this reply is a diagnostic, not
+// a compatibility path. It is emitted only after the source address has been
+// validated (cookie on UDP, the handshake itself on QUIC), and it is smaller than
+// the REGISTER that triggered it, so it is never a reflector or an amplifier.
+func replyIncompatible() protocol.Message {
+	return protocol.Message{Type: protocol.TypePeerList, Ver: protocol.Version}
 }
 
 // resolveToken unseals a sealed pairing token (TokenEnc) into m.Token using the
@@ -659,20 +725,62 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
 			return nil, false
 		}
-		if authz.replayed(m.RegSig) {
-			// A valid signature seen twice within the freshness window: an actual
-			// replay attempt against approval mode. This was previously silent.
-			hsStats.replay.Add(1)
-			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
-				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration signature replayed")
-			return nil, false
-		}
+		// AUTHORIZATION BEFORE THE REPLAY CACHE. The cache is bounded and evicts its
+		// oldest entry when full (it must never fail open), so whoever can put
+		// entries in it can push others out. Checking the allowlist first means only
+		// APPROVED keys ever occupy a slot: an outsider — who can mint unlimited
+		// self-signed, perfectly valid registrations — can no longer flush the cache
+		// and thereby re-open the replay window on a real buddy. It also puts the
+		// tight enrollment limiter ahead of that work rather than behind it.
 		if !authz.allowed(m.PubKey) {
+			// Unknown key. It authenticated (its signature verified, and on QUIC its
+			// TLS certificate matched), which is exactly what lets an enrolling client
+			// deliver its sealed code — but it is NOT authorized, so it never pairs
+			// here. With a valid code it becomes a pending enrollment awaiting the
+			// operator; without one it is only noted.
+			//
+			// Both branches cost real work (an X25519 open, a map insert, a file
+			// rewrite, a log line), so gate them behind the tight enrollment limiter
+			// first: a stranger flood must not be able to spend an approved buddy's
+			// budget, fill the disk with pending entries, or fill the log.
+			if !authz.allowEnroll(src.IP.String()) {
+				hsStats.enrollLimited.Add(1)
+				return nil, false
+			}
+			// Remember the nonce in the SEPARATE pre-auth cache. If the operator
+			// approves this key in a moment, whatever was sent beforehand must not
+			// suddenly become replayable — and no timestamp comparison can decide that,
+			// because the timestamp is the sender's to choose and may legitimately sit
+			// up to regSkew in the future, i.e. after the approval. Only a record of
+			// the nonce itself is sound. The separate cache is what keeps this from
+			// handing outsiders an eviction lever over approved buddies.
+			authz.recordPreAuth(m.PubKey, m.Nonce)
 			if m.CodeEnc != "" {
 				authz.recordPending(m.CodeEnc, m.PubKey)
 			} else {
 				authz.logPending(m.PubKey, logTag(m.Token))
 			}
+			return nil, false
+		}
+		// Second line of defence at the approval transition, behind the pre-auth
+		// nonce cache: refuse registrations whose timestamp predates the approval.
+		// On its own this would NOT be sound — the timestamp is the sender's to
+		// choose and may sit up to regSkew in the future — so it only catches what
+		// the nonce cache may have aged out or evicted. The nonce cache is the lock;
+		// this is the bolt.
+		if !authz.freshSinceApproval(m.PubKey, m.Ts) {
+			hsStats.replay.Add(1)
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration predates the key's approval")
+			return nil, false
+		}
+		if authz.replayed(m.PubKey, m.Nonce) {
+			// An APPROVED key reused a nonce inside the freshness window. A polling
+			// buddy draws a fresh one every attempt, so this is a genuine replay of a
+			// captured registration, not ordinary re-registration.
+			hsStats.replay.Add(1)
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration nonce reused by the same key")
 			return nil, false
 		}
 	} else if m.RegSig != "" {
@@ -687,6 +795,12 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			hsDebugf("drop register with invalid key-ownership proof token=%s from %s", logTag(m.Token), src)
 			return nil, false
 		}
+	}
+	// Identity is address: derive the virtual IP from the key rather than trusting
+	// the claim. Runs AFTER signature verification, so the value the client signed
+	// is the value that was checked.
+	if !deriveVIP(&m, src) {
+		return nil, false
 	}
 	self, partner, ok := reg.upsert(m, src)
 	if !ok {
@@ -723,8 +837,19 @@ func signedPeerList(priv ed25519.PrivateKey, token string, peers []protocol.Peer
 // validField rejects empty and oversized strings before they become map keys.
 func validField(s string) bool { return s != "" && len(s) <= protocol.MaxFieldLen }
 
-// verifyRegistration checks a client's key-ownership proof (approval mode).
+// verifyRegistration checks a client's key-ownership proof. m must already carry
+// the PLAINTEXT token (resolveToken ran), because that is what the client signed.
+//
+// The nonce is validated here rather than in parseRegister because it is only
+// meaningful together with the signature: it is covered by RegistrationPayload,
+// so a malformed or attacker-chosen nonce cannot be swapped in, and its strict
+// fixed length keeps the replay-cache key bounded.
 func verifyRegistration(m protocol.Message, skew time.Duration) bool {
+	if !protocol.ValidNonce(m.Nonce) {
+		return false
+	}
+	// The nonce is only replay-relevant while the registration is fresh, so the
+	// same ±skew window bounds both.
 	if d := time.Since(time.Unix(m.Ts, 0)); d > skew || d < -skew {
 		return false
 	}
@@ -736,7 +861,51 @@ func verifyRegistration(m protocol.Message, skew time.Duration) bool {
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
-	return ed25519.Verify(ed25519.PublicKey(pub), protocol.RegistrationPayload(m.Token, m.ID, m.PubKey, m.Ts), sig)
+	return ed25519.Verify(ed25519.PublicKey(pub), protocol.RegistrationPayload(m), sig)
+}
+
+// registrationMatchesTLSKey reports whether a REGISTER claims exactly the
+// identity its QUIC/TLS connection authenticated with. Compared on the raw key
+// bytes, so an alternative base64 spelling of the same key cannot slip past.
+//
+// This is what makes app-layer enrollment safe: an unknown client is allowed to
+// complete the TLS handshake so it can deliver its sealed enrollment code, but it
+// can only ever enroll the key it proved possession of — it cannot bind a code
+// (its own or a captured one) to somebody else's public key.
+func registrationMatchesTLSKey(m protocol.Message, clientKey ed25519.PublicKey) bool {
+	if len(clientKey) != ed25519.PublicKeySize {
+		return false
+	}
+	claimed, err := base64.StdEncoding.DecodeString(m.PubKey)
+	if err != nil || len(claimed) != ed25519.PublicKeySize {
+		return false
+	}
+	return clientKey.Equal(ed25519.PublicKey(claimed))
+}
+
+// deriveVIP enforces the project's core invariant server-side: the virtual IP is
+// a pure function of the public key, so the server never takes the client's word
+// for it. A registration claiming an inconsistent VIP is rejected (it is signed,
+// so this is a deliberately crafted client, not a wire error); one that omits it
+// gets the derived value filled in, so the roster the server signs always carries
+// the address the key actually derives.
+func deriveVIP(m *protocol.Message, src *net.UDPAddr) bool {
+	if m.PubKey == "" {
+		return true // no key to derive from (open mode, unsigned legacy peer)
+	}
+	pub, err := bcrypto.DecodePubKey(m.PubKey)
+	if err != nil {
+		return false
+	}
+	want := bcrypto.VirtualIPString(pub)
+	if m.VirtualIP != "" && m.VirtualIP != want {
+		hsStats.dropped.Add(1)
+		hsDebugf("drop register token=%s from %s: claims vip %s but its key derives %s",
+			logTag(m.Token), src, m.VirtualIP, want)
+		return false
+	}
+	m.VirtualIP = want
+	return true
 }
 
 // shortHash returns a non-reversible 8-hex tag for a secret token, used as the

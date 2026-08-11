@@ -15,6 +15,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/ratelimit"
 )
 
 // pendingTTL bounds how long an un-approved enrollment lingers in the pending DB.
@@ -29,7 +30,13 @@ const (
 	logDedupWindow = 30 * time.Second // suppress repeat "pending" logs per key
 	maxLoggedKeys  = 1024             // distinct keys tracked for log dedup
 	maxPending     = 1024             // distinct enrollment codes held pending
-	maxReplaySigs  = 4096             // recently-seen registration signatures kept
+	maxReplayRegs  = 4096             // recently-seen (key,nonce) registrations of APPROVED keys
+	// maxPreAuthRegs bounds the SEPARATE cache of nonces seen from keys that are not
+	// (yet) approved. Separate is the whole point: entries here may only ever evict
+	// each other, never an approved buddy's. It is filled behind the strict
+	// enrollment limiter (rlEnroll*), so filling it outright takes longer than its
+	// own TTL — a flood expires from the front rather than displacing anything.
+	maxPreAuthRegs = 4096
 
 	// A registration signature is accepted while its timestamp is within ±regSkew
 	// of now, so a captured one is replayable over a 2*regSkew span; the replay
@@ -67,13 +74,47 @@ type authorizer struct {
 	pendDB   string
 	selfPriv ed25519.PrivateKey
 
+	// enroll gates work done for keys that are NOT on the allowlist. Since an
+	// unknown key may now complete the TLS handshake (that is what makes code-based
+	// enrollment possible at all), the per-registration cost it can trigger — a
+	// sealed-code X25519 open, a pending-map insert, a pending-file rewrite — must
+	// be bounded far more tightly than the cost an approved buddy causes. Its own
+	// limiter, so a stranger flood can never eat an allowlisted buddy's budget.
+	enroll *ratelimit.Limiter
+
 	mu         sync.RWMutex
 	keys       map[string]string
 	mtime      time.Time
 	logged     map[string]time.Time
 	pend       map[string]pendingEntry
-	recentSigs map[string]time.Time // reg signature -> first seen (replay defense)
+	recentRegs map[string]time.Time // "pubkey\x00nonce" -> first seen, APPROVED keys
+	// preAuthRegs is the same thing for keys that are NOT yet approved. Kept apart
+	// from recentRegs so a stranger flood can never evict an approved buddy's entry
+	// — the reason unapproved keys were excluded from the replay cache in the first
+	// place — while still remembering what they sent, so a registration observed
+	// before approval is recognised as a replay afterwards.
+	preAuthRegs map[string]time.Time
+	// approvedAt records WHEN a key was added to the allowlist by a running server.
+	// An unapproved key never enters the replay cache (that is what stops outsiders
+	// from flushing it), so without this a registration captured before approval
+	// would stay replayable for the rest of its freshness window the moment the
+	// operator approves. Keys present at startup carry the zero time — no approval
+	// transition happened in this process, and constraining them would only punish
+	// clock-skewed clients after every restart for no gain.
+	approvedAt map[string]time.Time
+	// missing latches "the allowlist file is not there", so the warning is logged
+	// once per disappearance rather than on every poll.
+	missing bool
 }
+
+// Enrollment ceilings. An enrolling client sends one REGISTER per second and only
+// until the operator approves it, so a couple of attempts per second per source is
+// ample; anything beyond that is a stranger probing or flooding.
+const (
+	rlEnrollGlobalRate = 20   // admitted unknown-key registrations/sec, all sources
+	rlEnrollSrcRate    = 2    // admitted unknown-key registrations/sec per source
+	rlEnrollMaxSources = 1024 // bound on the tracked-source map
+)
 
 type pendingEntry struct {
 	Key  string
@@ -82,40 +123,95 @@ type pendingEntry struct {
 
 func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error) {
 	a := &authorizer{
-		path:       path,
-		pendDB:     path + ".pending",
-		selfPriv:   selfPriv,
-		keys:       map[string]string{},
-		logged:     map[string]time.Time{},
-		pend:       map[string]pendingEntry{},
-		recentSigs: map[string]time.Time{},
+		path:        path,
+		pendDB:      path + ".pending",
+		selfPriv:    selfPriv,
+		keys:        map[string]string{},
+		logged:      map[string]time.Time{},
+		pend:        map[string]pendingEntry{},
+		recentRegs:  map[string]time.Time{},
+		preAuthRegs: map[string]time.Time{},
+		approvedAt:  map[string]time.Time{},
+		enroll:      ratelimit.New(rlEnrollGlobalRate, rlEnrollSrcRate, rlEnrollMaxSources),
 	}
-	if err := a.reload(); err != nil {
+	if err := a.load(true); err != nil {
 		return nil, err
 	}
 	a.pend, _ = readPending(a.pendDB)
 	return a, nil
 }
 
-func (a *authorizer) reload() error {
+// reload replaces the in-memory allowlist from disk. A MISSING file is not an
+// error and does not fall back to anything: it loads as an EMPTY allowlist, i.e.
+// zero authorized clients. Approval mode is decided by the --authorized flag
+// alone, never by whether the file happens to exist.
+func (a *authorizer) reload() error { return a.load(false) }
+
+// load replaces the in-memory allowlist from disk. initial marks the load done at
+// construction, where no key counts as newly approved (see approvedAt).
+func (a *authorizer) load(initial bool) error {
 	keys, mtime, err := readAuthorized(a.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			a.mu.Lock()
 			a.keys = map[string]string{}
+			a.approvedAt = map[string]time.Time{}
+			a.mtime = time.Time{}
+			a.missing = true
 			a.mu.Unlock()
 			return nil
 		}
 		return err
 	}
+	now := time.Now()
 	a.mu.Lock()
-	a.keys, a.mtime = keys, mtime
+	approved := make(map[string]time.Time, len(keys))
+	for k := range keys {
+		switch {
+		case initial:
+			approved[k] = time.Time{} // unconstrained: no transition in this process
+		default:
+			if at, known := a.approvedAt[k]; known {
+				approved[k] = at // already approved earlier; keep the original moment
+			} else {
+				approved[k] = now // NEW approval: this is the transition to protect
+			}
+		}
+	}
+	a.keys, a.approvedAt, a.mtime = keys, approved, mtime
 	a.mu.Unlock()
 	return nil
 }
 
+// freshSinceApproval reports whether a registration's timestamp is at or after
+// the moment its key was approved. A registration minted BEFORE the approval —
+// i.e. captured while the key was still an outsider, and therefore never recorded
+// in the replay cache — is refused, closing the transition window. Keys the
+// process inherited at startup are unconstrained (zero time).
+//
+// `ts` is unix SECONDS, so a registration minted at 16.9 s reports 16. Comparing
+// it against the approval instant unmodified would reject a legitimate client for
+// its first attempt after approval; one second of slack absorbs that. The cost is
+// an irreducible ~1 s residual window: a registration captured in the same second
+// as the approval is indistinguishable from one minted just after it. Narrowing
+// that further would mean putting sub-second time on the wire, which is not worth
+// a wire change for a window an operator can never hit deliberately.
+func (a *authorizer) freshSinceApproval(pubkey string, ts int64) bool {
+	a.mu.RLock()
+	at, known := a.approvedAt[pubkey]
+	a.mu.RUnlock()
+	if !known || at.IsZero() {
+		return true
+	}
+	return !time.Unix(ts, 0).Before(at.Add(-time.Second))
+}
+
+// authzPollInterval is how often the allowlist file is re-checked for changes
+// (an edit, an approve/revoke, or the file disappearing entirely).
+const authzPollInterval = 2 * time.Second
+
 func (a *authorizer) watch(ctx context.Context) {
-	t := time.NewTicker(2 * time.Second)
+	t := time.NewTicker(authzPollInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -123,21 +219,66 @@ func (a *authorizer) watch(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		fi, err := os.Stat(a.path)
-		if err != nil {
-			continue
-		}
-		a.mu.RLock()
-		changed := !fi.ModTime().Equal(a.mtime)
-		a.mu.RUnlock()
-		if changed {
-			if err := a.reload(); err != nil {
-				log.Printf("authorized reload: %v", err)
-			} else {
-				log.Printf("AUTHZ: action=reload count=%d", a.count())
-			}
-		}
+		a.pollOnce()
 	}
+}
+
+// pollOnce is one iteration of the allowlist watch, factored out so it can be
+// driven directly in tests without waiting on the ticker.
+func (a *authorizer) pollOnce() {
+	fi, err := os.Stat(a.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The file is GONE. Approval mode stays on and the in-memory allowlist is
+			// emptied: "no allowlist" must mean "nobody may pair", never "everybody
+			// may". Previously this branch just skipped the tick, so a deleted
+			// allowlist left the last-loaded keys authorized indefinitely — a revoke
+			// by `rm` silently did nothing.
+			a.noteMissing()
+			return
+		}
+		// Any other stat error (a permission problem, transient I/O) is not evidence
+		// that the operator revoked anything, so the loaded allowlist is kept.
+		return
+	}
+	a.mu.Lock()
+	changed := !fi.ModTime().Equal(a.mtime)
+	restored := a.missing
+	a.missing = false
+	a.mu.Unlock()
+	if !changed {
+		return
+	}
+	if err := a.reload(); err != nil {
+		log.Printf("authorized reload: %v", err)
+		return
+	}
+	if restored {
+		log.Printf("AUTHZ: action=restored count=%d detail=%q", a.count(), "allowlist file is back; entries reloaded")
+		return
+	}
+	log.Printf("AUTHZ: action=reload count=%d", a.count())
+}
+
+// noteMissing empties the allowlist because its file has disappeared, and says so
+// ONCE per disappearance. The watch runs every couple of seconds, so logging
+// unconditionally would write the same warning forever; the latch is cleared when
+// the file comes back, so a later deletion is reported again.
+func (a *authorizer) noteMissing() {
+	a.mu.Lock()
+	dropped := len(a.keys)
+	already := a.missing
+	a.keys = map[string]string{}
+	// Zero the mtime so the file is reloaded whenever it reappears, even if it is
+	// restored from a backup carrying an older timestamp than the one we last saw.
+	a.mtime = time.Time{}
+	a.missing = true
+	a.mu.Unlock()
+	if already {
+		return
+	}
+	log.Printf("WARNING: allowlist %s no longer exists — approval mode stays ON with ZERO authorized clients "+
+		"(%d dropped); no buddy can pair until the file is restored or a key is approved again", a.path, dropped)
 }
 
 func (a *authorizer) allowed(pubkey string) bool {
@@ -145,6 +286,16 @@ func (a *authorizer) allowed(pubkey string) bool {
 	defer a.mu.RUnlock()
 	_, ok := a.keys[pubkey]
 	return ok
+}
+
+// allowEnroll reports whether an unknown key from src may have enrollment work
+// done for it this second. A test-constructed authorizer with no limiter is
+// treated as unlimited; the production constructor always installs one.
+func (a *authorizer) allowEnroll(src string) bool {
+	if a.enroll == nil {
+		return true
+	}
+	return a.enroll.Allow(src)
 }
 
 func (a *authorizer) count() int {
@@ -186,57 +337,121 @@ func (a *authorizer) pruneLoggedLocked() {
 	}
 }
 
-// replayed reports whether this exact registration signature was seen recently,
+// replayed reports whether this (public key, nonce) pair was seen recently,
 // recording fresh ones. Callers invoke it only AFTER verifyRegistration passes,
-// so the cache holds valid signatures and an attacker cannot pollute it with
-// garbage. The map is bounded; when it is full we prune expired entries and, if
-// still full, EVICT THE OLDEST (LRU) to make room — never failing open (which
-// would let a replay through) and never refusing the new entry (which would let
-// an attacker with one approved key DoS all pairings by flooding fresh sigs).
-// Under a sustained flood the effective replay window narrows to the most recent
-// maxReplaySigs entries, but the global rate limiter bounds how fast that can
+// so the cache holds proven-valid pairs and an attacker cannot pollute it with
+// garbage (nor grow the key: ValidNonce fixes the nonce length, and the pubkey is
+// length-bounded by parseRegister).
+//
+// Keying on (key,nonce) rather than on the signature is what makes ordinary
+// polling work: a buddy waiting for its partner re-registers about once a second,
+// each time with a fresh nonce and therefore a fresh cache key, while a captured
+// registration replayed verbatim reuses both and is caught.
+//
+// The map is bounded; when it is full we prune expired entries and, if still
+// full, EVICT THE OLDEST (LRU) to make room — never failing open (which would let
+// a replay through) and never refusing the new entry (which would let an attacker
+// with one approved key DoS all pairings by flooding fresh nonces). Under a
+// sustained flood the effective replay window narrows to the most recent
+// maxReplayRegs entries, but the global rate limiter bounds how fast that can
 // happen.
-func (a *authorizer) replayed(sig string) bool {
-	if sig == "" {
+func (a *authorizer) replayed(pubkey, nonce string) bool {
+	if pubkey == "" || nonce == "" {
 		return false
 	}
+	k := regKey(pubkey, nonce)
 	now := time.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if seen, ok := a.recentSigs[sig]; ok && now.Sub(seen) < regReplayWindow {
+	if seen, ok := a.recentRegs[k]; ok && now.Sub(seen) < regReplayWindow {
 		return true
 	}
-	if len(a.recentSigs) >= maxReplaySigs {
-		a.pruneSigsLocked(now)
-		if len(a.recentSigs) >= maxReplaySigs {
-			a.evictOldestSigLocked()
+	// BOTH caches are consulted. A nonce first seen while the key was still
+	// unapproved lives in preAuthRegs; without this lookup, approving the key would
+	// make that captured registration replayable — and no timestamp check can close
+	// that, because the timestamp is the attacker's to choose (it may legitimately
+	// sit up to regSkew in the FUTURE, i.e. after the approval that follows).
+	if seen, ok := a.preAuthRegs[k]; ok && now.Sub(seen) < regReplayWindow {
+		return true
+	}
+	if len(a.recentRegs) >= maxReplayRegs {
+		a.pruneRegsLocked(now)
+		if len(a.recentRegs) >= maxReplayRegs {
+			a.evictOldestRegLocked()
 		}
 	}
-	a.recentSigs[sig] = now
+	a.recentRegs[k] = now
 	return false
 }
 
-// evictOldestSigLocked removes the single oldest replay-cache entry (closest to
+// recordPreAuth remembers a nonce presented by a key that is not approved, in the
+// cache reserved for exactly that. Callers invoke it only AFTER verifyRegistration
+// passes and behind the enrollment limiter, so entries are proven-valid and
+// rate-bounded. Eviction here touches preAuthRegs only.
+func (a *authorizer) recordPreAuth(pubkey, nonce string) {
+	if pubkey == "" || nonce == "" {
+		return
+	}
+	k := regKey(pubkey, nonce)
+	now := time.Now()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if _, ok := a.preAuthRegs[k]; ok {
+		return // already known; keep the FIRST sighting as the entry's age
+	}
+	if len(a.preAuthRegs) >= maxPreAuthRegs {
+		for s, t := range a.preAuthRegs {
+			if now.Sub(t) >= regReplayWindow {
+				delete(a.preAuthRegs, s)
+			}
+		}
+		if len(a.preAuthRegs) >= maxPreAuthRegs {
+			var oldest string
+			var oldestT time.Time
+			first := true
+			for s, t := range a.preAuthRegs {
+				if first || t.Before(oldestT) {
+					oldest, oldestT, first = s, t, false
+				}
+			}
+			if !first {
+				delete(a.preAuthRegs, oldest) // only ever a pre-auth entry
+			}
+		}
+	}
+	a.preAuthRegs[k] = now
+}
+
+// regKey is the replay-cache key. NUL-separated: neither field can contain it
+// (both are base64), so no pair of distinct (key,nonce) inputs can collide.
+func regKey(pubkey, nonce string) string { return pubkey + "\x00" + nonce }
+
+// evictOldestRegLocked removes the single oldest replay-cache entry (closest to
 // expiry), freeing a slot without failing open. Caller holds a.mu.
-func (a *authorizer) evictOldestSigLocked() {
+func (a *authorizer) evictOldestRegLocked() {
 	var oldest string
 	var oldestT time.Time
 	first := true
-	for s, t := range a.recentSigs {
+	for s, t := range a.recentRegs {
 		if first || t.Before(oldestT) {
 			oldest, oldestT, first = s, t, false
 		}
 	}
 	if !first {
-		delete(a.recentSigs, oldest)
+		delete(a.recentRegs, oldest)
 	}
 }
 
-// pruneSigsLocked drops replay-cache entries past the replay window. Caller holds a.mu.
-func (a *authorizer) pruneSigsLocked(now time.Time) {
-	for s, t := range a.recentSigs {
+// pruneRegsLocked drops expired entries from BOTH replay caches. Caller holds a.mu.
+func (a *authorizer) pruneRegsLocked(now time.Time) {
+	for s, t := range a.recentRegs {
 		if now.Sub(t) >= regReplayWindow {
-			delete(a.recentSigs, s)
+			delete(a.recentRegs, s)
+		}
+	}
+	for s, t := range a.preAuthRegs {
+		if now.Sub(t) >= regReplayWindow {
+			delete(a.preAuthRegs, s)
 		}
 	}
 }

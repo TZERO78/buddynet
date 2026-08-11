@@ -18,7 +18,15 @@ package protocol
 // observer on the plain-UDP control plane can no longer read it. Servers accept
 // both (sealed preferred), but the strict version check means server and buddies
 // must be updated together.
-const Version = 6
+//
+// v7 (BREAKING, no compatibility shim): REGISTER carries a per-attempt Nonce and
+// the registration signature now covers every field the server acts on — version,
+// role, token, id, pubkey, virtual IP, name, timestamp, nonce and the sealed
+// enrollment code (see RegistrationPayload). A v6 client's signature does not
+// verify under v7 and is NOT accepted under the old rules: the version check
+// rejects it first, with a clear "update buddynet" message, rather than silently
+// falling back to the weaker payload. Server and buddies must be updated together.
+const Version = 7
 
 // MaxFieldLen bounds untrusted string fields (token, id, pubkey, virtual IP)
 // before they are used as map keys on a server that takes raw internet input.

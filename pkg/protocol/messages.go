@@ -1,6 +1,10 @@
 package protocol
 
-import "encoding/json"
+import (
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+)
 
 // Type is the discriminator of a control-plane message. One UDP datagram is one
 // JSON-encoded Message; Type selects which fields are meaningful.
@@ -93,9 +97,12 @@ type Message struct {
 	VirtualIP string `json:"virtual_ip,omitempty"` // sender's 10.66.X.Y
 	Name      string `json:"name,omitempty"`       // self-asserted .buddy name (optional)
 
-	// Key-ownership proof for an allowlist (approval-mode) handshake server: the
-	// peer signs RegistrationPayload(token,id,pubkey,ts) with its private key.
+	// Key-ownership proof for the handshake server: the peer signs
+	// RegistrationPayload(m) with its private key. Nonce is fresh per attempt, so
+	// the server can reject a replay by (PubKey,Nonce) without treating a normal
+	// re-poll — which a waiting buddy does about once a second — as an attack.
 	Ts     int64  `json:"ts,omitempty"`
+	Nonce  string `json:"nonce,omitempty"` // base64url, exactly NonceLen bytes of CSPRNG
 	RegSig string `json:"reg_sig,omitempty"`
 
 	// Optional enrollment code, sealed to the server's identity key, so an
@@ -141,14 +148,72 @@ func PeerListPayload(token string, ts int64, peers []Peer) []byte {
 }
 
 // RegistrationPayload is the canonical byte string a peer signs to prove it owns
-// the public key it registers (approval mode). The server reconstructs it from
-// the received fields and verifies the signature against PubKey.
-func RegistrationPayload(token, id, pubkey string, ts int64) []byte {
+// the public key it registers. The server reconstructs it from the received
+// fields and verifies the signature against PubKey.
+//
+// It covers EVERY field the server acts on, so none of them can be altered in
+// flight: the protocol version and role (a downgrade or role swap is a different
+// message), the pairing token, the identity triple (id/pubkey/virtual IP), the
+// self-asserted name the server relays to the partner, the freshness timestamp,
+// the per-attempt nonce, and the sealed enrollment code (so a code cannot be
+// lifted off one registration and pasted onto another key's).
+//
+// Two fields are deliberately NOT covered:
+//
+//   - Cookie — the UDP address-validation token. It is minted by the server and
+//     verified against the server's own HMAC key and the packet's source IP, so
+//     a signature over it would add nothing; and the client must be able to
+//     attach a freshly challenged cookie without re-deriving anything else.
+//   - TokenEnc — the sealed form of the token. It must first decrypt under the
+//     server's identity key; what gets signed is the recovered plaintext Token,
+//     which is the value every downstream check actually uses.
+//
+// The caller passes the message with Token already holding the PLAINTEXT token
+// (the client sets it before sealing; the server sets it after unsealing).
+func RegistrationPayload(m Message) []byte {
 	b, _ := json.Marshal(struct {
-		Token  string `json:"token"`
-		ID     string `json:"id"`
-		PubKey string `json:"pubkey"`
-		Ts     int64  `json:"ts"`
-	}{token, id, pubkey, ts})
+		Ver       int    `json:"ver"`
+		Role      Role   `json:"role"`
+		Token     string `json:"token"`
+		ID        string `json:"id"`
+		PubKey    string `json:"pubkey"`
+		VirtualIP string `json:"virtual_ip"`
+		Name      string `json:"name"`
+		Ts        int64  `json:"ts"`
+		Nonce     string `json:"nonce"`
+		CodeEnc   string `json:"code_enc"`
+	}{m.Ver, m.Role, m.Token, m.ID, m.PubKey, m.VirtualIP, m.Name, m.Ts, m.Nonce, m.CodeEnc})
 	return b
+}
+
+// NonceLen is the raw byte length of a REGISTER nonce: 128 bits of CSPRNG, so
+// two honest registrations never collide and an attacker cannot pre-compute one.
+const NonceLen = 16
+
+// nonceB64Len is the exact base64url (unpadded) length of a NonceLen nonce. The
+// wire format is fixed-length, so the server can reject a malformed nonce on a
+// length check before decoding.
+const nonceB64Len = (NonceLen*8 + 5) / 6 // 22
+
+// NewNonce returns a fresh base64url-encoded REGISTER nonce. It must be called
+// once per registration ATTEMPT — reusing one across polls is what makes the
+// server's replay defense fire on a legitimate client.
+func NewNonce() (string, error) {
+	b := make([]byte, NonceLen)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// ValidNonce reports whether s is a well-formed REGISTER nonce: exactly
+// nonceB64Len base64url characters decoding to exactly NonceLen bytes. Strict on
+// both length and alphabet, so a nonce can never be used to smuggle a large or
+// oddly-encoded value into the server's replay cache keys.
+func ValidNonce(s string) bool {
+	if len(s) != nonceB64Len {
+		return false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(s)
+	return err == nil && len(raw) == NonceLen
 }
