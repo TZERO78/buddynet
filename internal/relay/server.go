@@ -278,7 +278,7 @@ func (s *Server) Run(conn *net.UDPConn) {
 		// Isolate a panic to the single datagram, never the read loop / process.
 		safe.Do("relay.packet", func() {
 			if b, ok := ParseBind(pkt); ok {
-				s.bind(conn, b, src)
+				s.bind(conn, b, src, len(pkt))
 				return
 			}
 			s.forward(conn, src, pkt)
@@ -291,7 +291,7 @@ func (s *Server) Run(conn *net.UDPConn) {
 // without a valid address-validation cookie is answered with a challenge and
 // creates NO state, so a spoofed source can never have a leg bound for it (the
 // relay's anti-reflection / anti-laundering guarantee).
-func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
+func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 	token := b.SessionToken
 	// Access control (optional): a source outside the allowlist may not bind a
 	// leg, so it cannot use the relay at all. Checked before the rate limiter so a
@@ -311,7 +311,15 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr) {
 	// so it can never echo a valid cookie — closing reflection before any binding.
 	if !s.validCookie(b.Cookie, src.IP) {
 		s.statChallenged.Add(1)
-		conn.WriteToUDP(MarshalChallenge(s.freshCookie(src.IP)), src)
+		// Answer only when the challenge is STRICTLY SMALLER than the bind that
+		// triggered it. The parser accepts a 17-byte bind (a one-character session
+		// token) while the challenge is a fixed 23 bytes, so without this gate the
+		// "smaller than the bind, never an amplifier" property held for realistic
+		// tokens but not for the smallest accepted one. A real bind carries a
+		// 22-character token (38 bytes), leaving 15 bytes of headroom.
+		if chal := MarshalChallenge(s.freshCookie(src.IP)); len(chal) < reqLen {
+			conn.WriteToUDP(chal, src)
+		}
 		return
 	}
 	s.mu.Lock()

@@ -22,6 +22,11 @@ func mustPrefixes(t *testing.T, cidrs ...string) []netip.Prefix {
 
 // With an allowlist that excludes the source, a bind is refused (no ack), so the
 // source cannot use the relay at all. With one that includes it, the bind acks.
+// testSessionToken is a realistically-sized session token: buddies derive 16
+// bytes of SHA-256 into 22 base64url characters (role.sessionToken), and the
+// relay refuses anything under MinSessionTokenLen.
+const testSessionToken = "T3stS3ss10nT0k3nAbCdEf"
+
 func TestRelayCIDRGate(t *testing.T) {
 	// Denied: loopback is not in 10.0.0.0/8.
 	denyConn := mustListen(t)
@@ -31,7 +36,7 @@ func TestRelayCIDRGate(t *testing.T) {
 
 	c := mustListen(t)
 	defer c.Close()
-	if err := BindLeg(c, denyDial, "tok", 500*time.Millisecond); err == nil {
+	if err := BindLeg(c, denyDial, testSessionToken, 500*time.Millisecond); err == nil {
 		t.Fatal("bind from a source outside --allow-cidr must be refused")
 	}
 
@@ -43,7 +48,7 @@ func TestRelayCIDRGate(t *testing.T) {
 
 	c2 := mustListen(t)
 	defer c2.Close()
-	if err := BindLeg(c2, allowDial, "tok", 2*time.Second); err != nil {
+	if err := BindLeg(c2, allowDial, testSessionToken, 2*time.Second); err != nil {
 		t.Fatalf("bind from an allowed source must succeed: %v", err)
 	}
 }

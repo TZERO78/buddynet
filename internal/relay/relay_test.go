@@ -2,16 +2,21 @@ package relay
 
 import (
 	"net"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
+// sessTok is a realistically-sized session token (22 base64url chars, what
+// role.sessionToken derives from 16 bytes of SHA-256).
+const sessTok = "AAAAAAAAAAAAAAAAAAAAAA"
+
 func TestParseBind(t *testing.T) {
-	pkt := MarshalBind(Bind{SessionToken: "sess123"})
+	pkt := MarshalBind(Bind{SessionToken: sessTok})
 	b, ok := ParseBind(pkt)
-	if !ok || b.SessionToken != "sess123" {
+	if !ok || b.SessionToken != sessTok {
 		t.Fatalf("round trip failed: %+v ok=%v", b, ok)
 	}
 	if _, ok := ParseBind([]byte("random QUIC bytes")); ok {
@@ -19,6 +24,16 @@ func TestParseBind(t *testing.T) {
 	}
 	if _, ok := ParseBind(MarshalBind(Bind{SessionToken: ""})); ok {
 		t.Fatal("empty session token must be rejected")
+	}
+	// A short token is guessable — and it is the ONLY thing splicing two legs
+	// together — so the parser refuses anything under MinSessionTokenLen. This also
+	// keeps every admitted bind larger than the challenge it may draw.
+	short := strings.Repeat("x", MinSessionTokenLen-1)
+	if _, ok := ParseBind(MarshalBind(Bind{SessionToken: short})); ok {
+		t.Fatalf("a %d-character session token must be rejected", len(short))
+	}
+	if _, ok := ParseBind(MarshalBind(Bind{SessionToken: strings.Repeat("x", MinSessionTokenLen)})); !ok {
+		t.Fatal("a token at exactly MinSessionTokenLen must be accepted")
 	}
 	// A challenge must round-trip and must not be mistaken for a bind.
 	cookie := make([]byte, CookieLen)
@@ -29,7 +44,7 @@ func TestParseBind(t *testing.T) {
 	if _, ok := ParseBind(chal); ok {
 		t.Fatal("a challenge must not parse as a bind")
 	}
-	if _, ok := ParseChallenge(MarshalBind(Bind{SessionToken: "x"})); ok {
+	if _, ok := ParseChallenge(MarshalBind(Bind{SessionToken: sessTok})); ok {
 		t.Fatal("a bind must not parse as a challenge")
 	}
 }
@@ -48,7 +63,6 @@ func TestRelayBindNeedsCookie(t *testing.T) {
 	// One uncookied bind (what a spoofer would send "from" the victim): the relay
 	// must answer with a challenge, never an ack, and bind no leg.
 	// A realistic 22-char session token (base64 of 16 bytes), as buddy.go mints.
-	const sessTok = "AAAAAAAAAAAAAAAAAAAAAA"
 	victim.WriteToUDP(MarshalBind(Bind{SessionToken: sessTok}), dial)
 	victim.SetReadDeadline(time.Now().Add(time.Second))
 	buf := make([]byte, 1500)
@@ -95,7 +109,7 @@ func TestRelayForwardsBlind(t *testing.T) {
 	b := mustListen(t)
 	defer b.Close()
 
-	const token = "pair-token"
+	const token = "pair-token-long-enough-1"
 	if err := BindLeg(a, dial, token, 2*time.Second); err != nil {
 		t.Fatalf("A bind: %v", err)
 	}
@@ -174,5 +188,24 @@ func TestChainCachedOnlyWhenNoLiveCandidates(t *testing.T) {
 	// Server gave nothing → cached candidates are the last resort.
 	if got := Chain(protocol.Peer{}, nil, "", cached); len(got) != 1 || got[0].Desc == "" {
 		t.Fatalf("cached path expected: %+v", got)
+	}
+}
+
+// Anti-amplification as a PROPERTY, not as a spot check: for every session token
+// the parser accepts, the challenge it may draw must be strictly smaller than the
+// bind. The old tests only ever used a realistic 22-character token, so the
+// smallest accepted bind (17 bytes against a 23-byte challenge) went unnoticed.
+func TestChallengeIsSmallerThanEveryAcceptedBind(t *testing.T) {
+	s := NewServer(2*time.Second, nil, 0, 0)
+	chal := len(MarshalChallenge(s.freshCookie(net.IPv4(198, 51, 100, 7))))
+	for n := 1; n <= protocol.MaxFieldLen; n++ {
+		pkt := MarshalBind(Bind{SessionToken: strings.Repeat("x", n)})
+		if _, ok := ParseBind(pkt); !ok {
+			continue // refused by the parser: it can never draw a challenge
+		}
+		if chal >= len(pkt) {
+			t.Fatalf("a %d-character token yields a %d-byte bind but a %d-byte challenge — amplifier",
+				n, len(pkt), chal)
+		}
 	}
 }

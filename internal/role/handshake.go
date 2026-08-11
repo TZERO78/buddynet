@@ -633,7 +633,7 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 	// source that has proven return-routability.
 	if !validCookie(m.Cookie, src.IP) {
 		hsStats.challenged.Add(1)
-		sendCookie(conn, src)
+		sendCookie(conn, src, len(raw))
 		hsDebugf("challenged unvalidated register id=%s from %s", m.ID, src)
 		return
 	}
@@ -1009,13 +1009,27 @@ func validCookie(c string, ip net.IP) bool {
 		hmac.Equal([]byte(c), []byte(computeCookie(ip, now-1)))
 }
 
-// sendCookie replies with an address-validation challenge. The reply is smaller
-// than the REGISTER that triggered it, so it is never a useful amplifier.
-func sendCookie(conn *net.UDPConn, src *net.UDPAddr) {
+// sendCookie replies with an address-validation challenge, but only when the
+// reply is STRICTLY SMALLER than the datagram that triggered it (reqLen is the
+// raw datagram, not the parsed message — otherwise the property would hang off
+// the field layout again).
+//
+// Without that gate the challenge is a small amplifier: the parser accepts a
+// 40-byte REGISTER (`{"type":"REGISTER","token":"x","id":"x"}`) and answers it
+// with 59 bytes — 1.48x, or 1.28x once IP/UDP headers are counted. Tiny, and the
+// per-source rate limit bounds it further, but "never an amplifier" was written
+// as an absolute and has to hold as one. Comparing the two lengths makes it true
+// by construction rather than by the current encoding happening to be favourable.
+//
+// A real buddy sends ~410 bytes, so the gate has ~350 bytes of headroom and never
+// fires on legitimate traffic.
+func sendCookie(conn *net.UDPConn, src *net.UDPAddr, reqLen int) {
 	reply := protocol.Message{Type: protocol.TypeCookie, Ver: protocol.Version, Cookie: freshCookie(src.IP)}
-	if b, err := json.Marshal(reply); err == nil {
-		conn.WriteToUDP(b, src)
+	b, err := json.Marshal(reply)
+	if err != nil || len(b) >= reqLen {
+		return
 	}
+	conn.WriteToUDP(b, src)
 }
 
 // deriveSubkey derives a purpose-specific 32-byte key from the identity seed via
