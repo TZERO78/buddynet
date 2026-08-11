@@ -755,3 +755,62 @@ func TestPairedLatchIsReleasedWhenTheTokenIsReaped(t *testing.T) {
 		t.Error("a token that paired again after expiring was never logged — the latch is permanent")
 	}
 }
+
+// The paired-once latch must also be released on the INLINE expiry path, with no
+// reaper involved at all: upsert drops peers whose TTL has passed while it looks
+// for a partner, so a token can lose its partner and gain a new one between two
+// reap ticks — or in a registry whose reaper was never started.
+//
+// Deliberately no reg.reap() here. If this test needed one, it would be testing
+// the path that was already fixed.
+func TestPairedLatchResetsWithoutTheReaper(t *testing.T) {
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
+	yPub, yPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	xB64 := base64.StdEncoding.EncodeToString(xPub)
+	yB64 := base64.StdEncoding.EncodeToString(yPub)
+	tokenLogKey = []byte("test-log-key")
+
+	reg := newHSRegistry(80 * time.Millisecond)
+	regOnce := func(priv ed25519.PrivateKey, id, pk string, port int) string {
+		t.Helper()
+		return captureLog(t, func() {
+			pairRegister(reg, nil, "", v4(port), signReg(t, priv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: id, PubKey: pk}))
+		})
+	}
+
+	// 1./2. A and X pair; announced exactly once.
+	regOnce(aPriv, "A", aB64, 1000)
+	if out := regOnce(xPriv, "X", xB64, 2000); strings.Count(out, "PAIRED:") != 1 {
+		t.Fatalf("setup: first pairing produced %d PAIRED lines, want 1", strings.Count(out, "PAIRED:"))
+	}
+
+	// 3. X goes stale. A re-registers: upsert expires X INLINE while looking for a
+	//    partner, so the token is back to one live peer.
+	time.Sleep(120 * time.Millisecond)
+	reg.mu.Lock()
+	_, xStillThere := reg.waiting["tok"]["X"]
+	reg.mu.Unlock()
+	if !xStillThere {
+		t.Fatal("setup: X should still be in the bucket until an upsert expires it")
+	}
+	regOnce(aPriv, "A", aB64, 1000)
+	reg.mu.Lock()
+	live := len(reg.waiting["tok"])
+	latched := len(reg.pairedLogged)
+	reg.mu.Unlock()
+	if live != 1 {
+		t.Fatalf("after the inline expiry the token holds %d peers, want 1 (A only)", live)
+	}
+	if latched != 0 {
+		t.Errorf("the paired-once latch survived the drop to one live peer (%d entries) — "+
+			"a genuinely new pairing on this token will never be announced", latched)
+	}
+
+	// 4./5. A NEW second peer arrives: this is a new pairing and must be logged.
+	if out := regOnce(yPriv, "Y", yB64, 3000); strings.Count(out, "PAIRED:") != 1 {
+		t.Fatalf("the new pairing produced %d PAIRED lines, want exactly 1", strings.Count(out, "PAIRED:"))
+	}
+}

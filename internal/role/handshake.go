@@ -272,6 +272,17 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 		partner = p
 		break
 	}
+	// The pair is DOWN to fewer than two live peers, so release the paired-once
+	// latch: the next time two peers meet on this token it is a genuinely new
+	// pairing and has to be announced again.
+	//
+	// This path matters on its own, without the reaper: the loop above expires
+	// peers inline, so a token can lose its partner and gain a new one between two
+	// reap ticks — or with no reaper running at all. Only clearing the latch in the
+	// reaper (and in eviction) left it set across exactly that transition.
+	if partner == nil {
+		delete(r.pairedLogged, m.Token)
+	}
 	return self, partner, true
 }
 
