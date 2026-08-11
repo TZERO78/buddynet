@@ -374,8 +374,14 @@ func TestUnapprovedKeysCannotOccupyTheReplayCache(t *testing.T) {
 
 	// A stranger now hammers the server with valid, self-signed registrations —
 	// far more than the cache can hold.
+	//
+	// The enrollment limiter has to come OFF for the flood to be a flood: at 2/s
+	// per source it admits about four of these before the loop is done, so with it
+	// in place the cache never fills and this test asserted its property over an
+	// almost-empty map. A real attacker is not bounded by the test's wall clock.
 	stranger, _ := testNode(t)
 	stranger.serverPub = approved.serverPub
+	authz.enroll = nil
 	for i := 0; i < maxReplayRegs+64; i++ {
 		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
@@ -587,9 +593,12 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 		t.Fatal("the approved registration should have been accepted")
 	}
 
-	// A stranger floods far past the pre-auth cache's capacity.
+	// A stranger floods far past the pre-auth cache's capacity. As above, the
+	// limiter comes off so the flood actually reaches the cache — otherwise the
+	// eviction path this test exists for is never executed at all.
 	stranger, _ := testNode(t)
 	stranger.serverPub = approved.serverPub
+	authz.enroll = nil
 	for i := 0; i < maxPreAuthRegs+256; i++ {
 		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
@@ -606,6 +615,12 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 	}
 	if preAuthEntries > maxPreAuthRegs {
 		t.Fatalf("pre-auth cache grew to %d, past its cap of %d", preAuthEntries, maxPreAuthRegs)
+	}
+	// The point of the flood: the cache must actually have FILLED, or the eviction
+	// path below is never exercised and the assertion that follows is vacuous.
+	if preAuthEntries < maxPreAuthRegs {
+		t.Fatalf("pre-auth cache only reached %d of %d entries — the flood never filled it, "+
+			"so this test proves nothing about eviction", preAuthEntries, maxPreAuthRegs)
 	}
 	// The decisive assertion: the approved buddy's registration is STILL caught.
 	if _, ok := pairRegister(reg, authz, "", v4(3000), victim); ok {
