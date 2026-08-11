@@ -82,6 +82,9 @@ type authorizer struct {
 	logged     map[string]time.Time
 	pend       map[string]pendingEntry
 	recentRegs map[string]time.Time // "pubkey\x00nonce" -> first seen (replay defense)
+	// missing latches "the allowlist file is not there", so the warning is logged
+	// once per disappearance rather than on every poll.
+	missing bool
 }
 
 // Enrollment ceilings. An enrolling client sends one REGISTER per second and only
@@ -116,12 +119,18 @@ func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error
 	return a, nil
 }
 
+// reload replaces the in-memory allowlist from disk. A MISSING file is not an
+// error and does not fall back to anything: it loads as an EMPTY allowlist, i.e.
+// zero authorized clients. Approval mode is decided by the --authorized flag
+// alone, never by whether the file happens to exist.
 func (a *authorizer) reload() error {
 	keys, mtime, err := readAuthorized(a.path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			a.mu.Lock()
 			a.keys = map[string]string{}
+			a.mtime = time.Time{}
+			a.missing = true
 			a.mu.Unlock()
 			return nil
 		}
@@ -133,8 +142,12 @@ func (a *authorizer) reload() error {
 	return nil
 }
 
+// authzPollInterval is how often the allowlist file is re-checked for changes
+// (an edit, an approve/revoke, or the file disappearing entirely).
+const authzPollInterval = 2 * time.Second
+
 func (a *authorizer) watch(ctx context.Context) {
-	t := time.NewTicker(2 * time.Second)
+	t := time.NewTicker(authzPollInterval)
 	defer t.Stop()
 	for {
 		select {
@@ -142,21 +155,66 @@ func (a *authorizer) watch(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		fi, err := os.Stat(a.path)
-		if err != nil {
-			continue
-		}
-		a.mu.RLock()
-		changed := !fi.ModTime().Equal(a.mtime)
-		a.mu.RUnlock()
-		if changed {
-			if err := a.reload(); err != nil {
-				log.Printf("authorized reload: %v", err)
-			} else {
-				log.Printf("AUTHZ: action=reload count=%d", a.count())
-			}
-		}
+		a.pollOnce()
 	}
+}
+
+// pollOnce is one iteration of the allowlist watch, factored out so it can be
+// driven directly in tests without waiting on the ticker.
+func (a *authorizer) pollOnce() {
+	fi, err := os.Stat(a.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// The file is GONE. Approval mode stays on and the in-memory allowlist is
+			// emptied: "no allowlist" must mean "nobody may pair", never "everybody
+			// may". Previously this branch just skipped the tick, so a deleted
+			// allowlist left the last-loaded keys authorized indefinitely — a revoke
+			// by `rm` silently did nothing.
+			a.noteMissing()
+			return
+		}
+		// Any other stat error (a permission problem, transient I/O) is not evidence
+		// that the operator revoked anything, so the loaded allowlist is kept.
+		return
+	}
+	a.mu.Lock()
+	changed := !fi.ModTime().Equal(a.mtime)
+	restored := a.missing
+	a.missing = false
+	a.mu.Unlock()
+	if !changed {
+		return
+	}
+	if err := a.reload(); err != nil {
+		log.Printf("authorized reload: %v", err)
+		return
+	}
+	if restored {
+		log.Printf("AUTHZ: action=restored count=%d detail=%q", a.count(), "allowlist file is back; entries reloaded")
+		return
+	}
+	log.Printf("AUTHZ: action=reload count=%d", a.count())
+}
+
+// noteMissing empties the allowlist because its file has disappeared, and says so
+// ONCE per disappearance. The watch runs every couple of seconds, so logging
+// unconditionally would write the same warning forever; the latch is cleared when
+// the file comes back, so a later deletion is reported again.
+func (a *authorizer) noteMissing() {
+	a.mu.Lock()
+	dropped := len(a.keys)
+	already := a.missing
+	a.keys = map[string]string{}
+	// Zero the mtime so the file is reloaded whenever it reappears, even if it is
+	// restored from a backup carrying an older timestamp than the one we last saw.
+	a.mtime = time.Time{}
+	a.missing = true
+	a.mu.Unlock()
+	if already {
+		return
+	}
+	log.Printf("WARNING: allowlist %s no longer exists — approval mode stays ON with ZERO authorized clients "+
+		"(%d dropped); no buddy can pair until the file is restored or a key is approved again", a.path, dropped)
 }
 
 func (a *authorizer) allowed(pubkey string) bool {
