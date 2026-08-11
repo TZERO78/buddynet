@@ -15,6 +15,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/ratelimit"
 )
 
 // pendingTTL bounds how long an un-approved enrollment lingers in the pending DB.
@@ -67,6 +68,14 @@ type authorizer struct {
 	pendDB   string
 	selfPriv ed25519.PrivateKey
 
+	// enroll gates work done for keys that are NOT on the allowlist. Since an
+	// unknown key may now complete the TLS handshake (that is what makes code-based
+	// enrollment possible at all), the per-registration cost it can trigger — a
+	// sealed-code X25519 open, a pending-map insert, a pending-file rewrite — must
+	// be bounded far more tightly than the cost an approved buddy causes. Its own
+	// limiter, so a stranger flood can never eat an allowlisted buddy's budget.
+	enroll *ratelimit.Limiter
+
 	mu         sync.RWMutex
 	keys       map[string]string
 	mtime      time.Time
@@ -74,6 +83,15 @@ type authorizer struct {
 	pend       map[string]pendingEntry
 	recentRegs map[string]time.Time // "pubkey\x00nonce" -> first seen (replay defense)
 }
+
+// Enrollment ceilings. An enrolling client sends one REGISTER per second and only
+// until the operator approves it, so a couple of attempts per second per source is
+// ample; anything beyond that is a stranger probing or flooding.
+const (
+	rlEnrollGlobalRate = 20   // admitted unknown-key registrations/sec, all sources
+	rlEnrollSrcRate    = 2    // admitted unknown-key registrations/sec per source
+	rlEnrollMaxSources = 1024 // bound on the tracked-source map
+)
 
 type pendingEntry struct {
 	Key  string
@@ -89,6 +107,7 @@ func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error
 		logged:     map[string]time.Time{},
 		pend:       map[string]pendingEntry{},
 		recentRegs: map[string]time.Time{},
+		enroll:     ratelimit.New(rlEnrollGlobalRate, rlEnrollSrcRate, rlEnrollMaxSources),
 	}
 	if err := a.reload(); err != nil {
 		return nil, err
@@ -145,6 +164,16 @@ func (a *authorizer) allowed(pubkey string) bool {
 	defer a.mu.RUnlock()
 	_, ok := a.keys[pubkey]
 	return ok
+}
+
+// allowEnroll reports whether an unknown key from src may have enrollment work
+// done for it this second. A test-constructed authorizer with no limiter is
+// treated as unlimited; the production constructor always installs one.
+func (a *authorizer) allowEnroll(src string) bool {
+	if a.enroll == nil {
+		return true
+	}
+	return a.enroll.Allow(src)
 }
 
 func (a *authorizer) count() int {

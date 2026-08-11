@@ -5,10 +5,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
-	"errors"
+	"crypto/tls"
+	"io"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
 )
 
 // TestQUICRejectsMITM verifies that dialing with the wrong partner key fails at
@@ -68,7 +71,7 @@ func TestControlRoundtripAndSocketReuse(t *testing.T) {
 		t.Fatalf("server listen: %v", err)
 	}
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -125,7 +128,7 @@ func TestControlRejectsWrongServerKey(t *testing.T) {
 
 	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -141,23 +144,70 @@ func TestControlRejectsWrongServerKey(t *testing.T) {
 	}
 }
 
-// In approval mode the server pins clients by key at the TLS handshake: an
-// allowlisted client connects, a non-allowlisted one is refused before any REGISTER.
-func TestControlPinsClientKey(t *testing.T) {
+// The control server AUTHENTICATES every client by key at the TLS handshake and
+// reports the authenticated identity to the application layer — but it authorizes
+// nobody there. An unknown key must be able to complete the handshake, otherwise
+// a client enrolling with a code could never deliver it (the app layer is what
+// then allows, enrols or refuses it).
+func TestControlReportsAuthenticatedClientKey(t *testing.T) {
 	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
 	srvPub := srvPriv.Public().(ed25519.PublicKey)
-	okPub, okPriv, _ := ed25519.GenerateKey(rand.Reader)
-	_, foePriv, _ := ed25519.GenerateKey(rand.Reader)
 
 	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	defer srvConn.Close()
-	verify := func(pub ed25519.PublicKey) error {
-		if pub.Equal(okPub) {
-			return nil
-		}
-		return errors.New("not allowlisted")
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	if err != nil {
+		t.Fatalf("ListenControl: %v", err)
 	}
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, verify)
+	defer srv.Close()
+	seen := make(chan ed25519.PublicKey, 4)
+	go func() {
+		for {
+			req, err := srv.Accept(context.Background())
+			if err != nil {
+				return
+			}
+			seen <- req.ClientKey
+			req.Reply([]byte("ok"))
+		}
+	}()
+	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
+
+	// A client the server has never heard of: the handshake completes and its
+	// identity is handed up, so an enrollment code could reach the app layer.
+	strangerPub, strangerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	cliConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	defer cliConn.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cli, err := DialControl(ctx, cliConn, srvAddr, srvPub, strangerPriv, 30*time.Second)
+	if err != nil {
+		t.Fatalf("an unknown client must still be able to connect (enrollment): %v", err)
+	}
+	defer cli.Close()
+	if _, err := cli.Roundtrip(ctx, []byte("hi")); err != nil {
+		t.Fatalf("roundtrip failed: %v", err)
+	}
+
+	select {
+	case got := <-seen:
+		if !got.Equal(strangerPub) {
+			t.Fatalf("ClientKey = %x, want the key the client authenticated with %x", got, strangerPub)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("no request reached the application layer")
+	}
+}
+
+// A client that presents no certificate at all must be refused at the TLS layer:
+// enrollment relaxes AUTHORIZATION, never authentication.
+func TestControlRequiresAClientCertificate(t *testing.T) {
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	srvPub := srvPriv.Public().(ed25519.PublicKey)
+
+	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	defer srvConn.Close()
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -173,30 +223,32 @@ func TestControlPinsClientKey(t *testing.T) {
 	}()
 	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
 
-	// Allowlisted client: handshake + roundtrip succeed.
-	okConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	defer okConn.Close()
+	cliConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	defer cliConn.Close()
+	tr := &quic.Transport{Conn: cliConn}
+	defer tr.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cli, err := DialControl(ctx, okConn, srvAddr, srvPub, okPriv, 30*time.Second)
+	// Same pinning as DialControl, but deliberately WITHOUT a client certificate.
+	qc, err := tr.Dial(ctx, srvAddr, &tls.Config{
+		InsecureSkipVerify:    true, //nosec G402 -- server identity is pinned below, as in DialControl
+		MinVersion:            tls.VersionTLS13,
+		NextProtos:            []string{controlALPN},
+		VerifyPeerCertificate: pinnedPeerVerify(srvPub),
+	}, controlQUICConf(30*time.Second))
 	if err != nil {
-		t.Fatalf("allowlisted client rejected: %v", err)
+		return // refused during the handshake, as intended
 	}
-	if _, err := cli.Roundtrip(ctx, []byte("hi")); err != nil {
-		t.Fatalf("allowlisted roundtrip failed: %v", err)
+	defer qc.CloseWithError(0, "")
+	st, err := qc.OpenStreamSync(ctx)
+	if err != nil {
+		return // refused as soon as the missing certificate is noticed
 	}
-	cli.Close()
-
-	// Non-allowlisted client: the TLS handshake (and thus any roundtrip) must fail.
-	foeConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	defer foeConn.Close()
-	fctx, fcancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer fcancel()
-	foe, err := DialControl(fctx, foeConn, srvAddr, srvPub, foePriv, 30*time.Second)
-	if err == nil {
-		if _, rerr := foe.Roundtrip(fctx, []byte("hi")); rerr == nil {
-			t.Fatal("non-allowlisted client completed a roundtrip; want rejection")
-		}
-		foe.Close()
+	if _, err := st.Write([]byte("hi")); err != nil {
+		return
+	}
+	st.Close()
+	if b, err := io.ReadAll(io.LimitReader(st, 64)); err == nil && len(b) > 0 {
+		t.Fatalf("a client with no certificate was served: %q", b)
 	}
 }

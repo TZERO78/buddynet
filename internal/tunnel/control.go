@@ -73,20 +73,24 @@ func pinnedPeerVerify(want ed25519.PublicKey) func([][]byte, [][]*x509.Certifica
 	}
 }
 
-// clientKeyVerify returns a TLS VerifyPeerCertificate (server side) that hands the
-// client's Ed25519 identity to allow. It lets the handshake server pin CLIENTS to
-// its allowlist during the TLS handshake — so a non-allowlisted buddy is refused
-// before it can send a REGISTER (the same early rejection kernel WireGuard gives),
-// not merely at the app layer afterwards. Used only in approval mode; open mode
-// passes nil.
-func clientKeyVerify(allow func(ed25519.PublicKey) error) func([][]byte, [][]*x509.Certificate) error {
-	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-		pk, err := peerEd25519FromCerts(rawCerts)
-		if err != nil {
-			return err
-		}
-		return allow(pk)
-	}
+// requireEd25519Client is the server-side TLS VerifyPeerCertificate for the
+// control plane. It requires a client certificate carrying an Ed25519 key —
+// nothing more.
+//
+// Deliberately NOT an allowlist gate. Refusing unknown keys here made
+// code-based enrollment impossible: a client that has never been approved could
+// never complete the handshake, so its sealed enrollment code could never reach
+// the application layer, so the operator could never approve it. Authorization
+// belongs one layer up, where an unknown key WITH a valid code becomes a pending
+// enrollment and an unknown key without one is refused (see role.pairRegister).
+//
+// What this still buys is proof of possession: TLS 1.3 with a required client
+// certificate makes the client sign the handshake transcript (CertificateVerify),
+// so the key handed to the application layer is one the peer demonstrably holds
+// the private half of — not merely one it claimed.
+func requireEd25519Client(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+	_, err := peerEd25519FromCerts(rawCerts)
+	return err
 }
 
 func controlQUICConf(idle time.Duration) *quic.Config {
@@ -156,9 +160,15 @@ func (c *ControlClient) Close() error {
 
 // ControlRequest is one received REGISTER awaiting a reply.
 type ControlRequest struct {
-	Remote  net.Addr
-	Payload []byte
-	st      *quic.Stream
+	Remote net.Addr
+	// ClientKey is the Ed25519 identity the client AUTHENTICATED with in the TLS
+	// handshake (it signed the transcript with the matching private key). The
+	// handshake server requires REGISTER.PubKey to equal it, so a registration can
+	// never claim an identity the connection did not prove.
+	ClientKey ed25519.PublicKey
+	Payload   []byte
+	st        *quic.Stream
+	qc        *quic.Conn
 }
 
 // Reply writes b as the response and closes the stream. A parked registration
@@ -167,6 +177,16 @@ func (r *ControlRequest) Reply(b []byte) error {
 	_, err := r.st.Write(b)
 	r.st.Close()
 	return err
+}
+
+// Drop closes the whole CONNECTION without answering. Used when a request is not
+// merely unauthorized but structurally abusive — e.g. a REGISTER claiming a
+// public key other than the one the TLS handshake authenticated — so the peer
+// does not get to retry on the same connection.
+func (r *ControlRequest) Drop(reason string) {
+	r.st.CancelRead(0)
+	r.st.Close()
+	r.qc.CloseWithError(0, reason)
 }
 
 // ControlServer is the handshake server's QUIC control listener.
@@ -181,22 +201,22 @@ type ControlServer struct {
 // ListenControl starts a QUIC control listener on conn, presenting the server's
 // identity certificate. conn is owned by the caller; Close leaves it open.
 //
-// verifyClient pins CLIENTS by key during the TLS handshake (approval mode): a
-// non-nil callback requires every client to present a certificate whose Ed25519
-// key it accepts, so a non-allowlisted buddy is refused before sending a REGISTER.
-// Pass nil in open mode — any client may connect and is gated at the app layer.
-func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duration, verifyClient func(ed25519.PublicKey) error) (*ControlServer, error) {
+// Every client must present an Ed25519 client certificate and prove possession of
+// its private key in the TLS handshake. The authenticated key is handed to the
+// application layer on each ControlRequest (ClientKey), which is what lets the
+// handshake server bind REGISTER.PubKey to the key that actually authenticated —
+// and decide, per key, between "allowlisted", "enrolling with a code" and
+// "refused". The TLS layer itself makes no authorization decision.
+func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duration) (*ControlServer, error) {
 	tr := &quic.Transport{Conn: conn}
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{selfSignedCert(priv)},
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{controlALPN},
-		ClientAuth:   tls.NoClientCert, // open mode: clients gated at the app layer
-	}
-	if verifyClient != nil {
-		// Approval mode: demand and pin a client certificate at the TLS layer.
-		tlsConf.ClientAuth = tls.RequireAnyClientCert
-		tlsConf.VerifyPeerCertificate = clientKeyVerify(verifyClient)
+		// RequireAnyClientCert + an Ed25519 check: authentication (who holds this
+		// key), never authorization (may this key pair) — see requireEd25519Client.
+		ClientAuth:            tls.RequireAnyClientCert,
+		VerifyPeerCertificate: requireEd25519Client,
 	}
 	ln, err := tr.Listen(tlsConf, controlQUICConf(idle))
 	if err != nil {
@@ -231,22 +251,45 @@ func (s *ControlServer) acceptConns() {
 }
 
 func (s *ControlServer) acceptStreams(qc *quic.Conn) {
+	// The authenticated client identity is a property of the CONNECTION, so it is
+	// extracted once here and carried on every request from it. ClientAuth is
+	// RequireAnyClientCert and VerifyPeerCertificate insists on an Ed25519 leaf, so
+	// a connection that got this far always has one; bail out defensively if not,
+	// rather than serving requests with an unknown identity.
+	clientKey, err := clientKeyOf(qc)
+	if err != nil {
+		qc.CloseWithError(0, "client identity unavailable")
+		return
+	}
 	for {
 		st, err := qc.AcceptStream(context.Background())
 		if err != nil {
 			return // connection closed
 		}
-		safe.Go("control.read", func() { s.readRequest(qc, st) })
+		safe.Go("control.read", func() { s.readRequest(qc, clientKey, st) })
 	}
 }
 
-func (s *ControlServer) readRequest(qc *quic.Conn, st *quic.Stream) {
+// clientKeyOf returns the Ed25519 identity the peer authenticated with.
+func clientKeyOf(qc *quic.Conn) (ed25519.PublicKey, error) {
+	certs := qc.ConnectionState().TLS.PeerCertificates
+	if len(certs) == 0 {
+		return nil, errors.New("peer presented no certificate")
+	}
+	pk, ok := certs[0].PublicKey.(ed25519.PublicKey)
+	if !ok {
+		return nil, errors.New("peer certificate is not an Ed25519 identity")
+	}
+	return pk, nil
+}
+
+func (s *ControlServer) readRequest(qc *quic.Conn, clientKey ed25519.PublicKey, st *quic.Stream) {
 	payload, err := io.ReadAll(io.LimitReader(st, maxControlReq))
 	if err != nil {
 		st.Close()
 		return
 	}
-	req := &ControlRequest{Remote: qc.RemoteAddr(), Payload: payload, st: st}
+	req := &ControlRequest{Remote: qc.RemoteAddr(), ClientKey: clientKey, Payload: payload, st: st, qc: qc}
 	select {
 	case s.reqs <- req:
 	case <-s.done:

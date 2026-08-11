@@ -5,11 +5,33 @@ By default the handshake server pairs any two buddies that share a valid token.
 key appears in the authorized-clients file may pair. Everyone else is logged as
 pending and silently dropped.
 
-With `--quic-handshake` (recommended), the allowlist is also enforced at the **TLS
-handshake**: a buddy presents its identity certificate and a non-allowlisted key is
-refused before it can send a `REGISTER` — strangers never reach the matchmaking
-logic. On plain UDP the allowlist is enforced at the application layer (the REGISTER
-is parsed, then dropped). Either way, only allowlisted keys can pair.
+### Where the two checks happen
+
+BuddyNet separates **authentication** ("which key is this?") from
+**authorization** ("may that key pair?"), and they run at different layers:
+
+| Layer | With `--quic-handshake` | On plain UDP |
+|---|---|---|
+| **Authentication** | TLS 1.3 client certificate: every client must present an Ed25519 identity **and prove possession** of its private key in the handshake. `REGISTER.pubkey` must then equal that authenticated key, or the connection is closed and nothing is stored. | The `reg_sig` key-ownership proof on the `REGISTER` itself. |
+| **Authorization** | Application layer, per `REGISTER`: allowlisted → pair; unknown **with** a valid enrollment code → recorded as pending; unknown without one → refused. | Identical. |
+
+Either way, **only allowlisted keys can pair.**
+
+> **Why authorization is not done at the TLS handshake.** It used to be: the QUIC
+> server refused any client key that was not already on the allowlist. That made
+> code-based enrollment (Flow B below) impossible — a client that has never been
+> approved could not complete the handshake, so its encrypted enrollment code
+> could never reach the server's application layer, so the operator could never
+> approve it. An unknown key is now allowed to *authenticate* so it can deliver
+> its code; it is still never allowed to *pair*.
+>
+> This does not weaken key pinning. An unknown client can do exactly two things:
+> be noted in the log, or (with a valid code) become a pending entry. Because the
+> registration is bound to the TLS-authenticated key **and** the sealed code is
+> covered by the registration signature, a stranger can only ever enroll **its
+> own** key — it cannot bind a code, captured or invented, to somebody else's.
+> Unknown keys are also rate-limited far more tightly than allowlisted ones, so
+> the enrollment path cannot be used to flood the pending database or the log.
 
 This is the right mode for:
 - A shared VPS where you control who can rendezvous.
@@ -27,8 +49,14 @@ buddynet --role=handshake \
   --authorized /etc/buddynet/authorized_clients
 ```
 
-The file is created automatically on first `approve`. If the file does not exist
-on startup the server runs in open mode and logs a reminder.
+The file is created automatically on first `approve`.
+
+> **`--authorized` is fail-closed.** Passing the flag puts the server in approval
+> mode, unconditionally. A missing allowlist file means **zero authorized
+> clients**, not open mode — nobody can pair until you `approve` someone. If the
+> file is deleted while the server is running, the in-memory allowlist is cleared
+> within the reload interval and the server logs a WARNING; recreating the file
+> loads its entries again.
 
 The file is **hot-reloaded every 2 seconds** — adding or revoking a key takes
 effect within 2 s without restarting the server.
@@ -86,9 +114,13 @@ approves the code without ever seeing the raw key.
    in `authorized_clients.pending`, and logs:
 
    ```
-   AUTHZ: action=pending key=abc12345 code="MY_ENROLLMENT_CODE" — approve with:
-     buddynet --role=handshake --authorized /etc/buddynet/authorized_clients allowclient MY_ENROLLMENT_CODE
+   AUTHZ: action=pending key=abc12345 code=78c86dc0 — approve with:
+     buddynet --role=handshake --authorized /etc/buddynet/authorized_clients approve <CLIENT_KEY>
    ```
+
+   The log line carries a **non-reversible hash** of the code, never the code
+   itself — it is a bearer secret and logs get shipped off-box. The public key is
+   printed in full on purpose: it is not a secret, and it is the command you need.
 
 3. The operator approves the code:
 
@@ -99,7 +131,10 @@ approves the code without ever seeing the raw key.
    ```
 
    The key that presented the code is moved from `.pending` to the authorized
-   file. The client's next registration attempt succeeds.
+   file. The running server hot-reloads within 2 s and the client's **next
+   registration attempt succeeds — no restart on either side.** (Each attempt
+   carries a fresh nonce and signature, so a client polling while it waits for
+   approval is never mistaken for a replay.)
 
 ## Subcommands
 
@@ -163,10 +198,22 @@ registered with a `--code` but have not been approved yet. Entries older than
 
 ## Security properties
 
-- **Replay protection.** In approval mode every `REGISTER` message carries a
-  timestamp and is signed with the client's private key. The server accepts
-  registrations only within ±60 s of its clock and caches recent signatures to
-  detect replays across that window.
+- **Replay protection.** Every `REGISTER` carries a timestamp and a fresh
+  128-bit nonce, and is signed with the client's private key over all of it. The
+  server accepts registrations only within ±60 s of its clock and caches recent
+  `(pubkey, nonce)` pairs to detect replays across that window. Because the nonce
+  is per attempt, ordinary polling is not a replay; re-sending a captured
+  registration verbatim is.
+
+- **Registration binding.** The signature covers the protocol version, role,
+  token, id, public key, virtual IP, name, timestamp, nonce and sealed enrollment
+  code — so none of them can be altered in flight, and a captured code cannot be
+  grafted onto another key. On QUIC the registration must additionally name the
+  key the TLS handshake authenticated.
+
+- **Enrollment rate limit.** Unknown keys get their own, much tighter limiter
+  (per source and global) than allowlisted clients, so a stranger flood can
+  neither consume an approved buddy's budget nor grow the pending database.
 
 - **Flood caps.** The pending map and the log-dedup map are bounded at 1024
   entries each. A flood of registrations from fresh keys fills the cap, then

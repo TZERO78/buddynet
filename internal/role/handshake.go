@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -439,20 +438,15 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 // so a polling buddy makes progress). QUIC's handshake already validated the
 // source address, so no cookie is needed; the rate limiter still bounds load.
 func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
-	// In approval mode, pin clients to the allowlist during the TLS handshake so a
-	// non-allowlisted buddy is refused before it can send a REGISTER (the same early
-	// rejection kernel WireGuard gives). Open mode leaves client auth at the app layer.
-	var verifyClient func(ed25519.PublicKey) error
+	// The TLS handshake AUTHENTICATES every client (Ed25519 client certificate,
+	// proof of possession) but authorizes none: enrollment needs an unknown key to
+	// be able to deliver its sealed code, which a TLS-layer allowlist gate makes
+	// impossible. The allowlist decision happens in pairRegister instead.
 	if authz != nil {
-		verifyClient = func(pub ed25519.PublicKey) error {
-			if authz.allowed(bcrypto.PubKeyB64(pub)) {
-				return nil
-			}
-			return errors.New("client key is not on the allowlist")
-		}
-		log.Print("approval mode: QUIC control pins clients to the allowlist at the TLS handshake")
+		log.Print("approval mode: QUIC control authenticates every client by key at the TLS handshake; " +
+			"the allowlist decision (allow / enroll with a code / refuse) is made per REGISTER")
 	}
-	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout, verifyClient)
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
 	if err != nil {
 		return err
 	}
@@ -489,6 +483,17 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	if !ok {
 		hsStats.dropped.Add(1)
 		req.Reply(nil)
+		return
+	}
+	// Bind the registration to the identity the TLS handshake actually proved. A
+	// REGISTER claiming any other public key is not a failed authorization, it is a
+	// forgery attempt: drop the connection and store NOTHING — no pending
+	// enrollment, no peer, no roster entry.
+	if !registrationMatchesTLSKey(m, req.ClientKey) {
+		hsStats.keyMismatch.Add(1)
+		hsDebugf("closing control conn from %s: REGISTER claims key %s but the TLS handshake authenticated %s",
+			src, keyTag(m.PubKey), keyTag(bcrypto.PubKeyB64(req.ClientKey)))
+		req.Drop("registration key does not match the authenticated client key")
 		return
 	}
 	// QUIC validated the source address in its own handshake, so an incompatible
@@ -538,7 +543,9 @@ type hsCounters struct {
 	dropped       atomic.Int64 // malformed / over-cap / failed proof
 	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
 	squatRejected atomic.Int64 // 3rd-party register rejected on full slot (slot already squatted)
-	replay        atomic.Int64 // approval-mode registration signature replayed
+	replay        atomic.Int64 // approval-mode registration replayed (key+nonce reused)
+	keyMismatch   atomic.Int64 // REGISTER claimed a key other than the TLS-authenticated one
+	enrollLimited atomic.Int64 // unknown-key enrollment attempt refused by the enrollment rate limit
 
 	// lastPanic is the process-wide recovered-panic total observed at the previous
 	// stats tick, so logLoop can report the per-interval delta. Touched only by the
@@ -562,6 +569,7 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
 		npk, sq, rp := c.newPubKey.Swap(0), c.squatRejected.Swap(0), c.replay.Swap(0)
+		km, el := c.keyMismatch.Swap(0), c.enrollLimited.Swap(0)
 		// Per-interval count of panics recovered by safe.Do/Go across the process. A
 		// non-zero delta means a crafted input reliably trips a parser (ours or a
 		// dependency's) — invisible otherwise, since each panic is only logged once
@@ -569,13 +577,16 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		total := safe.PanicCount()
 		pan := total - c.lastPanic
 		c.lastPanic = total
-		if pa|ch|rl|dr|npk|sq|rp == 0 && pan == 0 {
+		if pa|ch|rl|dr|npk|sq|rp|km|el == 0 && pan == 0 {
 			continue // idle interval: stay quiet
 		}
 		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d challenged=%d rate-limited=%d dropped=%d",
 			statsInterval, pa, ch, rl, dr)
-		if npk > 0 || sq > 0 || rp > 0 || pan > 0 {
-			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d panics=%d", npk, sq, rp, pan)
+		if el > 0 {
+			line += fmt.Sprintf(" enroll-limited=%d", el)
+		}
+		if npk > 0 || sq > 0 || rp > 0 || km > 0 || pan > 0 {
+			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d key-mismatch=%d panics=%d", npk, sq, rp, km, pan)
 		}
 		log.Print(line)
 	}
@@ -705,6 +716,20 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			return nil, false
 		}
 		if !authz.allowed(m.PubKey) {
+			// Unknown key. It authenticated (its signature verified, and on QUIC its
+			// TLS certificate matched), which is exactly what lets an enrolling client
+			// deliver its sealed code — but it is NOT authorized, so it never pairs
+			// here. With a valid code it becomes a pending enrollment awaiting the
+			// operator; without one it is only noted.
+			//
+			// Both branches cost real work (an X25519 open, a map insert, a file
+			// rewrite, a log line), so gate them behind the tight enrollment limiter
+			// first: a stranger flood must not be able to spend an approved buddy's
+			// budget, fill the disk with pending entries, or fill the log.
+			if !authz.allowEnroll(src.IP.String()) {
+				hsStats.enrollLimited.Add(1)
+				return nil, false
+			}
 			if m.CodeEnc != "" {
 				authz.recordPending(m.CodeEnc, m.PubKey)
 			} else {
@@ -791,6 +816,25 @@ func verifyRegistration(m protocol.Message, skew time.Duration) bool {
 		return false
 	}
 	return ed25519.Verify(ed25519.PublicKey(pub), protocol.RegistrationPayload(m), sig)
+}
+
+// registrationMatchesTLSKey reports whether a REGISTER claims exactly the
+// identity its QUIC/TLS connection authenticated with. Compared on the raw key
+// bytes, so an alternative base64 spelling of the same key cannot slip past.
+//
+// This is what makes app-layer enrollment safe: an unknown client is allowed to
+// complete the TLS handshake so it can deliver its sealed enrollment code, but it
+// can only ever enroll the key it proved possession of — it cannot bind a code
+// (its own or a captured one) to somebody else's public key.
+func registrationMatchesTLSKey(m protocol.Message, clientKey ed25519.PublicKey) bool {
+	if len(clientKey) != ed25519.PublicKeySize {
+		return false
+	}
+	claimed, err := base64.StdEncoding.DecodeString(m.PubKey)
+	if err != nil || len(claimed) != ed25519.PublicKeySize {
+		return false
+	}
+	return clientKey.Equal(ed25519.PublicKey(claimed))
 }
 
 // deriveVIP enforces the project's core invariant server-side: the virtual IP is
