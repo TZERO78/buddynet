@@ -26,7 +26,15 @@ package protocol
 // verify under v7 and is NOT accepted under the old rules: the version check
 // rejects it first, with a clear "update buddynet" message, rather than silently
 // falling back to the weaker payload. Server and buddies must be updated together.
-const Version = 7
+//
+// v8 (BREAKING): the plain-UDP control plane is GONE. The handshake control plane
+// is QUIC/TLS 1.3 only, so the address-validation cookie it needed
+// (Message.Cookie, TypeCookie) is removed from the wire — QUIC validates the
+// source address in its own handshake. The cleartext Message.Token is no longer
+// serialised either: the pairing token travels exclusively as TokenEnc, sealed to
+// the server's pinned key. A v7 server and a v8 buddy cannot talk; upgrade both.
+// (The RELAY keeps its own cookie — a relay bind is always plain UDP.)
+const Version = 8
 
 // MaxFieldLen bounds untrusted string fields (token, id, pubkey, virtual IP)
 // before they are used as map keys on a server that takes raw internet input.

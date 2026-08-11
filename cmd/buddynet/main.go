@@ -105,7 +105,6 @@ func main() {
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
 	debug := flag.Bool("debug", false, "handshake: verbose logging of parked/dropped packets (not for production)")
-	quicHandshake := flag.Bool("quic-handshake", true, "encrypt the handshake control plane with QUIC/TLS 1.3 — the secure default. Pass --quic-handshake=false (or BUDDYNET_QUIC=0) for legacy PLAIN UDP, where the token travels in cleartext. Set the SAME on the server and every buddy.")
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
 	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]")
@@ -177,15 +176,6 @@ func main() {
 			*dnsFlag = true
 		}
 	}
-	// QUIC (encrypted) is the secure default; BUDDYNET_QUIC=0/false opts out to the
-	// legacy cleartext plain-UDP control plane (for headless setups that pass env,
-	// not flags). =1/true is accepted too (a redundant explicit opt-in).
-	switch os.Getenv("BUDDYNET_QUIC") {
-	case "0", "false":
-		*quicHandshake = false
-	case "1", "true":
-		*quicHandshake = true
-	}
 	if !*lazyFlag {
 		if v := os.Getenv("BUDDYNET_LAZY"); v == "1" || v == "true" {
 			*lazyFlag = true
@@ -235,7 +225,7 @@ func main() {
 		// Interactive only when not explicitly disabled AND a human is at the
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
-		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
+		ephemeral: ephemeral, inviteTimeout: *inviteTimeout,
 		reauthInterval: *reauthInterval,
 		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
 		expose: *expose,
@@ -282,7 +272,7 @@ func main() {
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
 					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
-					QUIC: *quicHandshake, AllowCIDRs: allowedCIDRs,
+					AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
@@ -382,7 +372,7 @@ type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	peersFile                                                               string
 	localListen, forward, vipListen, name, expose                           string
-	lab, status, interactive, ephemeral, quic, dns, lazy, wireguard         bool
+	lab, status, interactive, ephemeral, dns, lazy, wireguard               bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
 
@@ -407,7 +397,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		LocalListen: a.localListen, Forward: a.forward, VIPListen: a.vipListen,
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
-		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
+		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout,
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
 		WireGuard: a.wireguard, Expose: a.exposeScope(),

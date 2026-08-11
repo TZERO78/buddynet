@@ -71,7 +71,7 @@ func enrollClient(t *testing.T, srvAddr *net.UDPAddr, srvPub ed25519.PublicKey, 
 	}
 	defer cli.Close()
 
-	raw, err := buildRegister(BuddyConfig{Code: code}, nd, "tok", "")
+	raw, err := buildRegister(BuddyConfig{Code: code}, nd, "tok")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +212,7 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 	// registration is processed (it lands in pending), so anything that fails
 	// below fails because of the mismatch and nothing else.
 	const ownCode = "ATTACKER-OWN-CODE"
-	ownReg, err := buildRegister(BuddyConfig{Code: ownCode}, attacker, "tok", "")
+	ownReg, err := buildRegister(BuddyConfig{Code: ownCode}, attacker, "tok")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +232,7 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 	// Now the impersonation. Signed by the victim's key, sent over the attacker's
 	// authenticated connection.
 	const victimCode = "VICTIM-CODE-XYZ"
-	forged, err := buildRegister(BuddyConfig{Code: victimCode}, victim, "tok", "")
+	forged, err := buildRegister(BuddyConfig{Code: victimCode}, victim, "tok")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 	// request on it must fail.
 	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer ncancel()
-	again, err := buildRegister(BuddyConfig{}, attacker, "tok", "")
+	again, err := buildRegister(BuddyConfig{}, attacker, "tok")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -346,7 +346,7 @@ func TestEnrollmentRateLimitIsStricterThanNormal(t *testing.T) {
 
 	// Burst well past the per-source enrollment allowance from one address.
 	for i := 0; i < 200; i++ {
-		m := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+		m := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(1000), m); ok {
 			t.Fatal("an unknown key must never pair")
 		}
@@ -367,7 +367,7 @@ func TestUnapprovedKeysCannotOccupyTheReplayCache(t *testing.T) {
 	reg := newHSRegistry(time.Minute)
 
 	// An approved buddy registers once; that attempt must stay protected.
-	victim := unmarshalRegister(t, mustBuild(t, approved, ""), srvPriv)
+	victim := unmarshalRegister(t, mustBuild(t, approved), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), victim); !ok {
 		t.Fatal("the approved registration should have been accepted")
 	}
@@ -383,7 +383,7 @@ func TestUnapprovedKeysCannotOccupyTheReplayCache(t *testing.T) {
 	stranger.serverPub = approved.serverPub
 	authz.enroll = nil
 	for i := 0; i < maxReplayRegs+64; i++ {
-		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
+		m := unmarshalRegister(t, mustBuild(t, stranger), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
 			t.Fatal("an unapproved key must never be accepted")
 		}
@@ -408,7 +408,7 @@ func TestUnknownKeyIsNotStored(t *testing.T) {
 	authz := newTestAuthorizer(t, srvPriv)
 	reg := newHSRegistry(time.Minute)
 
-	m := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	m := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), m); ok {
 		t.Fatal("an unknown key must not be accepted")
 	}
@@ -484,7 +484,7 @@ func TestPreApprovalRegistrationIsNotReplayableAfterApproval(t *testing.T) {
 	reg := newHSRegistry(time.Minute)
 
 	// Captured while the key is still unapproved.
-	captured := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	captured := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), captured); ok {
 		t.Fatal("an unapproved key must not pair")
 	}
@@ -515,7 +515,7 @@ func TestPreApprovalRegistrationIsNotReplayableAfterApproval(t *testing.T) {
 	}
 
 	// A genuinely fresh registration from the now-approved client must work.
-	fresh := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	fresh := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), fresh); !ok {
 		t.Fatal("the approved client cannot register with a fresh attempt")
 	}
@@ -588,7 +588,7 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 	reg := newHSRegistry(time.Minute)
 
 	// One approved registration, which must stay protected for its whole window.
-	victim := unmarshalRegister(t, mustBuild(t, approved, ""), srvPriv)
+	victim := unmarshalRegister(t, mustBuild(t, approved), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), victim); !ok {
 		t.Fatal("the approved registration should have been accepted")
 	}
@@ -600,7 +600,7 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 	stranger.serverPub = approved.serverPub
 	authz.enroll = nil
 	for i := 0; i < maxPreAuthRegs+256; i++ {
-		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
+		m := unmarshalRegister(t, mustBuild(t, stranger), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
 			t.Fatal("an unapproved key must never pair")
 		}
@@ -652,7 +652,7 @@ func TestMalformedRequestDropsTheConnection(t *testing.T) {
 	// Positive control on this very connection: a well-formed registration works,
 	// so anything failing below fails for the reason under test.
 	rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
-	resp, err := cli.Roundtrip(rctx, mustBuild(t, nd, ""))
+	resp, err := cli.Roundtrip(rctx, mustBuild(t, nd))
 	rcancel()
 	if err != nil || len(resp) == 0 {
 		t.Fatalf("positive control failed: a valid registration was not answered (%v)", err)
@@ -666,7 +666,7 @@ func TestMalformedRequestDropsTheConnection(t *testing.T) {
 	// The connection must be gone, not merely the request unanswered.
 	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer ncancel()
-	if resp, err := cli.Roundtrip(nctx, mustBuild(t, nd, "")); err == nil && len(resp) > 0 {
+	if resp, err := cli.Roundtrip(nctx, mustBuild(t, nd)); err == nil && len(resp) > 0 {
 		t.Fatal("the connection survived a malformed request; it must be closed")
 	}
 }

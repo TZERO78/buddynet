@@ -39,15 +39,6 @@ const (
 	// NAT mappings and registrations fresh.
 	TypePing Type = "PING"
 	TypePong Type = "PONG"
-
-	// TypeCookie is the handshake server's address-validation challenge on the
-	// UDP transport: when a REGISTER arrives without a valid Cookie, the server
-	// replies with one (smaller than the request, so never an amplifier) and does
-	// no further work. The client echoes it in Cookie on its next REGISTER. A
-	// spoofed source never receives the challenge, so it can never be answered —
-	// this is QUIC's Retry-token idea at the application layer, and it structurally
-	// removes the reflection vector on the plain-UDP transport.
-	TypeCookie Type = "COOKIE"
 )
 
 // Role is the explicit role a node runs as. BuddyNet never auto-detects a role;
@@ -89,8 +80,12 @@ type Message struct {
 	Ver  int  `json:"ver"` // sender's protocol Version; mismatch is reported clearly
 
 	// Identity / pairing (REGISTER).
-	Token     string `json:"token,omitempty"`      // shared secret pairing two buddies (cleartext; legacy/fallback)
-	TokenEnc  string `json:"token_enc,omitempty"`  // the pairing token SEALED to the server's pinned key (preferred; keeps it off the wire on plain UDP). The server unseals it to the same value Token would carry.
+	// Token is the pairing rendezvous in CLEARTEXT. It is deliberately NOT
+	// serialised (`json:"-"`): it never travels, it only carries the value the
+	// signature is computed over — the client sets it before sealing, the server
+	// after unsealing. TokenEnc is the one form that goes on the wire.
+	Token     string `json:"-"`
+	TokenEnc  string `json:"token_enc,omitempty"`  // the pairing token SEALED to the server's pinned key
 	Role      Role   `json:"role,omitempty"`       // sender's role
 	ID        string `json:"id,omitempty"`         // ephemeral per-run id
 	PubKey    string `json:"pubkey,omitempty"`     // base64 Ed25519 identity
@@ -108,12 +103,6 @@ type Message struct {
 	// Optional enrollment code, sealed to the server's identity key, so an
 	// operator can approve by a short code instead of the long public key.
 	CodeEnc string `json:"code_enc,omitempty"`
-
-	// Cookie is the server's address-validation token (UDP transport). The server
-	// sends it in a TypeCookie reply; the client echoes it on its next REGISTER.
-	// It binds to the source address and a short epoch, so it proves return-
-	// routability without the server holding per-source state.
-	Cookie string `json:"cookie,omitempty"`
 
 	// PEER_LIST payload (server -> peer). Peers is the roster; Sig is the
 	// server's signature over PeerListPayload(token, ts, peers).
@@ -158,15 +147,9 @@ func PeerListPayload(token string, ts int64, peers []Peer) []byte {
 // the per-attempt nonce, and the sealed enrollment code (so a code cannot be
 // lifted off one registration and pasted onto another key's).
 //
-// Two fields are deliberately NOT covered:
-//
-//   - Cookie — the UDP address-validation token. It is minted by the server and
-//     verified against the server's own HMAC key and the packet's source IP, so
-//     a signature over it would add nothing; and the client must be able to
-//     attach a freshly challenged cookie without re-deriving anything else.
-//   - TokenEnc — the sealed form of the token. It must first decrypt under the
-//     server's identity key; what gets signed is the recovered plaintext Token,
-//     which is the value every downstream check actually uses.
+// One field is deliberately NOT covered: TokenEnc, the sealed form of the token.
+// It must first decrypt under the server's identity key; what gets signed is the
+// recovered plaintext Token, which is the value every downstream check uses.
 //
 // The caller passes the message with Token already holding the PLAINTEXT token
 // (the client sets it before sealing; the server sets it after unsealing).

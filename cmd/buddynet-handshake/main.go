@@ -57,16 +57,6 @@ func main() {
 		"comma-separated CIDRs allowed to reach the server; other sources are dropped before any crypto (empty = open to all, the norm for a public server)")
 	debug := flag.Bool("debug", false, "verbose, security-sensitive logging (avoid on a public server — leaks pairing metadata)")
 
-	// QUIC/TLS 1.3 control plane is the secure default (the pairing token never
-	// travels in cleartext); BUDDYNET_QUIC=0/false opts out to legacy plain UDP.
-	quic := true
-	switch strings.ToLower(os.Getenv("BUDDYNET_QUIC")) {
-	case "0", "false", "no":
-		quic = false
-	}
-	quicFlag := flag.Bool("quic-handshake", quic,
-		"encrypt the control plane with QUIC/TLS 1.3 (secure default; set the SAME on every buddy)")
-
 	flag.Usage = usage
 	flag.Parse()
 
@@ -108,7 +98,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	log.Printf("buddynet-handshake %s starting (handshake-only, stateless; listen=%s quic=%v)", version, *listen, *quicFlag)
+	log.Printf("buddynet-handshake %s starting (handshake-only, stateless; listen=%s)", version, *listen)
 
 	// NOTE: RelayEndpoint and Authorized are intentionally NOT wired — this binary
 	// never relays and runs open. Use the full binary for those.
@@ -117,7 +107,6 @@ func main() {
 		KeyPath:    *keyPath,
 		TTL:        *ttl,
 		Debug:      *debug,
-		QUIC:       *quicFlag,
 		AllowCIDRs: allowed,
 	}); err != nil {
 		log.Fatalf("handshake: %v", err)
@@ -168,7 +157,7 @@ Usage:
   buddynet-handshake --key /path/id.key identity              # print the pinned key
 
 Recommended (stateless, key injected read-only):
-  buddynet-handshake --key "$CREDENTIALS_DIRECTORY/id.key" --quic-handshake
+  buddynet-handshake --key "$CREDENTIALS_DIRECTORY/id.key"
 
 Flags:
 `, version)

@@ -17,97 +17,14 @@ import (
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
-// buddyRegister sends REGISTER to every server address ~1/s until a signed
-// PEER_LIST arrives and verifies against the pinned server key, then returns the
-// (single, in 2-peer mode) partner.
+// buddyRegister registers over the QUIC control transport — the only one there
+// is since v8: it dials the server on the shared socket, then polls (a stream per
+// attempt) until a signed PEER_LIST names the partner. QUIC validates the source
+// address in its handshake, so no application-layer cookie is needed, and the
+// REGISTER travels inside TLS 1.3 rather than in the clear. Closing the control
+// client leaves the socket open, so the caller then hole-punches and runs the peer
+// tunnel on the very same mapping.
 func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, nd *node, rendezvous string, timeout time.Duration) (protocol.Peer, error) {
-	if cfg.QUIC {
-		return buddyRegisterQUIC(conn, serverAddrs, cfg, nd, rendezvous, timeout)
-	}
-	serverPub := nd.serverPub
-
-	deadline := time.Now().Add(timeout)
-	next := time.Now()
-	var lastLog time.Time
-	var skewNoted bool
-	// Cookies are per SERVER ADDRESS: the challenge is bound to the source IP the
-	// server saw, and a dual-stack socket reaches a v4 and a v6 server address from
-	// two different source addresses. One shared cookie would keep the other stack
-	// permanently challenged; keyed per address, both validate independently.
-	cookies := map[string]string{}
-	buf := make([]byte, 1500)
-	for time.Now().Before(deadline) {
-		if !time.Now().Before(next) {
-			// Sign a FRESH registration for every datagram: new nonce, new timestamp,
-			// new signature. Re-sending one signed blob would make the server's
-			// (PubKey,Nonce) replay defense fire on our own traffic — both on the next
-			// poll and, since a dual-stacked server resolves to several addresses, on
-			// the v6 copy of the very same tick. One nonce per datagram keeps the two
-			// stacks independent, which is what lets the server observe BOTH candidates.
-			for _, a := range serverAddrs {
-				reg, err := buildRegister(cfg, nd, rendezvous, cookies[a.String()])
-				if err != nil {
-					return protocol.Peer{}, err
-				}
-				conn.WriteToUDP(reg, a)
-			}
-			next = time.Now().Add(time.Second)
-			if time.Since(lastLog) >= 5*time.Second {
-				log.Print("RECONNECT: action=waiting detail=\"no peer with this token yet\"")
-				lastLog = time.Now()
-			}
-		}
-		conn.SetReadDeadline(next)
-		n, from, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			continue
-		}
-		var r protocol.Message
-		if json.Unmarshal(buf[:n], &r) != nil {
-			continue
-		}
-		// Address-validation challenge: adopt the cookie for the address that issued
-		// it and re-register at once (proving return-routability) instead of waiting
-		// for the next tick. The retry is a full re-sign — the cookie is not part of
-		// the signed payload, but the nonce and timestamp must still be fresh so the
-		// server does not see the follow-up as a replay of the challenged attempt.
-		if r.Type == protocol.TypeCookie {
-			if key := from.String(); r.Cookie != "" && r.Cookie != cookies[key] {
-				cookies[key] = r.Cookie
-				next = time.Now()
-			}
-			continue
-		}
-		if r.Type != protocol.TypePeerList {
-			continue
-		}
-		if r.Ver != protocol.Version {
-			return protocol.Peer{}, fmt.Errorf("incompatible protocol: server speaks v%d, we speak v%d — update buddynet", r.Ver, protocol.Version)
-		}
-		peers := canonicalPeers(r.Peers)
-		sig, err := base64.StdEncoding.DecodeString(r.Sig)
-		if err != nil || !ed25519.Verify(serverPub, protocol.PeerListPayload(rendezvous, r.Ts, peers), sig) {
-			return protocol.Peer{}, errors.New("server signature did not verify (wrong --server-key, or MITM)")
-		}
-		if d := time.Since(time.Unix(r.Ts, 0)); d > 60*time.Second || d < -60*time.Second {
-			noteSkew(d, &skewNoted) // signed but stale: almost always a clock-skew problem
-			continue                // wait for a fresh one
-		}
-		if len(peers) == 0 {
-			continue
-		}
-		conn.SetReadDeadline(time.Time{})
-		return peers[0], nil
-	}
-	return protocol.Peer{}, errors.New("timed out waiting for partner to register with the same token")
-}
-
-// buddyRegisterQUIC registers over the QUIC control transport: it dials the
-// server on the shared socket, then polls (a stream per attempt) until a signed
-// PEER_LIST names the partner. QUIC validates the source address, so no cookie
-// is needed. Closing the control client leaves the socket open, so the caller
-// then hole-punches and runs the peer tunnel on the very same mapping.
-func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, nd *node, rendezvous string, timeout time.Duration) (protocol.Peer, error) {
 	priv, serverPub := nd.priv, nd.serverPub
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -135,7 +52,7 @@ func buddyRegisterQUIC(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyC
 		// transport reuses a single connection, but each stream must carry its own
 		// nonce or the server sees the second poll as a replay. No cookie here —
 		// QUIC's own handshake validated the source address.
-		reg, berr := buildRegister(cfg, nd, rendezvous, "")
+		reg, berr := buildRegister(cfg, nd, rendezvous)
 		if berr != nil {
 			return protocol.Peer{}, berr
 		}
@@ -188,15 +105,12 @@ func noteSkew(d time.Duration, noted *bool) {
 
 // buildRegister marshals ONE registration attempt: a fresh nonce, a current
 // timestamp and a signature over both, plus the sealed token and (if enrolling)
-// the sealed enrollment code. cookie is the server's address-validation token on
-// the plain-UDP transport ("" on QUIC, which validates the address itself); it is
-// attached but NOT signed — the server checks it against its own HMAC key and the
-// packet's source IP.
+// the sealed enrollment code.
 //
 // Every caller must call this per ATTEMPT, never once per session: the server
 // rejects a repeated (PubKey,Nonce) as a replay, which is exactly what a
 // re-marshalled cached registration would look like.
-func buildRegister(cfg BuddyConfig, nd *node, rendezvous, cookie string) ([]byte, error) {
+func buildRegister(cfg BuddyConfig, nd *node, rendezvous string) ([]byte, error) {
 	nonce, err := protocol.NewNonce()
 	if err != nil {
 		return nil, fmt.Errorf("registration nonce: %w", err)
@@ -212,21 +126,13 @@ func buildRegister(cfg BuddyConfig, nd *node, rendezvous, cookie string) ([]byte
 		Name:      cfg.Name,
 		Ts:        time.Now().Unix(),
 		Nonce:     nonce,
-		Cookie:    cookie,
 	}
 	if cfg.Code != "" {
 		// Sealed BEFORE signing: CodeEnc is covered by the signature, so a captured
 		// enrollment code cannot be re-bound to a different public key.
-		//
-		// A sealing failure is an ERROR, not a silently code-less registration: the
-		// operator passed --code because they are waiting to approve this client, and
-		// dropping the field would leave them watching a `pending` line that never
-		// appears, with nothing anywhere saying why.
-		enc, serr := bcrypto.SealCode(cfg.Code, nd.serverPub)
-		if serr != nil {
-			return nil, fmt.Errorf("seal the enrollment code to the server key: %w", serr)
+		if enc, serr := bcrypto.SealCode(cfg.Code, nd.serverPub); serr == nil {
+			m.CodeEnc = enc
 		}
-		m.CodeEnc = enc
 	}
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(nd.priv, protocol.RegistrationPayload(m)))
 	if err := setToken(&m, rendezvous, nd.serverPub); err != nil {
@@ -236,23 +142,20 @@ func buildRegister(cfg BuddyConfig, nd *node, rendezvous, cookie string) ([]byte
 }
 
 // setToken puts the pairing rendezvous on a REGISTER, sealed to the server's
-// pinned identity key so it never travels in cleartext on the plain-UDP control
-// plane (an on-path observer sees only ciphertext). The signature is always over
-// the raw rendezvous, which the server recovers by unsealing.
+// pinned identity key. The signature is always over the RAW rendezvous, which the
+// server recovers by unsealing.
 //
-// A sealing failure is an ERROR rather than a fall back to the cleartext field.
-// That fallback put the pairing token on the wire unencrypted precisely when
-// something was already wrong — and silently, so an operator who had chosen the
-// plain-UDP transport would have had no way to notice that the one protection it
-// still had was gone. Refusing to register is the safe outcome: the buddy retries,
-// and a token that stays secret can still be used.
+// A sealing failure is now an ERROR rather than a silent fall back to the
+// cleartext field: that fallback would have put the pairing token on the wire in
+// the clear precisely when something was already wrong, and since v8 there is no
+// cleartext field to fall back to anyway.
 func setToken(m *protocol.Message, rendezvous string, serverPub ed25519.PublicKey) error {
 	enc, err := bcrypto.SealCode(rendezvous, serverPub)
 	if err != nil {
 		return fmt.Errorf("seal the pairing token to the server key: %w", err)
 	}
 	m.TokenEnc = enc
-	m.Token = "" // sealed form only on the wire; the signature still covers the plaintext
+	m.Token = "" // only the sealed form is serialised; the signature covers the plaintext
 	return nil
 }
 

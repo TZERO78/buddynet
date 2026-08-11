@@ -63,24 +63,38 @@ func TestSealedTokenRejectsGarbage(t *testing.T) {
 	}
 }
 
-// A plaintext token (legacy buddy) still works (server backward-compat), and a
-// register carrying BOTH forms is rejected.
+// The pairing token exists on the wire ONLY in its sealed form. The cleartext
+// field is not serialised any more (v8: Message.Token carries `json:"-"`), so a
+// registration without TokenEnc cannot be completed — there is no cleartext path
+// to fall back to, and an on-path observer never sees a token.
 func TestTokenFormsValidation(t *testing.T) {
-	_, priv, _ := ed25519.GenerateKey(rand.Reader)
-
+	// A message that sets the cleartext Token marshals WITHOUT it, so what arrives
+	// carries no token at all and is refused.
 	plain, _ := json.Marshal(protocol.Message{
 		Type: protocol.TypeRegister, Ver: protocol.Version, Token: "plain-tok", ID: "id1",
 	})
-	m, ok := parseRegister(plain)
-	if !ok || !resolveToken(&m, priv) || m.Token != "plain-tok" {
-		t.Fatal("plaintext token (legacy) must still pass")
+	if bytes.Contains(plain, []byte("plain-tok")) {
+		t.Fatalf("the cleartext token was serialised onto the wire: %s", plain)
+	}
+	if _, ok := parseRegister(plain); ok {
+		t.Fatal("a registration with no sealed token must be rejected")
 	}
 
-	both, _ := json.Marshal(protocol.Message{
-		Type: protocol.TypeRegister, Ver: protocol.Version, Token: "p", TokenEnc: "e", ID: "id1",
+	// The sealed form is what the server acts on.
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	enc, err := bcrypto.SealCode("real-tok", priv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealedMsg, _ := json.Marshal(protocol.Message{
+		Type: protocol.TypeRegister, Ver: protocol.Version, TokenEnc: enc, ID: "id1",
 	})
-	if _, ok := parseRegister(both); ok {
-		t.Fatal("a register with BOTH Token and TokenEnc must be rejected")
+	m, ok := parseRegister(sealedMsg)
+	if !ok {
+		t.Fatal("a sealed token must be accepted")
+	}
+	if !resolveToken(&m, priv) || m.Token != "real-tok" {
+		t.Fatalf("sealed token did not resolve to the plaintext: %q", m.Token)
 	}
 }
 

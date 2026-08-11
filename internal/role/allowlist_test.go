@@ -41,7 +41,7 @@ func TestMissingAllowlistIsFailClosed(t *testing.T) {
 	// which is what pairRegister keys the decision off.
 	nd, srvPriv := testNode(t)
 	a.selfPriv = srvPriv
-	m := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	m := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if _, ok := pairRegister(newHSRegistry(time.Minute), a, "", v4(1000), m); ok {
 		t.Fatal("a registration was accepted with an empty allowlist — the server fell open")
 	}

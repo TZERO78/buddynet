@@ -85,8 +85,6 @@ type BuddyConfig struct {
 	// UDP. It must match the handshake server's transport. QUIC validates the
 	// source address in its handshake (structural anti-reflection); UDP achieves
 	// the same with the address-validation cookie. Either way the SAME socket is
-	// then reused to hole-punch and run the peer tunnel.
-	QUIC bool
 
 	// Name is this node's self-asserted .buddy hostname (e.g. "alice" → alice.buddy).
 	// It is sent in REGISTER and relayed by the handshake server to the partner,
