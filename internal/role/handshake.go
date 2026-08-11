@@ -516,6 +516,14 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		}
 		return
 	}
+	// Same order as the UDP path: the key-ownership fields are required once the
+	// version agreed, and before the sealed token costs an X25519 open.
+	if !requireV7Fields(m) {
+		hsStats.dropped.Add(1)
+		hsDebugf("drop register without a v7 key-ownership proof id=%s from %s", m.ID, src)
+		req.Reply(nil)
+		return
+	}
 	if !resolveToken(&m, priv) {
 		hsStats.dropped.Add(1)
 		req.Reply(nil)
@@ -638,6 +646,14 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 		}
 		return
 	}
+	// Version agreed, so the key-ownership fields must be there. Checked before the
+	// sealed token is opened: a registration that cannot carry a valid proof must
+	// not buy an asymmetric operation.
+	if !requireV7Fields(m) {
+		hsStats.dropped.Add(1)
+		hsDebugf("drop register without a v7 key-ownership proof id=%s from %s", m.ID, src)
+		return
+	}
 	// Source validated and version agreed: only now is it worth an asymmetric
 	// operation to recover the sealed pairing token.
 	if !resolveToken(&m, priv) {
@@ -662,7 +678,8 @@ func parseRegister(raw []byte) (protocol.Message, bool) {
 		return m, false
 	}
 	if m.Type != protocol.TypeRegister || !validField(m.ID) ||
-		len(m.PubKey) > protocol.MaxFieldLen || len(m.CodeEnc) > maxCodeEncLen {
+		len(m.PubKey) > protocol.MaxFieldLen || len(m.CodeEnc) > maxCodeEncLen ||
+		len(m.Nonce) > protocol.MaxFieldLen {
 		return m, false
 	}
 	// The pairing token arrives sealed (TokenEnc, preferred — keeps it off a
@@ -681,7 +698,34 @@ func parseRegister(raw []byte) (protocol.Message, bool) {
 	// replyIncompatible) instead of being dropped in silence, so the operator sees
 	// "update buddynet" rather than an unexplained failure to pair. Callers check
 	// it only once the source address is validated.
+	//
+	// For the same reason the v7 key-ownership fields (PubKey/Nonce/RegSig) are
+	// only LENGTH-bounded here, never required: a v6 message carries no nonce at
+	// all, and rejecting it structurally would replace that diagnostic with a
+	// silent timeout. requireV7Fields enforces them AFTER the version check.
 	return m, true
+}
+
+// requireV7Fields rejects a registration that does not carry the three fields a
+// v7 key-ownership proof is made of. It is the cheap structural gate that makes
+// the proof MANDATORY: under v7 every buddy signs (buildRegister always sets all
+// three, and nothing but a buddy ever registers), so anything missing them is
+// either a forgery attempt or a client that must be told to update.
+//
+// Placement matters twice over. It runs AFTER the version check, so a v6 client
+// still gets "update buddynet" instead of silence; and BEFORE resolveToken, so a
+// message that can never produce a valid proof does not first earn a sealed-token
+// X25519 open. Cheap checks gate expensive ones, as everywhere else on this path.
+func requireV7Fields(m protocol.Message) bool {
+	if !protocol.ValidNonce(m.Nonce) {
+		return false
+	}
+	pub, err := base64.StdEncoding.DecodeString(m.PubKey)
+	if err != nil || len(pub) != ed25519.PublicKeySize {
+		return false
+	}
+	sig, err := base64.StdEncoding.DecodeString(m.RegSig)
+	return err == nil && len(sig) == ed25519.SignatureSize
 }
 
 // replyIncompatible answers a client speaking a different protocol version with a
@@ -720,11 +764,20 @@ func resolveToken(m *protocol.Message, priv ed25519.PrivateKey) bool {
 // pairing. It returns the partner roster to sign, or empty when parked, and
 // ok=false to drop (over-cap, or not allowed). The caller signs and sends.
 func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src *net.UDPAddr, m protocol.Message) (peers []protocol.Peer, ok bool) {
+	// KEY-OWNERSHIP PROOF FIRST, IN EVERY MODE. Under v7 there is no such thing as
+	// an unsigned client: buildRegister always signs, and nothing but a buddy ever
+	// registers. Verifying only "when a signature happens to be present" made the
+	// check optional for whoever left the field out — a registration could then
+	// claim SOMEONE ELSE'S public key (identity squat in the signed roster), or no
+	// key at all, in which case deriveVIP waved a made-up virtual IP through and
+	// the token's slots filled with something that cost no cryptography at all.
+	// requireV7Fields has already established that the three fields are structurally
+	// there; this is the actual proof.
+	if !verifyRegistration(m, regSkew) {
+		hsDebugf("drop register with an invalid key-ownership proof token=%s from %s", logTag(m.Token), src)
+		return nil, false
+	}
 	if authz != nil {
-		if !verifyRegistration(m, regSkew) {
-			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
-			return nil, false
-		}
 		// AUTHORIZATION BEFORE THE REPLAY CACHE. The cache is bounded and evicts its
 		// oldest entry when full (it must never fail open), so whoever can put
 		// entries in it can push others out. Checking the allowlist first means only
@@ -783,19 +836,13 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration nonce reused by the same key")
 			return nil, false
 		}
-	} else if m.RegSig != "" {
-		// Open mode (no allowlist): pairing is gated only by the secret token, so a
-		// signature is not strictly required. But a buddy always sends one, so when
-		// it IS present we verify it — proof-of-possession of the registered key.
-		// This stops a party who learned the token from registering under SOMEONE
-		// ELSE'S public key (e.g. squatting the victim's identity in the roster);
-		// it cannot stop the same party from registering under its own fresh key,
-		// which only token confidentiality prevents.
-		if !verifyRegistration(m, regSkew) {
-			hsDebugf("drop register with invalid key-ownership proof token=%s from %s", logTag(m.Token), src)
-			return nil, false
-		}
 	}
+	// In OPEN mode the proof above is all there is: it stops a party who learned
+	// the token from registering under someone else's public key, but it cannot
+	// stop that same party from registering under its own fresh key — only token
+	// confidentiality does, which is the documented residual of a bearer-token
+	// rendezvous (the impersonation is still caught downstream by --peer-key /
+	// TOFU+SAS).
 	// Identity is address: derive the virtual IP from the key rather than trusting
 	// the claim. Runs AFTER signature verification, so the value the client signed
 	// is the value that was checked.
@@ -891,7 +938,12 @@ func registrationMatchesTLSKey(m protocol.Message, clientKey ed25519.PublicKey) 
 // the address the key actually derives.
 func deriveVIP(m *protocol.Message, src *net.UDPAddr) bool {
 	if m.PubKey == "" {
-		return true // no key to derive from (open mode, unsigned legacy peer)
+		// Unreachable on the live paths since requireV7Fields — a keyless registration
+		// is refused long before this. Kept as a defensive no-op for direct callers
+		// (tests); it must never be the door it once was, when a keyless message
+		// skipped the derivation below and had its CLAIMED virtual IP signed into the
+		// roster.
+		return true
 	}
 	pub, err := bcrypto.DecodePubKey(m.PubKey)
 	if err != nil {
