@@ -603,18 +603,21 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 		hsDebugf("drop invalid datagram from %s", src)
 		return
 	}
-	if !resolveToken(&m, priv) {
-		hsStats.dropped.Add(1)
-		hsDebugf("drop register with undecryptable sealed token from %s", src)
-		return
-	}
 	// A REGISTER without a valid cookie gets only a (smaller) challenge and no
 	// further work. A spoofed source never receives the cookie, so it can never
 	// complete this step — closing reflection before any crypto or PEER_LIST.
+	//
+	// This check comes FIRST, before the sealed token is opened. Unsealing runs
+	// X25519 + NaCl box, orders of magnitude more expensive than an HMAC compare,
+	// and it must not be reachable from an unvalidated (and therefore spoofable)
+	// source: otherwise a flood of garbage TokenEnc blobs buys an attacker a full
+	// asymmetric operation per packet. Everything downstream of here — unsealing,
+	// signature verification, the sealed enrollment code — is only reached by a
+	// source that has proven return-routability.
 	if !validCookie(m.Cookie, src.IP) {
 		hsStats.challenged.Add(1)
 		sendCookie(conn, src)
-		hsDebugf("challenged unvalidated register token=%s from %s", logTag(m.Token), src)
+		hsDebugf("challenged unvalidated register id=%s from %s", m.ID, src)
 		return
 	}
 	// Source validated: an incompatible client now gets a clear answer rather than
@@ -624,6 +627,13 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 		if b, err := json.Marshal(replyIncompatible()); err == nil {
 			conn.WriteToUDP(b, src)
 		}
+		return
+	}
+	// Source validated and version agreed: only now is it worth an asymmetric
+	// operation to recover the sealed pairing token.
+	if !resolveToken(&m, priv) {
+		hsStats.dropped.Add(1)
+		hsDebugf("drop register with undecryptable sealed token from %s", src)
 		return
 	}
 	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)

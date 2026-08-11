@@ -284,6 +284,74 @@ func TestIncompatibleClientGetsAClearAnswer(t *testing.T) {
 	}
 }
 
+// A REGISTER from an unvalidated source must be answered with a cookie challenge
+// BEFORE the server spends an X25519 unseal on its sealed token. If the order
+// were reversed, a flood of garbage TokenEnc blobs from spoofed sources would buy
+// an attacker one asymmetric operation per packet — so a packet whose TokenEnc is
+// deliberately undecryptable must still get a challenge, not be dropped.
+func TestCookieIsCheckedBeforeTokenDecryption(t *testing.T) {
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvConn.Close()
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	cookieKey = deriveSubkey(srvPriv.Seed(), "buddynet-cookie-v1")
+	tokenLogKey = deriveSubkey(srvPriv.Seed(), "buddynet-logtag-v1")
+
+	reg := newHSRegistry(time.Minute)
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, src, rerr := srvConn.ReadFromUDP(buf)
+			if rerr != nil {
+				return
+			}
+			raw := append([]byte(nil), buf[:n]...)
+			handleRegister(srvConn, reg, srvPriv, nil, "", src, raw)
+		}
+	}()
+
+	cli, err := net.DialUDP("udp", nil, srvConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+
+	// A structurally valid REGISTER whose sealed token is pure garbage.
+	nd, _ := testNode(t)
+	m := protocol.Message{
+		Type:     protocol.TypeRegister,
+		Ver:      protocol.Version,
+		Role:     protocol.RoleBuddy,
+		ID:       nd.id,
+		PubKey:   nd.pub,
+		TokenEnc: base64.StdEncoding.EncodeToString([]byte("this will never decrypt")),
+		Ts:       time.Now().Unix(),
+	}
+	raw, _ := json.Marshal(m)
+	if _, err := cli.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1500)
+	n, err := cli.Read(buf)
+	if err != nil {
+		t.Fatal("no cookie challenge: the server decrypted (and dropped on) the token before validating the source")
+	}
+	var reply protocol.Message
+	if err := json.Unmarshal(buf[:n], &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Type != protocol.TypeCookie || reply.Cookie == "" {
+		t.Fatalf("got %+v, want a COOKIE challenge", reply)
+	}
+	if n >= len(raw) {
+		t.Fatalf("the challenge (%d B) must be smaller than the request (%d B) — never an amplifier", n, len(raw))
+	}
+}
+
 // newTestAuthorizer builds an approval-mode authorizer allowing exactly keys.
 func newTestAuthorizer(t *testing.T, srvPriv ed25519.PrivateKey, keys ...string) *authorizer {
 	t.Helper()
