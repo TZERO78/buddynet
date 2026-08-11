@@ -76,7 +76,7 @@ type BuddyConfig struct {
 	// Ephemeral marks an --invite/--join pairing: the Token is a short-lived,
 	// one-time invite. On the first SAS-confirmed pairing a long-lived session
 	// secret is derived from the channel binding and stored, and all later
-	// reconnects use THAT (never the invite again). Plain --token is the legacy
+	// reconnects use THAT (never the invite again). The fixed-token mode is gone
 	// fixed-token mode (Ephemeral=false): no session secret, token reused.
 	Ephemeral     bool
 	InviteTimeout time.Duration // give up first pairing after this long (default 15m)
@@ -352,7 +352,7 @@ func nextAttempt(cfg BuddyConfig) (attempt, error) {
 	if cfg.Token != "" {
 		return attempt{rendezvous: cfg.Token, inviteToken: cfg.Token, firstPairing: cfg.Ephemeral}, nil
 	}
-	return attempt{}, errors.New("no saved session and no token — use --invite or --join (or --token for the legacy fixed-token mode)")
+	return attempt{}, errors.New("no saved session and no invite token — use --invite to mint one, or --join <TOKEN> with the one your buddy gave you")
 }
 
 func randomID() string {

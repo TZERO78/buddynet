@@ -108,7 +108,6 @@ func main() {
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
 	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]")
-	token := flag.String("token", "", "buddy: legacy fixed pairing token, reused on every reconnect (--invite/--join instead use a one-time token + a stored session secret)")
 	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest)")
 	knownPeers := flag.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)")
 	lab := flag.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1.")
@@ -166,7 +165,6 @@ func main() {
 	*roleFlag = orEnv(*roleFlag, "BUDDYNET_ROLE")
 	*server = orEnv(*server, "BUDDYNET_SERVER")
 	*serverKey = orEnv(*serverKey, "BUDDYNET_SERVER_KEY")
-	*token = orEnv(*token, "BUDDYNET_TOKEN")
 	*peerKey = orEnv(*peerKey, "BUDDYNET_PEER_KEY")
 	*knownPeers = orEnv(*knownPeers, "BUDDYNET_KNOWN_PEERS")
 	*code = orEnv(*code, "BUDDYNET_CODE")
@@ -206,19 +204,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// The pairing token is now only ever a ONE-TIME invite: --invite mints one,
+	// --join carries the one your buddy gave you. Both retire it after the first
+	// pairing in favour of the stored session secret, so there is no longer a mode
+	// where a fixed token is replayed on every reconnect (that was --token, removed
+	// in v5: a long-lived bearer secret that anyone who ever learned it could use to
+	// squat the pairing, for as long as the pair existed).
+	token := ""
 	ephemeral := false
 	if hasBuddy {
 		if *join != "" {
-			*token = *join
+			token = *join
 			ephemeral = true
 		}
 		if *invite {
-			*token = mintInviteToken()
+			token = mintInviteToken()
 			ephemeral = true
 		}
 	}
 	bArgs := buddyArgs{
-		server: *server, serverKey: *serverKey, token: *token, peerKey: *peerKey,
+		server: *server, serverKey: *serverKey, token: token, peerKey: *peerKey,
 		knownPeers: *knownPeers, lab: *lab, code: *code, keyPath: *keyPath,
 		peersPath: *peersPath, peersFile: *peersFile, localListen: *localListen, forward: *forward, vipListen: *vipListen,
 		punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
@@ -423,7 +428,7 @@ func (a buddyArgs) validate() {
 	// A token is needed for a first pairing (--invite/--join/--token) and for a
 	// --status probe; once paired, a stored session lets you reconnect with none.
 	if a.status && a.token == "" {
-		fmt.Fprintln(os.Stderr, "error: --status needs --token (the pairing token)")
+		fmt.Fprintln(os.Stderr, "error: --status needs a pairing token — pass --join <TOKEN> (or run it where a session is already stored)")
 		os.Exit(2)
 	}
 	// --wireguard carries IP natively (each partner is reachable at its VIP over
@@ -468,8 +473,8 @@ func (a buddyArgs) validate() {
 	// listed buddy, so it cannot be combined with the single-peer pairing modes.
 	if a.peersFile != "" {
 		switch {
-		case a.token != "" || a.peerKey != "":
-			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --token/--peer-key (the manifest pins and pairs each buddy)")
+		case a.peerKey != "":
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --peer-key (the manifest pins and pairs each buddy)")
 			os.Exit(2)
 		case a.ephemeral:
 			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --invite/--join (use a bootstrap token per line in the manifest)")
@@ -528,9 +533,9 @@ func genToken() {
 		fmt.Println(tok)
 		return
 	}
-	fmt.Fprint(os.Stderr, `New pairing token (384-bit). Both buddies use the SAME value as --token (or
+	fmt.Fprint(os.Stderr, `New pairing token (384-bit). Give it to your buddy as --join (or
 --join). It's a bearer secret — keep it off the command line (prefer a 0600
-file or BUDDYNET_TOKEN) and pin each other with --peer-key.
+file) and pin each other with --peer-key.
 `)
 	secret.RevealUntilKey(tok)
 	fmt.Fprintln(os.Stderr, "Token hidden — copy it to your buddy before you lose it.")
@@ -741,7 +746,8 @@ SECURITY — please read
   • Pin your buddy with --peer-key (each buddy prints its identity at startup).
     Without a pin, first contact is verified by a Short Authentication String
     you compare out of band, then remembered in --known-peers.
-  • Keep the token off the command line: prefer BUDDYNET_TOKEN or a 0600 file.
+  • The invite token is one-time and retired after the first pairing; reconnects
+    use the stored session secret, so it never has to be kept around.
 
 TRANSPORT
   The handshake control plane is encrypted with QUIC/TLS 1.3 BY DEFAULT: the
