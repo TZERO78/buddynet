@@ -747,11 +747,31 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 				hsStats.enrollLimited.Add(1)
 				return nil, false
 			}
+			// Remember the nonce in the SEPARATE pre-auth cache. If the operator
+			// approves this key in a moment, whatever was sent beforehand must not
+			// suddenly become replayable — and no timestamp comparison can decide that,
+			// because the timestamp is the sender's to choose and may legitimately sit
+			// up to regSkew in the future, i.e. after the approval. Only a record of
+			// the nonce itself is sound. The separate cache is what keeps this from
+			// handing outsiders an eviction lever over approved buddies.
+			authz.recordPreAuth(m.PubKey, m.Nonce)
 			if m.CodeEnc != "" {
 				authz.recordPending(m.CodeEnc, m.PubKey)
 			} else {
 				authz.logPending(m.PubKey, logTag(m.Token))
 			}
+			return nil, false
+		}
+		// Second line of defence at the approval transition, behind the pre-auth
+		// nonce cache: refuse registrations whose timestamp predates the approval.
+		// On its own this would NOT be sound — the timestamp is the sender's to
+		// choose and may sit up to regSkew in the future — so it only catches what
+		// the nonce cache may have aged out or evicted. The nonce cache is the lock;
+		// this is the bolt.
+		if !authz.freshSinceApproval(m.PubKey, m.Ts) {
+			hsStats.replay.Add(1)
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration predates the key's approval")
 			return nil, false
 		}
 		if authz.replayed(m.PubKey, m.Nonce) {

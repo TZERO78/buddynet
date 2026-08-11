@@ -23,7 +23,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another key. The server also derives the virtual IP from the public key instead
   of trusting the claim. **Server and buddies must be upgraded together**; once the
   source is validated, a mismatched client gets a version-stamped reply and
-  reports "update buddynet" instead of timing out silently.
+  reports "update buddynet" instead of timing out silently. For a public server,
+  run v6 and v7 side by side on two ports and migrate buddies pair by pair —
+  see *Migrating a running server to v7* in [docs/PROTOCOL.md](docs/PROTOCOL.md).
+  Deliberately no compatibility shim: a v6 signature does not cover the fields v7
+  relies on, so honouring one would mean accepting a weaker proof.
+
+- **The approval transition no longer opens a replay window.** Because unapproved
+  keys are (correctly) kept out of the replay cache, a registration captured while
+  a key was still an outsider stayed replayable for the rest of its freshness
+  window the moment the operator approved it. Nonces from unapproved keys are now
+  remembered in a **separate** pre-auth cache with its own cap, TTL and eviction,
+  and both caches are consulted once a key is approved — so a flood of outsiders
+  can still only ever evict each other, never an approved buddy's entry.
+
+  A timestamp comparison against the approval instant is kept as a second line of
+  defence but is **not** sufficient on its own, and was wrong as the only check:
+  the timestamp is the sender's to choose and may legitimately sit up to `regSkew`
+  in the *future*, so a registration dated `now + 59 s` and sent before approval
+  passes such a comparison afterwards. Only remembering the nonce closes it.
 
 - **Code-based enrollment works again over QUIC, and is bound to the TLS key.**
   The QUIC control server refused any client key that was not already on the
@@ -69,6 +87,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   clients, warned once and reloaded when the file returns. `--authorized` alone
   decides the mode; the docs claimed a missing file fell back to open mode and
   have been corrected.
+
+### Known / deferred
+
+- **~100 unhandled-error sites (gosec G104) are still excluded wholesale.** The
+  exclusion is long-standing project policy (see `.github/workflows/ci.yml`) and
+  most sites are best-effort writes on UDP or on a stream that is being torn down
+  anyway. They have **not** been classified individually. The ones in the
+  production packages — `internal/role` (38) and `internal/tunnel` (16) — deserve
+  a pass of their own, keeping the exclusion only where a dropped error genuinely
+  cannot matter and handling the rest. Out of scope here so it does not ride along
+  with the remote- and approval-path fixes.
+- **`internal/tunnel/quic.go` still allows TLS session resumption** (gosec G123).
+  The control plane now disables it, because a resumed session does not re-run
+  `VerifyPeerCertificate`; the data plane was left alone in this changeset.
 
 ### Added
 

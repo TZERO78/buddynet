@@ -5,8 +5,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"net"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go"
+
+	"github.com/tzero78/buddynet/internal/safe"
 )
 
 // controlTestServer starts a control listener that echoes every request.
@@ -231,6 +236,14 @@ func TestIncompleteRequestTimesOut(t *testing.T) {
 	}
 }
 
+// setConnHandler installs (or clears) the per-connection handler override under
+// the server's own lock — acceptConns reads it from another goroutine.
+func setConnHandler(s *ControlServer, h func(*ControlServer, *quic.Conn)) {
+	s.connMu.Lock()
+	s.handler = h
+	s.connMu.Unlock()
+}
+
 // slotsHeld reports the server's current global connection count.
 func slotsHeld(s *ControlServer) int {
 	s.connMu.Lock()
@@ -358,6 +371,81 @@ func TestSlotsAreReleasedOnEveryExitPath(t *testing.T) {
 	srv.connMu.Unlock()
 	if entries != 0 {
 		t.Fatalf("per-source map still holds %d entries with no live connections", entries)
+	}
+}
+
+// A panic in the per-connection goroutine — which parses an attacker-supplied
+// certificate chain — must cost that connection and nothing else: the process
+// survives, the slot is released, and the server keeps serving other clients.
+func TestPanicInConnectionHandlerIsContained(t *testing.T) {
+	srv, srvAddr, srvPub := controlTestServer(t)
+
+	// A one-shot latch: ONLY the first connection blows up. (A buffered channel
+	// would not do — draining it below would re-arm the panic for the follow-up
+	// connection, and the test would hang instead of proving anything.)
+	var armed atomic.Bool
+	armed.Store(true)
+	panicked := make(chan struct{}, 1)
+	setConnHandler(srv, func(s *ControlServer, qc *quic.Conn) {
+		if armed.CompareAndSwap(true, false) {
+			panicked <- struct{}{}
+			panic("crafted connection")
+		}
+		s.acceptStreams(qc)
+	})
+	t.Cleanup(func() { setConnHandler(srv, nil) })
+
+	before := safe.PanicCount()
+
+	// A connection that makes the handler blow up.
+	boom, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer boom.Close()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	cli, err := DialControl(ctx, boom, srvAddr, srvPub, priv, 30*time.Second)
+	cancel()
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	select {
+	case <-panicked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the handler never ran")
+	}
+
+	// Reaching this line at all means the process survived the panic.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && safe.PanicCount() == before {
+		time.Sleep(50 * time.Millisecond)
+	}
+	if safe.PanicCount() <= before {
+		t.Fatal("the panic was not recovered and counted by safe.Do")
+	}
+
+	// The slot must be back — release() is deferred ahead of the recovery.
+	waitSlots(t, srv, 0, 5*time.Second)
+
+	// And the server must still serve the NEXT client normally.
+	next, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer next.Close()
+	_, priv2, _ := ed25519.GenerateKey(rand.Reader)
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	cli2, err := DialControl(ctx2, next, srvAddr, srvPub, priv2, 30*time.Second)
+	if err != nil {
+		t.Fatalf("the server stopped accepting after a panicking connection: %v", err)
+	}
+	defer cli2.Close()
+	if resp, rerr := cli2.Roundtrip(ctx2, []byte("hi")); rerr != nil || string(resp) != "ok" {
+		t.Fatalf("the server stopped serving after a panicking connection: resp=%q err=%v", resp, rerr)
 	}
 }
 

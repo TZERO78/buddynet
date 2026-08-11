@@ -160,6 +160,11 @@ func DialControl(ctx context.Context, conn *net.UDPConn, server *net.UDPAddr, se
 		NextProtos:            []string{controlALPN},
 		Certificates:          []tls.Certificate{selfSignedCert(priv)}, // our identity, for server-side client pinning
 		VerifyPeerCertificate: pinnedPeerVerify(serverPub),
+		// No session resumption on the control plane. A resumed session does NOT
+		// re-run VerifyPeerCertificate, so identity pinning would be enforced only on
+		// the original handshake (gosec G123). A control connection is short-lived and
+		// low-volume, so resumption buys nothing worth that caveat.
+		SessionTicketsDisabled: true,
 	}
 	qc, err := tr.Dial(ctx, server, tlsConf, controlQUICConf(idle, true))
 	if err != nil {
@@ -234,11 +239,29 @@ type ControlServer struct {
 	// Connection accounting. connMu guards all four fields so the global and
 	// per-source counters can never drift apart: they are taken together in admit
 	// and given back together in the release closure, which every exit path runs.
-	connMu    sync.Mutex
-	conns     int
+	connMu sync.Mutex
+	conns  int
+	// handler is the per-connection loop, overridable ONLY by a test that needs to
+	// substitute a panicking handler and prove that one crafted connection can take
+	// down neither the process nor its slot. It lives on the server (not in a
+	// package var) and under connMu because acceptConns reads it from its own
+	// goroutine — a plain global would be a data race, and would also leak between
+	// tests sharing the binary. nil means the production path.
+	handler   func(*ControlServer, *quic.Conn)
 	perIP     map[string]int // normalized source IP -> open connections
 	rejected  int64          // refusals since the last logged line
 	lastLogAt time.Time
+}
+
+// connLoop returns the per-connection handler: the test override if one is
+// installed, otherwise the production loop.
+func (s *ControlServer) connLoop() func(*ControlServer, *quic.Conn) {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	if s.handler != nil {
+		return s.handler
+	}
+	return (*ControlServer).acceptStreams
 }
 
 // ipKey normalizes a source address to one connection-accounting key. IPv4,
@@ -319,6 +342,11 @@ func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duratio
 		// key), never authorization (may this key pair) — see requireEd25519Client.
 		ClientAuth:            tls.RequireAnyClientCert,
 		VerifyPeerCertificate: requireEd25519Client,
+		// No session resumption: a resumed session skips the certificate exchange and
+		// does not re-run VerifyPeerCertificate (gosec G123). The authenticated client
+		// key is what the whole approval decision hangs on, so it must come from a
+		// handshake this connection actually performed, not a restored ticket.
+		SessionTicketsDisabled: true,
 	}
 	ln, err := tr.Listen(tlsConf, controlQUICConf(idle, false))
 	if err != nil {
@@ -351,9 +379,9 @@ func (s *ControlServer) acceptConns() {
 			defer release() // every exit path gives the slot back, exactly once
 			// Recover a panic here too: this goroutine parses an attacker-supplied
 			// certificate chain, and the project's rule is that one crafted input may
-			// cost its connection, never the process. release() still runs either way
-			// (it is deferred first), so the slot cannot leak on this path.
-			safe.Do("control.conn", func() { s.acceptStreams(qc) })
+			// cost its connection, never the process. release() is deferred FIRST, so
+			// it still runs while the panic unwinds and the slot cannot leak.
+			safe.Do("control.conn", func() { s.connLoop()(s, qc) })
 		}()
 	}
 }

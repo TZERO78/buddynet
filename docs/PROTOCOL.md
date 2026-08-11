@@ -19,8 +19,38 @@ wire or is signed lives there and nowhere else.
 > `code_enc`, so it cannot be verified under v7 — and it is *not* accepted under
 > the old rules. Once the source address is validated, a mismatched client is
 > answered with a version-stamped empty `PEER_LIST`, which surfaces on the buddy
-> as *"server speaks vN, we speak vM — update buddynet"*. **Upgrade the handshake
-> server and every buddy together.**
+> as *"server speaks vN, we speak vM — update buddynet"*.
+
+### Migrating a running server to v7
+
+A v7 server does not serve v6 buddies, so a single in-place upgrade cuts every
+buddy off until each one is updated. **Do not add a compatibility shim** — a v6
+signature does not cover the fields v7 relies on, so accepting one would mean
+accepting a weaker proof. Run the two versions side by side instead:
+
+1. **Keep the v6 server running** on its current address and port. Do not touch it.
+2. **Start the v7 server alongside it**, on a second port (or a second address) —
+   same host is fine, it is a separate process with its own `--listen`. Reuse the
+   **same identity key** so buddies keep the `--server-key` they have already
+   pinned; only the port changes for them.
+3. **Migrate buddies one at a time**: update the binary and point `--server` at
+   the v7 port. Each buddy that moves pairs over v7; the ones still on v6 keep
+   working against the old server. Note that a *pair* must move together — both
+   buddies rendezvous on the same server, so migrate them as a couple.
+4. **Watch the v6 server's log** until no registrations arrive any more.
+5. **Shut the v6 server down.** If you want the original port back, stop v6 and
+   restart v7 on it; buddies then need one more `--server` change, so it is
+   usually simpler to keep the new port.
+
+**Writable state must not be shared.** Give the v7 server its own `--key`-adjacent
+paths for everything it writes — in particular `<authorized>.pending`, which both
+processes would otherwise rewrite under each other, losing enrollments. In
+approval mode, **copy** the allowlist to the v7 server rather than pointing both
+at the same file: two processes appending and atomically renaming the same path
+will drop each other's approvals. Copy it before migrating, or the first buddy to
+move finds itself unapproved — `--authorized` is fail-closed, so an empty file
+means nobody pairs. Approvals made during the migration have to be applied to
+whichever server that buddy talks to (or to both).
 - **Field cap:** untrusted strings are bounded by `MaxFieldLen` (128) before
   being used as map keys.
 

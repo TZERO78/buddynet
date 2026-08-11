@@ -460,3 +460,155 @@ func captureLog(t *testing.T, fn func()) string {
 func contains(haystack, needle string) bool {
 	return needle != "" && strings.Contains(haystack, needle)
 }
+
+// The approval transition must not open a replay window. An unapproved key's
+// registration never enters the replay cache (that is what keeps outsiders from
+// flushing it), so a registration captured BEFORE approval would otherwise be
+// replayable for the rest of its freshness window once the operator approves.
+func TestPreApprovalRegistrationIsNotReplayableAfterApproval(t *testing.T) {
+	nd, srvPriv := testNode(t)
+	path := filepath.Join(t.TempDir(), "authorized")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authz, err := newAuthorizer(path, srvPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := newHSRegistry(time.Minute)
+
+	// Captured while the key is still unapproved.
+	captured := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	if _, ok := pairRegister(reg, authz, "", v4(1000), captured); ok {
+		t.Fatal("an unapproved key must not pair")
+	}
+
+	// Time passes before the operator acts. REGISTER timestamps are unix seconds,
+	// so a capture in the SAME second as the approval is inherently
+	// indistinguishable from a fresh attempt; anything beyond that is caught.
+	time.Sleep(1100 * time.Millisecond)
+
+	// The operator approves; the hot reload picks the key up.
+	if err := ApproveKey(path, nd.pub, "late"); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	authz.pollOnce()
+	if !authz.allowed(nd.pub) {
+		t.Fatal("the key was not approved")
+	}
+
+	// The captured registration is still inside its freshness window. Replaying it
+	// from the ATTACKER's source must not be accepted.
+	if _, ok := pairRegister(reg, authz, "", v4(6666), captured); ok {
+		t.Fatal("a registration captured before approval was accepted after approval — " +
+			"the approval transition opens a replay window")
+	}
+
+	// A genuinely fresh registration from the now-approved client must work.
+	fresh := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	if _, ok := pairRegister(reg, authz, "", v4(1000), fresh); !ok {
+		t.Fatal("the approved client cannot register with a fresh attempt")
+	}
+}
+
+// The approval-transition defence must not rest on the CLIENT'S timestamp. An
+// attacker can pre-send a registration dated at the far edge of the accepted skew
+// (now + regSkew - 1s); it arrives while the key is still unapproved, but its
+// self-asserted ts lies AFTER the approval that follows seconds later. A check
+// that only compares ts against the approval instant waves it through, so the
+// window is not one second but the whole positive clock skew.
+func TestFutureDatedPreApprovalRegistrationIsNotReplayable(t *testing.T) {
+	nd, srvPriv := testNode(t)
+	path := filepath.Join(t.TempDir(), "authorized")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	authz, err := newAuthorizer(path, srvPriv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg := newHSRegistry(time.Minute)
+
+	// 1. Captured while unapproved, dated at the far edge of the accepted window.
+	captured := signReg(t, nd.priv, protocol.Message{
+		Type:      protocol.TypeRegister,
+		Role:      protocol.RoleBuddy,
+		Token:     "tok",
+		ID:        nd.id,
+		PubKey:    nd.pub,
+		VirtualIP: nd.vip,
+		Ts:        time.Now().Add(regSkew - time.Second).Unix(),
+	})
+	if !verifyRegistration(captured, regSkew) {
+		t.Fatal("test setup: the future-dated registration should still be within the skew window")
+	}
+	if _, ok := pairRegister(reg, authz, "", v4(1000), captured); ok {
+		t.Fatal("an unapproved key must not pair")
+	}
+
+	// 2. The operator approves.
+	if err := ApproveKey(path, nd.pub, "late"); err != nil {
+		t.Fatal(err)
+	}
+	future := time.Now().Add(2 * time.Second)
+	if err := os.Chtimes(path, future, future); err != nil {
+		t.Fatal(err)
+	}
+	authz.pollOnce()
+	if !authz.allowed(nd.pub) {
+		t.Fatal("the key was not approved")
+	}
+
+	// 3./4. The very same registration, same nonce, replayed from the attacker's
+	// source. Its ts is AFTER the approval, so only a record of the nonce itself
+	// can catch it.
+	if _, ok := pairRegister(reg, authz, "", v4(6666), captured); ok {
+		t.Fatal("a future-dated registration captured before approval was accepted after approval — " +
+			"the approval check trusts the client's timestamp")
+	}
+}
+
+// The two replay caches must be strictly separated: a flood of unapproved keys
+// fills only the pre-auth cache and may never displace an approved buddy's entry.
+// That separation is what lets us remember outsiders' nonces at all — the reason
+// they were originally excluded was precisely that they could evict.
+func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
+	approved, srvPriv := testNode(t)
+	authz := newTestAuthorizer(t, srvPriv, approved.pub)
+	reg := newHSRegistry(time.Minute)
+
+	// One approved registration, which must stay protected for its whole window.
+	victim := unmarshalRegister(t, mustBuild(t, approved, ""), srvPriv)
+	if _, ok := pairRegister(reg, authz, "", v4(1000), victim); !ok {
+		t.Fatal("the approved registration should have been accepted")
+	}
+
+	// A stranger floods far past the pre-auth cache's capacity.
+	stranger, _ := testNode(t)
+	stranger.serverPub = approved.serverPub
+	for i := 0; i < maxPreAuthRegs+256; i++ {
+		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
+		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
+			t.Fatal("an unapproved key must never pair")
+		}
+	}
+
+	authz.mu.RLock()
+	approvedEntries, preAuthEntries := len(authz.recentRegs), len(authz.preAuthRegs)
+	authz.mu.RUnlock()
+
+	if approvedEntries != 1 {
+		t.Fatalf("approved cache holds %d entries after a stranger flood, want 1 — the caches are not separated", approvedEntries)
+	}
+	if preAuthEntries > maxPreAuthRegs {
+		t.Fatalf("pre-auth cache grew to %d, past its cap of %d", preAuthEntries, maxPreAuthRegs)
+	}
+	// The decisive assertion: the approved buddy's registration is STILL caught.
+	if _, ok := pairRegister(reg, authz, "", v4(3000), victim); ok {
+		t.Fatal("a pre-auth flood evicted an approved buddy's replay entry")
+	}
+}
