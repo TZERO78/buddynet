@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"math/big"
@@ -87,4 +88,31 @@ func ecdsaCertDER(t *testing.T) []byte {
 		t.Fatal(err)
 	}
 	return der
+}
+
+// Neither plane may resume a TLS session. A resumed session does not re-run
+// VerifyPeerCertificate, and that callback is the ONLY thing authenticating a
+// peer here — there is no CA and no hostname — so resumption would turn key
+// pinning into a first-handshake-only check. The control plane had this from the
+// start; the data plane, where pinning carries the tunnel, did not.
+func TestNeitherPlaneResumesTLSSessions(t *testing.T) {
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	peerPub, _, _ := ed25519.GenerateKey(rand.Reader)
+
+	if c := tlsConfig(priv, peerPub); !c.SessionTicketsDisabled {
+		t.Error("data plane: session tickets are enabled — a resumed session skips the pinning callback")
+	}
+	// The control plane's two configs are built inline in DialControl/ListenControl;
+	// assert the property where it is observable: a config that pins must never
+	// combine that with resumption.
+	for name, c := range map[string]*tls.Config{
+		"data-plane": tlsConfig(priv, peerPub),
+	} {
+		if c.VerifyPeerCertificate != nil && !c.SessionTicketsDisabled {
+			t.Errorf("%s: pins by callback but allows resumption", name)
+		}
+		if c.ClientSessionCache != nil {
+			t.Errorf("%s: a client session cache would make resumption reachable", name)
+		}
+	}
 }

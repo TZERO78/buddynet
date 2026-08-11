@@ -185,11 +185,18 @@ func NewServer(ttl time.Duration, allowed []netip.Prefix, maxSessions, maxLegsPe
 	}
 	// The relay holds no identity key, so the cookie HMAC is keyed by a random
 	// secret minted per process: it need only be unforgeable and stable for this
-	// run (a restart just re-challenges live binds, a sub-second cost). 32 bytes
-	// of crypto/rand cannot realistically fail; fall back to a zero key only to
-	// stay non-panicking, which still validates returns within one process.
+	// run (a restart just re-challenges live binds, a sub-second cost).
+	//
+	// A failure here is FATAL, never a zero key: an all-zero HMAC key is one every
+	// attacker can reproduce, so cookies would be forgeable and the relay's
+	// return-routability check — its whole anti-reflection guarantee — would be
+	// gone, silently. Under Go 1.24+ crypto/rand.Read cannot fail (it crashes the
+	// process itself), so this branch is unreachable; it must still not read as a
+	// deliberate fall-open if that ever changes.
 	key := make([]byte, 32)
-	_, _ = rand.Read(key)
+	if _, err := rand.Read(key); err != nil {
+		panic(fmt.Sprintf("relay: crypto/rand unavailable, refusing to run with a forgeable cookie key: %v", err))
+	}
 	return &Server{
 		ttl:          ttl,
 		bindRL:       ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources),

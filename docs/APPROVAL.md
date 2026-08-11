@@ -196,6 +196,38 @@ edit it by hand. It holds `(code-hash → key)` entries for clients that have
 registered with a `--code` but have not been approved yet. Entries older than
 30 minutes are pruned automatically.
 
+## Two things to know about the enrollment code
+
+**The code is a bearer secret, and the first claim wins.** Whoever presents a
+valid code first is the key that gets recorded as pending under it — the server
+cannot tell your buddy's key from anyone else's, only that both sealed the same
+code. So send the code over a channel you trust (the same one you would use for
+the SAS), and check the key tag in the log line against what your buddy sees
+before you run `allowclient`:
+
+```
+AUTHZ: action=pending key=Ab3dEf9k code=1a2b3c4d — approve with: …
+                      ^^^^^^^^^^ this must match your buddy's `identity` output
+```
+
+Approving by key (Flow A) has no such window; the code exists to spare you
+copying a 44-character key by hand.
+
+**A restart relaxes the approval-transition check.** The server records WHEN it
+approved a key, and refuses registrations minted before that moment — this closes
+the window where a registration captured while the key was still unapproved
+becomes replayable the instant you approve it. Two caveats, both deliberate:
+
+- Keys already in the file at startup carry no approval moment (no transition
+  happened in this process), so they are unconstrained. Constraining them would
+  punish clock-skewed clients after every restart for no gain.
+- The nonce cache that does the actual work is in memory only.
+
+So a registration captured shortly before an approval is replayable for the rest
+of its freshness window (at most 2x the clock-skew tolerance, ~120 s) **if the
+server restarts inside that window**. Approving a key and restarting the server
+in the same two minutes is worth avoiding; there is no reason to do both at once.
+
 ## Security properties
 
 - **Replay protection.** Every `REGISTER` carries a timestamp and a fresh

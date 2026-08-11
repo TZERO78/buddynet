@@ -52,6 +52,11 @@ const (
 	// key rotation, sized to the threat model rather than left effectively
 	// unbounded.
 	maxAuthorizedKeys = 1024
+
+	// statErrorWindow throttles the unreadable-allowlist warning. Long enough that a
+	// persistent problem does not fill the log, short enough that an operator
+	// watching the log sees it while they are still looking.
+	statErrorWindow = 5 * time.Minute
 )
 
 // tightenPerms enforces 0600 on a sensitive allowlist/pending file: if it is
@@ -105,6 +110,9 @@ type authorizer struct {
 	// missing latches "the allowlist file is not there", so the warning is logged
 	// once per disappearance rather than on every poll.
 	missing bool
+	// lastStatWarn throttles the "cannot read the allowlist" warning, which would
+	// otherwise repeat on every poll for as long as the condition lasts.
+	lastStatWarn time.Time
 }
 
 // Enrollment ceilings. An enrolling client sends one REGISTER per second and only
@@ -238,7 +246,12 @@ func (a *authorizer) pollOnce() {
 			return
 		}
 		// Any other stat error (a permission problem, transient I/O) is not evidence
-		// that the operator revoked anything, so the loaded allowlist is kept.
+		// that the operator revoked anything, so the loaded allowlist is kept — but
+		// SAY SO. Silence here means an allowlist frozen at its last-loaded state
+		// while the operator believes their edits (an approve, a revoke) are taking
+		// effect. Throttled like every other repeating warning: the watch ticks every
+		// couple of seconds.
+		a.noteStatError(err)
 		return
 	}
 	a.mu.Lock()
@@ -258,6 +271,26 @@ func (a *authorizer) pollOnce() {
 		return
 	}
 	log.Printf("AUTHZ: action=reload count=%d", a.count())
+}
+
+// noteStatError reports an allowlist that cannot be stat'ed for a reason OTHER
+// than "gone" (a permission change, a broken mount, transient I/O). The loaded
+// allowlist stays in force — fail-static, not fail-open — but the operator has to
+// learn that the file is no longer being read, or a revoke will appear to work and
+// silently not.
+func (a *authorizer) noteStatError(err error) {
+	a.mu.Lock()
+	quiet := time.Since(a.lastStatWarn) < statErrorWindow
+	if !quiet {
+		a.lastStatWarn = time.Now()
+	}
+	n := len(a.keys)
+	a.mu.Unlock()
+	if quiet {
+		return
+	}
+	log.Printf("WARNING: cannot read the allowlist %s (%v) — keeping the %d key(s) loaded earlier; "+
+		"approvals and revokes are NOT taking effect until this is fixed", a.path, err, n)
 }
 
 // noteMissing empties the allowlist because its file has disappeared, and says so

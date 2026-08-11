@@ -168,6 +168,15 @@ func tlsConfig(priv ed25519.PrivateKey, partnerPub ed25519.PublicKey) *tls.Confi
 		MinVersion:            tls.VersionTLS13,
 		NextProtos:            []string{ALPN},
 		VerifyPeerCertificate: pinnedPeerVerify(partnerPub),
+		// No session resumption. A resumed TLS session does NOT re-run
+		// VerifyPeerCertificate (gosec G123), and that callback is the ONLY thing
+		// authenticating the peer here — there is no CA and no hostname. The control
+		// plane has disabled tickets since it was written; the data plane, where
+		// pinning actually carries the tunnel, had not. Nothing resumes today (no
+		// ClientSessionCache is set, and quic-go installs no default), so this closes
+		// a latent footgun rather than a live hole: anyone adding a cache later would
+		// silently turn pinning into a first-handshake-only check.
+		SessionTicketsDisabled: true,
 	}
 }
 
