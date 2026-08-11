@@ -195,7 +195,7 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 			return fmt.Errorf("SAS channel binding: %w", berr)
 		}
 		sas := ComputeSAS(nd.priv.Public().(ed25519.PublicKey), partnerPub, sid)
-		if perr := PromptSAS(sas, cfg.SASTimeout); perr != nil {
+		if perr := promptSAS(sas, cfg.SASTimeout); perr != nil {
 			logSASFailure(perr, remote.String(), relay.Path{}, partner, att.inviteToken)
 			return perr // key NOT trusted; stop (do not fall back to another plane)
 		}

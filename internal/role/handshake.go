@@ -725,15 +725,13 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
 			return nil, false
 		}
-		if authz.replayed(m.PubKey, m.Nonce) {
-			// This key already used this nonce inside the freshness window. A polling
-			// buddy draws a fresh nonce every attempt, so this is a genuine replay of a
-			// captured registration, not ordinary re-registration.
-			hsStats.replay.Add(1)
-			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
-				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration nonce reused by the same key")
-			return nil, false
-		}
+		// AUTHORIZATION BEFORE THE REPLAY CACHE. The cache is bounded and evicts its
+		// oldest entry when full (it must never fail open), so whoever can put
+		// entries in it can push others out. Checking the allowlist first means only
+		// APPROVED keys ever occupy a slot: an outsider — who can mint unlimited
+		// self-signed, perfectly valid registrations — can no longer flush the cache
+		// and thereby re-open the replay window on a real buddy. It also puts the
+		// tight enrollment limiter ahead of that work rather than behind it.
 		if !authz.allowed(m.PubKey) {
 			// Unknown key. It authenticated (its signature verified, and on QUIC its
 			// TLS certificate matched), which is exactly what lets an enrolling client
@@ -754,6 +752,15 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			} else {
 				authz.logPending(m.PubKey, logTag(m.Token))
 			}
+			return nil, false
+		}
+		if authz.replayed(m.PubKey, m.Nonce) {
+			// An APPROVED key reused a nonce inside the freshness window. A polling
+			// buddy draws a fresh one every attempt, so this is a genuine replay of a
+			// captured registration, not ordinary re-registration.
+			hsStats.replay.Add(1)
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration nonce reused by the same key")
 			return nil, false
 		}
 	} else if m.RegSig != "" {

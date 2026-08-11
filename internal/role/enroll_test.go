@@ -23,7 +23,7 @@ import (
 // enrollServer starts an approval-mode handshake server on QUIC and returns its
 // address, the allowlist path and the authorizer the operator's approve would
 // write into.
-func enrollServer(t *testing.T, allowed ...string) (*net.UDPAddr, ed25519.PublicKey, string, *authorizer) {
+func enrollServer(t *testing.T, allowed ...string) (*net.UDPAddr, ed25519.PublicKey, string, *authorizer, *hsRegistry) {
 	t.Helper()
 	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
@@ -47,9 +47,10 @@ func enrollServer(t *testing.T, allowed ...string) (*net.UDPAddr, ed25519.Public
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(func() { cancel(); srvConn.Close() })
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
-	go serveControlQUIC(ctx, srvConn, newHSRegistry(time.Minute), srvPriv, authz, "", rl, nil)
+	reg := newHSRegistry(time.Minute)
+	go serveControlQUIC(ctx, srvConn, reg, srvPriv, authz, "", rl, nil)
 
-	return srvConn.LocalAddr().(*net.UDPAddr), srvPriv.Public().(ed25519.PublicKey), path, authz
+	return srvConn.LocalAddr().(*net.UDPAddr), srvPriv.Public().(ed25519.PublicKey), path, authz, reg
 }
 
 // enrollClient registers once over QUIC and reports whether the server answered
@@ -89,7 +90,7 @@ func enrollClient(t *testing.T, srvAddr *net.UDPAddr, srvPub ed25519.PublicKey, 
 // the operator approves it, its very next attempt succeeds with no restart.
 func TestQUICEnrollmentLifecycle(t *testing.T) {
 	stranger, _ := testNode(t)
-	srvAddr, srvPub, allowPath, authz := enrollServer(t)
+	srvAddr, srvPub, allowPath, authz, _ := enrollServer(t)
 	stranger.serverPub = srvPub
 
 	// 1. Unknown key, no code: refused, and nothing is recorded.
@@ -136,7 +137,7 @@ func TestQUICEnrollmentLifecycle(t *testing.T) {
 // An allowlisted client is served from the start.
 func TestQUICAllowlistedClientRegisters(t *testing.T) {
 	nd, _ := testNode(t)
-	srvAddr, srvPub, _, _ := enrollServer(t, nd.pub)
+	srvAddr, srvPub, _, _, _ := enrollServer(t, nd.pub)
 	nd.serverPub = srvPub
 	if !enrollClient(t, srvAddr, srvPub, nd, "") {
 		t.Fatal("an allowlisted client was not served")
@@ -182,12 +183,19 @@ func TestRegistrationMustMatchTLSKey(t *testing.T) {
 func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 	attacker, _ := testNode(t)
 	victim, _ := testNode(t)
-	srvAddr, srvPub, _, authz := enrollServer(t)
+	srvAddr, srvPub, allowPath, authz, reg := enrollServer(t)
 	attacker.serverPub, victim.serverPub = srvPub, srvPub
 
-	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	allowBefore, err := os.ReadFile(allowPath)
 	if err != nil {
 		t.Fatal(err)
+	}
+	hsStats.keyMismatch.Store(0)
+	t.Cleanup(func() { hsStats.keyMismatch.Store(0) })
+
+	c, lerr := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if lerr != nil {
+		t.Fatal(lerr)
 	}
 	defer c.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -247,6 +255,44 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 		t.Fatalf("pending holds %d entries, want only the attacker's own", pendCount)
 	}
 
+	// The allowlist must be byte-for-byte untouched: an impersonation attempt may
+	// never move a key towards being authorized.
+	allowAfter, rerr := os.ReadFile(allowPath)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !bytes.Equal(allowBefore, allowAfter) {
+		t.Fatalf("the allowlist changed during an impersonation attempt: %q -> %q", allowBefore, allowAfter)
+	}
+	if authz.allowed(victim.pub) || authz.allowed(attacker.pub) {
+		t.Fatal("an impersonation attempt authorized a key")
+	}
+
+	// No peer state either: the victim must not appear in the pairing registry, so
+	// no roster, no endpoint and no token slot can be attributed to it.
+	reg.mu.Lock()
+	waiting := len(reg.waiting)
+	var sawVictim bool
+	for _, bucket := range reg.waiting {
+		for _, p := range bucket {
+			if p.pubkey == victim.pub {
+				sawVictim = true
+			}
+		}
+	}
+	reg.mu.Unlock()
+	if sawVictim {
+		t.Fatal("the impersonated key was persisted into the pairing registry")
+	}
+	if waiting != 0 {
+		t.Fatalf("the registry holds %d token slot(s) after two refused registrations", waiting)
+	}
+
+	// The security counter must record it — a silent drop gives the operator nothing.
+	if got := hsStats.keyMismatch.Load(); got != 1 {
+		t.Fatalf("key-mismatch counter = %d, want 1 (the event must be counted, not silent)", got)
+	}
+
 	// And the connection itself must be gone, not merely unanswered: a follow-up
 	// request on it must fail.
 	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -266,7 +312,7 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 func TestEnrollmentCannotTargetAnotherKey(t *testing.T) {
 	victim, _ := testNode(t)
 	attacker, _ := testNode(t)
-	srvAddr, srvPub, _, authz := enrollServer(t)
+	srvAddr, srvPub, _, authz, _ := enrollServer(t)
 	victim.serverPub, attacker.serverPub = srvPub, srvPub
 
 	const code = "VICTIM-CODE"
@@ -307,6 +353,46 @@ func TestEnrollmentRateLimitIsStricterThanNormal(t *testing.T) {
 	}
 	if hsStats.enrollLimited.Load() == 0 {
 		t.Fatal("a stranger flood was not rate-limited on the enrollment path")
+	}
+}
+
+// The bounded replay cache evicts its oldest entry when full (it must never fail
+// open), so whoever can insert into it can push others out. Only APPROVED keys
+// may therefore occupy a slot — otherwise an outsider, who can mint unlimited
+// self-signed valid registrations, could flush the cache and re-open the replay
+// window on a real buddy.
+func TestUnapprovedKeysCannotOccupyTheReplayCache(t *testing.T) {
+	approved, srvPriv := testNode(t)
+	authz := newTestAuthorizer(t, srvPriv, approved.pub)
+	reg := newHSRegistry(time.Minute)
+
+	// An approved buddy registers once; that attempt must stay protected.
+	victim := unmarshalRegister(t, mustBuild(t, approved, ""), srvPriv)
+	if _, ok := pairRegister(reg, authz, "", v4(1000), victim); !ok {
+		t.Fatal("the approved registration should have been accepted")
+	}
+
+	// A stranger now hammers the server with valid, self-signed registrations —
+	// far more than the cache can hold.
+	stranger, _ := testNode(t)
+	stranger.serverPub = approved.serverPub
+	for i := 0; i < maxReplayRegs+64; i++ {
+		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
+		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
+			t.Fatal("an unapproved key must never be accepted")
+		}
+	}
+
+	authz.mu.RLock()
+	size := len(authz.recentRegs)
+	authz.mu.RUnlock()
+	if size != 1 {
+		t.Fatalf("replay cache holds %d entries after a stranger flood, want only the approved buddy's 1 — "+
+			"unapproved keys can evict real entries", size)
+	}
+	// The approved buddy's captured registration must still be caught as a replay.
+	if _, ok := pairRegister(reg, authz, "", v4(3000), victim); ok {
+		t.Fatal("a stranger flood flushed the replay cache and re-opened the replay window")
 	}
 }
 

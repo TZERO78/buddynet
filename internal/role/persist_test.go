@@ -201,6 +201,76 @@ func TestUnconfirmedIdentityIsNotPersisted(t *testing.T) {
 	}
 }
 
+// The decisive case: the tunnel comes up, the SAS is shown, and the human says
+// it does NOT match. Nothing may be persisted — the connection was established,
+// so only the SAS verdict stands between a MITM and a cached, name-pinned peer.
+func TestRejectedSASPersistsNothing(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping network test in -short mode")
+	}
+	for name, verdict := range map[string]error{
+		"rejected":  ErrSASRejected,
+		"timed out": ErrSASTimeout,
+	} {
+		t.Run(name, func(t *testing.T) {
+			srvAddr, srvKey := inProcHandshake(t)
+			dir := t.TempDir()
+			cacheA := filepath.Join(dir, "a-peers.json")
+			cacheB := filepath.Join(dir, "b-peers.json")
+			knownB := filepath.Join(dir, "b-known_peers")
+
+			// Drive the SAS prompt to the failing verdict for this subtest.
+			saved := promptSAS
+			promptSAS = func(string, time.Duration) error { return verdict }
+			t.Cleanup(func() { promptSAS = saved })
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			const token = "rejected-sas-token"
+			base := BuddyConfig{
+				Server: srvAddr, ServerKey: srvKey, Token: token,
+				PunchDur: 3 * time.Second, IdleTimeout: 60 * time.Second,
+			}
+			a := buddySide(t, srvKey, "", cacheA)
+			a.trust.insecure = true
+			cfgA := base
+			cfgA.Insecure = true
+			cfgA.Forward = echoServer(t)
+			cfgA.PeersPath = cacheA
+			cfgA.Name = "impostor"
+
+			// B: trust-on-first-use, INTERACTIVE, so it really reaches the SAS prompt.
+			b := buddySide(t, srvKey, knownB, cacheB)
+			cfgB := base
+			cfgB.KnownPeers = knownB
+			cfgB.PeersPath = cacheB
+			cfgB.Interactive = true
+			cfgB.SASTimeout = 2 * time.Second
+			cfgB.LocalListen = freeTCPAddr(t)
+
+			runSide(ctx, cfgA, attempt{rendezvous: token, inviteToken: token}, a)
+			errB := runSide(ctx, cfgB, attempt{rendezvous: token, inviteToken: token}, b)
+
+			select {
+			case err := <-errB:
+				if err == nil {
+					t.Fatal("a failed SAS must abort the attempt")
+				}
+			case <-time.After(40 * time.Second):
+				t.Fatal("B never finished the SAS attempt")
+			}
+
+			if got := readCache(t, cacheB); len(got) != 0 {
+				t.Fatalf("a failed SAS still persisted the peer: %+v", got)
+			}
+			if data, err := os.ReadFile(knownB); err == nil && len(data) > 0 {
+				t.Fatalf("a failed SAS still learned the key: %q", data)
+			}
+		})
+	}
+}
+
 // An already-pinned peer is REFRESHED after a successful authenticated
 // connection: a stale cached endpoint must not survive a live sighting.
 func TestPinnedPeerIsRefreshedAfterConnect(t *testing.T) {

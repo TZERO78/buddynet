@@ -170,7 +170,7 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		}
 		myEdPub := priv.Public().(ed25519.PublicKey)
 		sas := ComputeSAS(myEdPub, partnerPub, ekm)
-		if err := PromptSAS(sas, cfg.SASTimeout); err != nil {
+		if err := promptSAS(sas, cfg.SASTimeout); err != nil {
 			logSASFailure(err, sess.RemoteAddr().String(), used, partner, att.inviteToken)
 			return err // Buddy stops the reconnect loop, key NOT stored
 		}

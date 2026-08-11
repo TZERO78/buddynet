@@ -349,7 +349,11 @@ func (s *ControlServer) acceptConns() {
 		}
 		go func() {
 			defer release() // every exit path gives the slot back, exactly once
-			s.acceptStreams(qc)
+			// Recover a panic here too: this goroutine parses an attacker-supplied
+			// certificate chain, and the project's rule is that one crafted input may
+			// cost its connection, never the process. release() still runs either way
+			// (it is deferred first), so the slot cannot leak on this path.
+			safe.Do("control.conn", func() { s.acceptStreams(qc) })
 		}()
 	}
 }

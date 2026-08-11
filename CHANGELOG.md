@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Protocol 6 → 7 (BREAKING): per-attempt `REGISTER` nonce and a full-coverage
+  registration signature.** A buddy used to build its `REGISTER` once and re-send
+  the same signed bytes on every poll, while the server's replay cache keyed on
+  the signature — so the buddy's *own* second attempt looked like a replay and was
+  dropped. In approval mode that left a single-attempt window in which pairing
+  could work at all. Every attempt now carries a fresh 128-bit nonce, timestamp
+  and signature (UDP, QUIC, the retry after a cookie challenge, and once per
+  server address so a dual-stacked server's v4 and v6 datagrams do not collide),
+  and the replay cache is keyed on `(pubkey, nonce)`. The signature now covers
+  version, role, plaintext token, id, pubkey, virtual IP, name, timestamp, nonce
+  and the sealed enrollment code, so a captured code can no longer be grafted onto
+  another key. The server also derives the virtual IP from the public key instead
+  of trusting the claim. **Server and buddies must be upgraded together**; once the
+  source is validated, a mismatched client gets a version-stamped reply and
+  reports "update buddynet" instead of timing out silently.
+
+- **Code-based enrollment works again over QUIC, and is bound to the TLS key.**
+  The QUIC control server refused any client key that was not already on the
+  allowlist, during the TLS handshake — which made `--code` enrollment impossible
+  on the default transport: an un-approved client could not complete the handshake,
+  so its encrypted code never reached the application layer, so the operator could
+  never approve it. TLS now *authenticates* every client (Ed25519 client
+  certificate + proof of possession) but *authorizes* none; the authenticated key
+  is handed up and `REGISTER.pubkey` must equal it, or the connection is closed
+  and nothing is stored. Unknown keys run under a much stricter rate limit than
+  approved ones.
+
+- **Cookie before decryption on the UDP control plane.** The sealed pairing token
+  was opened (X25519 + NaCl box) *before* the address-validation cookie was
+  checked, so an IP-spoofed source could reach a full asymmetric operation with a
+  single datagram. The cookie is now the gate ahead of everything asymmetric.
+
+- **Replay cache no longer floodable by outsiders.** The bounded cache was
+  populated before the allowlist check, so any stranger with a self-signed but
+  valid registration could fill it and evict entries protecting approved buddies.
+  Authorization now comes first: only approved keys occupy a slot.
+
+- **QUIC control connections bounded per source and in time.** Only a global cap
+  existed, so one host could fill it and lock everyone else out, and nothing
+  bounded how long a handshaked-but-idle connection could sit there. Adds a
+  per-source cap (address families normalised), a first-stream deadline, a
+  per-request read deadline, no server-side keepalive, guaranteed slot release on
+  every exit path, and throttled refusal logging.
+
+- **A peer is cached only after its identity is confirmed.** `peers.json` was
+  written as soon as the handshake server's roster passed its consistency checks —
+  before the tunnel existed and before the SAS. A hostile server or a token squat
+  could thereby get an unverified key cached and its self-asserted `.buddy` name
+  TOFU-pinned, and a first contact whose SAS the human *rejected* still left both
+  behind. Persistence now happens only after the data plane is up and, on first
+  contact, after the SAS is confirmed. Known and pinned peers are still refreshed
+  on every successful authenticated connection.
+
+- **The allowlist stays fail-closed when its file disappears.** The watcher
+  skipped the tick on any stat error, so deleting the allowlist left the
+  last-loaded keys authorized for the life of the process — revoking everyone with
+  `rm` did nothing, silently. A missing allowlist now means zero authorized
+  clients, warned once and reloaded when the file returns. `--authorized` alone
+  decides the mode; the docs claimed a missing file fell back to open mode and
+  have been corrected.
+
 ### Added
 
 - **BuddyShare** — scoped folder sharing and mutual backup over SMB, built

@@ -25,6 +25,11 @@ var (
 // sasLabel is the RFC 5705 exporter label binding the SAS to this TLS session.
 const sasLabel = "buddynet-sas-v1"
 
+// promptSAS is the indirection the connect paths call, so a test can drive the
+// REJECTED and TIMED-OUT branches — the ones that must leave nothing persisted —
+// without a terminal. Production always runs PromptSAS; only tests reassign it.
+var promptSAS = PromptSAS
+
 // sasAlphabet is Crockford base32 — digits and letters with the easily confused
 // I, L, O and U removed, so a 6-character code is unambiguous to read aloud or
 // type. 32 symbols = 5 bits each; 6 symbols = 30 bits of agreement.

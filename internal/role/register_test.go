@@ -352,6 +352,89 @@ func TestCookieIsCheckedBeforeTokenDecryption(t *testing.T) {
 	}
 }
 
+// Nothing behind the cookie may run for an unvalidated source — including the
+// approval-mode work: no signature verify, and above all no X25519 open of the
+// sealed ENROLLMENT CODE, which would otherwise let a spoofed source both spend
+// asymmetric crypto and grow the pending database.
+func TestUnvalidatedSourceReachesNoApprovalModeWork(t *testing.T) {
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvConn.Close()
+
+	nd, srvPriv := testNode(t)
+	authz := newTestAuthorizer(t, srvPriv) // empty allowlist: nd would enroll
+	cookieKey = deriveSubkey(srvPriv.Seed(), "buddynet-cookie-v1")
+	tokenLogKey = deriveSubkey(srvPriv.Seed(), "buddynet-logtag-v1")
+
+	reg := newHSRegistry(time.Minute)
+	go func() {
+		buf := make([]byte, 1500)
+		for {
+			n, src, rerr := srvConn.ReadFromUDP(buf)
+			if rerr != nil {
+				return
+			}
+			handleRegister(srvConn, reg, srvPriv, authz, "", src, append([]byte(nil), buf[:n]...))
+		}
+	}()
+
+	cli, err := net.DialUDP("udp", nil, srvConn.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+
+	// A fully valid registration with a real enrollment code — but NO cookie.
+	const code = "WOULD-BE-PENDING"
+	raw, err := buildRegister(BuddyConfig{Code: code}, nd, "tok", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+
+	cli.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1500)
+	n, err := cli.Read(buf)
+	if err != nil {
+		t.Fatalf("expected a cookie challenge: %v", err)
+	}
+	var reply protocol.Message
+	if err := json.Unmarshal(buf[:n], &reply); err != nil {
+		t.Fatal(err)
+	}
+	if reply.Type != protocol.TypeCookie {
+		t.Fatalf("got %s, want a COOKIE challenge", reply.Type)
+	}
+	authz.mu.RLock()
+	pending := len(authz.pend)
+	authz.mu.RUnlock()
+	if pending != 0 {
+		t.Fatal("an unvalidated source got its enrollment code decrypted and pended")
+	}
+
+	// With the cookie echoed, the very same client DOES reach the enrollment path —
+	// so the check above failed on validation, not on something incidental.
+	withCookie, err := buildRegister(BuddyConfig{Code: code}, nd, "tok", reply.Cookie)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cli.Write(withCookie); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(t, 3*time.Second, func() bool {
+		authz.mu.RLock()
+		defer authz.mu.RUnlock()
+		_, ok := authz.pend[shortHash(code)]
+		return ok
+	}) {
+		t.Fatal("positive control failed: a cookie-validated enrollment never reached the app layer")
+	}
+}
+
 // newTestAuthorizer builds an approval-mode authorizer allowing exactly keys.
 func newTestAuthorizer(t *testing.T, srvPriv ed25519.PrivateKey, keys ...string) *authorizer {
 	t.Helper()

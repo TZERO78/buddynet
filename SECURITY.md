@@ -337,8 +337,19 @@ token as a bearer secret and pin buddies with `--peer-key`.
 - **Rate limiting before crypto.** A global ceiling bounds total per-packet crypto
   so a flood cannot saturate the read loop, and a bounded per-source bucket keeps
   one address from consuming the budget.
-- **Replay rejection (approval mode).** A bounded cache rejects **replayed**
-  registration signatures within the freshness window.
+- **Replay rejection (approval mode).** Every `REGISTER` carries a fresh 128-bit
+  nonce inside its signature; a bounded cache rejects a repeated
+  `(pubkey, nonce)` within the freshness window. Only **approved** keys occupy a
+  cache slot, so an outsider cannot flood it and evict a real buddy's entry.
+- **Expensive crypto behind source validation.** On the plain-UDP transport the
+  address-validation cookie is checked *before* anything asymmetric runs — the
+  sealed token, the registration signature and the sealed enrollment code are all
+  unreachable from an unvalidated (and therefore spoofable) source. The only
+  crypto ahead of it is the cookie's own HMAC.
+- **Control-connection caps.** The QUIC control listener bounds connections
+  globally **and per source address** (IPv4/IPv6/IPv4-mapped normalised), demands
+  a first stream within seconds, and puts a read deadline on every request, so
+  neither a broad flood nor one host parking connections can exhaust the table.
 - **Relay caps.** The relay carries the same per-source bind rate-limit plus a
   legs-per-source ceiling. It stays unauthenticated **by design** — the caps are
   abuse ceilings, not access control.
@@ -354,10 +365,24 @@ token as a bearer secret and pin buddies with `--peer-key`.
 
 With `--authorized`, only operator-approved client keys may pair: registrations
 must carry a valid key-ownership signature, and outsiders are rejected outright.
-In approval mode the QUIC transport can pin clients to the allowlist **at the TLS
-handshake**, so a non-allowlisted buddy is refused before it can send a `REGISTER`.
+`--authorized` alone decides the mode — a missing or empty allowlist file means
+**zero** authorized clients, never open mode, and deleting the file at runtime
+empties the loaded allowlist rather than leaving its last contents in force.
+
+**Authentication and authorization sit at different layers.** On QUIC the TLS
+handshake requires an Ed25519 client certificate and proof of possession, and
+`REGISTER.pubkey` must equal that authenticated key or the connection is closed
+with nothing stored. It does **not** decide who may pair: an unknown key has to be
+able to complete the handshake, otherwise it could never deliver the enrollment
+code that gets it approved. The allowlist decision is made per `REGISTER` —
+approved keys pair, unknown keys with a valid sealed code become pending
+enrollments, everything else is refused — and unknown keys run under a much
+tighter rate limit than approved ones. Since the registration is bound to the
+authenticated key and the sealed code is inside the registration signature, a
+stranger can only ever enroll its own key.
+
 Clients enroll with a short code sealed to the server's identity (`--code`,
-approved via `allowclient <code>`).
+approved via `allowclient <code>`); see [docs/APPROVAL.md](docs/APPROVAL.md).
 
 ---
 

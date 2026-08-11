@@ -190,18 +190,11 @@ func TestConnectionWithoutFirstStreamTimesOut(t *testing.T) {
 	}
 	defer cli.Close()
 
+	// The slot must first actually be TAKEN — otherwise "released" is trivially
+	// true simply because the server has not accepted the connection yet.
+	waitSlots(t, srv, 1, 5*time.Second)
 	// Never open a stream. Well before the 30 s idle timeout, the slot must be gone.
-	deadline := time.Now().Add(firstStreamTimeout + 5*time.Second)
-	for time.Now().Before(deadline) {
-		srv.connMu.Lock()
-		n := srv.conns
-		srv.connMu.Unlock()
-		if n == 0 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("a connection that never opened a stream still holds a slot after %s", firstStreamTimeout)
+	waitSlots(t, srv, 0, firstStreamTimeout+5*time.Second)
 }
 
 // A stream that dribbles bytes and never half-closes must hit the read deadline
@@ -236,6 +229,172 @@ func TestIncompleteRequestTimesOut(t *testing.T) {
 	if _, err := st.Read(buf); err == nil {
 		t.Fatal("an incomplete request was answered instead of being timed out")
 	}
+}
+
+// slotsHeld reports the server's current global connection count.
+func slotsHeld(s *ControlServer) int {
+	s.connMu.Lock()
+	defer s.connMu.Unlock()
+	return s.conns
+}
+
+// waitSlots waits for the global counter to reach want.
+func waitSlots(t *testing.T, s *ControlServer, want int, d time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		if slotsHeld(s) == want {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	s.connMu.Lock()
+	got, entries := s.conns, len(s.perIP)
+	s.connMu.Unlock()
+	t.Fatalf("connection slots = %d (%d source entries), want %d — a slot leaked", got, entries, want)
+}
+
+// Every way a connection can end must give its slot back, and the per-source map
+// must not retain an entry for a source with no live connections.
+func TestSlotsAreReleasedOnEveryExitPath(t *testing.T) {
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvConn.Close()
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+	srvPub := srvPriv.Public().(ed25519.PublicKey)
+	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
+
+	// The handler drops the connection outright (the key-mismatch path in the
+	// handshake server) instead of replying.
+	drop := make(chan struct{}, 1)
+	go func() {
+		for {
+			req, err := srv.Accept(context.Background())
+			if err != nil {
+				return
+			}
+			select {
+			case <-drop:
+				req.Drop("test drop")
+			default:
+				req.Reply([]byte("ok"))
+			}
+		}
+	}()
+
+	dial := func() *ControlClient {
+		t.Helper()
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { c.Close() })
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cli, err := DialControl(ctx, c, srvAddr, srvPub, priv, 30*time.Second)
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		return cli
+	}
+	roundtrip := func(cli *ControlClient) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cli.Roundtrip(ctx, []byte("hi")) //nolint:errcheck // the outcome differs per path; the slot is what matters
+	}
+
+	t.Run("client closes cleanly", func(t *testing.T) {
+		cli := dial()
+		roundtrip(cli)
+		waitSlots(t, srv, 1, 5*time.Second)
+		cli.Close()
+		waitSlots(t, srv, 0, 5*time.Second)
+	})
+
+	t.Run("server drops the connection", func(t *testing.T) {
+		cli := dial()
+		defer cli.Close()
+		drop <- struct{}{}
+		roundtrip(cli) // reaching the handler proves the slot was taken
+		waitSlots(t, srv, 0, 5*time.Second)
+	})
+
+	t.Run("no first stream", func(t *testing.T) {
+		cli := dial()
+		defer cli.Close()
+		// Wait for the slot to actually be TAKEN first — otherwise "released" is
+		// trivially true because the server has not accepted the connection yet.
+		waitSlots(t, srv, 1, 5*time.Second)
+		waitSlots(t, srv, 0, firstStreamTimeout+5*time.Second)
+	})
+
+	t.Run("incomplete request", func(t *testing.T) {
+		cli := dial()
+		defer cli.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		st, err := cli.conn.OpenStreamSync(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.Write([]byte("{partial")) //nolint:errcheck // deliberately never completed
+		waitSlots(t, srv, 1, 5*time.Second)
+		cli.Close()
+		waitSlots(t, srv, 0, 5*time.Second)
+	})
+
+	// After everything, the per-source map must be empty too — entries are keyed by
+	// source and would otherwise accumulate one per address forever.
+	srv.connMu.Lock()
+	entries := len(srv.perIP)
+	srv.connMu.Unlock()
+	if entries != 0 {
+		t.Fatalf("per-source map still holds %d entries with no live connections", entries)
+	}
+}
+
+// A REFUSED connection must not consume a slot: the counters are taken only on
+// admission, so shedding load may never itself exhaust the table.
+func TestRefusedConnectionConsumesNoSlot(t *testing.T) {
+	srv, srvAddr, srvPub := controlTestServer(t)
+
+	clients := openConns(t, srvAddr, srvPub, maxCtrlConnsPerIP)
+	before := slotsHeld(srv)
+	if before != maxCtrlConnsPerIP {
+		t.Fatalf("held %d slots, want %d", before, maxCtrlConnsPerIP)
+	}
+	// Several refusals in a row.
+	for i := 0; i < 5; i++ {
+		c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, priv, _ := ed25519.GenerateKey(rand.Reader)
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		if cli, derr := DialControl(ctx, c, srvAddr, srvPub, priv, 30*time.Second); derr == nil {
+			rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+			cli.Roundtrip(rctx, []byte("hi")) //nolint:errcheck // expected to be refused
+			rcancel()
+			cli.Close()
+		}
+		cancel()
+		c.Close()
+	}
+	if after := slotsHeld(srv); after != before {
+		t.Fatalf("refused connections changed the slot count: %d -> %d", before, after)
+	}
+	for _, c := range clients {
+		c.Close()
+	}
+	waitSlots(t, srv, 0, 5*time.Second)
 }
 
 // Ordinary polling — many sequential requests on ONE connection — must keep
