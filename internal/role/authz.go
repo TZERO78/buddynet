@@ -68,6 +68,11 @@ const (
 // the assignment.
 var acquireLock = lockFile
 
+// duringPendWrite is a test hook fired inside persistPending, between taking the
+// contribution and writing it. Production leaves it nil; tests set it and restore
+// it with t.Cleanup.
+var duringPendWrite func()
+
 // tightenPerms enforces 0600 on a sensitive allowlist/pending file: if it is
 // group/other-accessible (e.g. a config-management edit dropped the mode), warn
 // and chmod it back — the same policy the identity key uses. fi is the stat of
@@ -616,23 +621,50 @@ func (a *authorizer) persistPending() {
 		return
 	}
 
+	// An approval CONFIRMED BY THE CLI always wins — over a stale in-memory entry
+	// and over one still queued in pendAdded. The allowlist is re-read from disk
+	// rather than taken from a.keys, which is only refreshed every authzPollInterval:
+	// AllowClient writes the allowlist INSIDE the pending lock it holds, before
+	// removing the entry, so a read taken here either already sees the approval or
+	// happens before AllowClient started — in which case its later removal wins
+	// anyway, because it comes after this write.
+	approvedNow, _, aerr := readAuthorized(a.path)
+	if aerr != nil && !os.IsNotExist(aerr) {
+		approvedNow = nil // unreadable: fall back to contributing, the write is still ordered
+	}
+
 	a.mu.RLock()
 	merged := clonePending(onDisk)
-	contributed := make([]string, 0, len(a.pendAdded))
+	contributed := make(map[string]pendingEntry, len(a.pendAdded))
+	var approvedDrop []string
 	for h, e := range a.pendAdded {
+		if _, done := approvedNow[e.Key]; done {
+			// Already approved. Contributing it now would undo `allowclient`.
+			approvedDrop = append(approvedDrop, h)
+			continue
+		}
 		merged[h] = e
-		contributed = append(contributed, h)
+		contributed[h] = e
 	}
 	a.mu.RUnlock()
 
+	// duringPendWrite is nil in production. A test sets it to run exactly while a
+	// write is in flight — the window recordPending can slip through, which is what
+	// makes the retire-by-value check below testable rather than argued.
+	if duringPendWrite != nil {
+		duringPendWrite()
+	}
 	err := writePending(a.pendDB, merged)
 	a.mu.Lock()
 	if err == nil {
-		// Retire exactly what THIS write carried. Clearing the whole map would drop a
-		// contribution that recordPending added while we were writing — it does not
-		// hold writeMu, only a.mu, and briefly.
-		for _, h := range contributed {
-			delete(a.pendAdded, h)
+		// Retire exactly what THIS write carried, and only if it is STILL that value.
+		// recordPending does not hold writeMu — only a.mu, briefly — so it can update
+		// the same code while the write is in flight. Deleting by key alone would
+		// discard that newer entry without ever having written it.
+		for h, want := range contributed {
+			if cur, ok := a.pendAdded[h]; ok && cur.Key == want.Key && cur.Seen.Equal(want.Seen) {
+				delete(a.pendAdded, h)
+			}
 		}
 		// Realign the in-memory view with the file, so an entry `allowclient` removed
 		// does not linger and reappear at the next write. Entries still queued in
@@ -649,6 +681,12 @@ func (a *authorizer) persistPending() {
 				a.pend[h] = e
 			}
 		}
+	}
+	// Entries whose key the operator has already approved are dropped whatever the
+	// write did: they must never be contributed again.
+	for _, h := range approvedDrop {
+		delete(a.pendAdded, h)
+		delete(a.pend, h)
 	}
 	a.pendDirty = err != nil
 	a.mu.Unlock()

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/tzero78/buddynet/internal/atomicfile"
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
@@ -304,13 +305,17 @@ func TestServerWriteDoesNotResurrectAnApprovedCode(t *testing.T) {
 		t.Fatalf("setup: allowclient did not remove the entry: %q", afterApprove)
 	}
 
-	// 3./4. The server still has it in memory and now writes — triggered by an
-	//       unrelated second enrollment, exactly as it would be in production.
+	// 3./4. The server still has it in memory and now writes — triggered by a
+	//       SECOND, unrelated client enrolling, exactly as in production. A
+	//       different key on purpose: an entry whose key the operator has already
+	//       approved is dropped by design, so reusing nd.pub here would test that
+	//       rule instead of the resurrection it is meant to catch.
 	other, err := bcrypto.SealCode("SOME-OTHER-CODE", pub)
 	if err != nil {
 		t.Fatal(err)
 	}
-	authz.recordPending(other, nd.pub)
+	second, _ := testNode(t)
+	authz.recordPending(other, second.pub)
 
 	// 5. The approved code must NOT be back.
 	final, err := os.ReadFile(authz.pendDB)
@@ -331,5 +336,112 @@ func TestServerWriteDoesNotResurrectAnApprovedCode(t *testing.T) {
 	authz.mu.RUnlock()
 	if stillInMemory {
 		t.Error("the approved code is still in the server's map — the next write brings it back")
+	}
+}
+
+// Retiring a contribution by KEY alone is not enough. recordPending does not hold
+// writeMu, so it can update the same code while a write is in flight:
+//
+//  1. the writer takes code A with Seen=T1,
+//  2. recordPending updates A to Seen=T2 during the write,
+//  3. the write finishes,
+//  4. the writer must NOT retire A — T2 was never written.
+//
+// Deleting by key would discard T2 silently, and nothing would ever write it: the
+// client re-registering finds A already in the map (isNew=false) and contributes
+// nothing.
+func TestRetiringAContributionComparesTheValue(t *testing.T) {
+	nd, srvPriv := testNode(t)
+	authz := newTestAuthorizer(t, srvPriv)
+	sealed, err := bcrypto.SealCode("SAME-CODE", srvPriv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := shortHash("SAME-CODE")
+	newer := pendingEntry{Key: nd.pub, Seen: time.Now().Add(90 * time.Second)}
+
+	saved := duringPendWrite
+	var fired bool
+	duringPendWrite = func() {
+		if fired {
+			return
+		}
+		fired = true
+		// Step 2: the same code is updated while the write is in flight.
+		authz.mu.Lock()
+		authz.pend[h] = newer
+		authz.pendAdded[h] = newer
+		authz.mu.Unlock()
+	}
+	t.Cleanup(func() { duringPendWrite = saved })
+
+	authz.recordPending(sealed, nd.pub) // step 1 + 3
+	if !fired {
+		t.Fatal("the hook never ran — the test did not exercise a write at all")
+	}
+
+	authz.mu.RLock()
+	queued, stillQueued := authz.pendAdded[h]
+	authz.mu.RUnlock()
+	if !stillQueued {
+		t.Fatal("the newer entry was retired although it was never written — " +
+			"retiring by key alone drops an update that arrived during the write")
+	}
+	if !queued.Seen.Equal(newer.Seen) {
+		t.Fatalf("queued entry is %v, want the newer %v", queued.Seen, newer.Seen)
+	}
+}
+
+// A CLI-confirmed approval wins over a contribution that is still QUEUED, not
+// just over a stale in-memory entry:
+//
+//  1. A is already on disk,
+//  2. a write fails, so A is queued in pendAdded and the state is dirty,
+//  3. `allowclient` approves A and removes it, under the file lock,
+//  4. the server's next write merges its queued A — and must not bring it back.
+func TestApprovalBeatsAQueuedContribution(t *testing.T) {
+	nd, srvPriv := testNode(t)
+	authz := newTestAuthorizer(t, srvPriv)
+	pub := srvPriv.Public().(ed25519.PublicKey)
+	const code = "QUEUED-CODE"
+	sealed, err := bcrypto.SealCode(code, pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. On disk.
+	authz.recordPending(sealed, nd.pub)
+	// 2. A failed write leaves it queued and the state dirty.
+	authz.mu.Lock()
+	authz.pendAdded[shortHash(code)] = authz.pend[shortHash(code)]
+	authz.pendDirty = true
+	authz.mu.Unlock()
+
+	// 3. The operator approves it.
+	if err := AllowClient(authz.path, code); err != nil {
+		t.Fatalf("AllowClient: %v", err)
+	}
+
+	// 4. The next write must not resurrect it. Another client's enrollment is what
+	//    triggers the write in production.
+	other, _ := testNode(t)
+	otherSealed, err := bcrypto.SealCode("UNRELATED-CODE", pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authz.recordPending(otherSealed, other.pub)
+
+	data, err := os.ReadFile(authz.pendDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), shortHash(code)) {
+		t.Errorf("a QUEUED contribution undid the operator's approval:\n%q", data)
+	}
+	authz.mu.RLock()
+	_, stillQueued := authz.pendAdded[shortHash(code)]
+	authz.mu.RUnlock()
+	if stillQueued {
+		t.Error("the approved code is still queued — it would be written at the next opportunity")
 	}
 }
