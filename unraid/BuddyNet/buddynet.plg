@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.07.04.2">
+<!ENTITY version   "2026.08.11">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,31 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.08.11
+- Pinned to buddynet **v4.0.0** — a control-plane security release.
+  - **⚠ BREAKING control-plane change (protocol 6→7):** the handshake server
+    **and every buddy** must be on v4.0.0 — older nodes will not pair, in either
+    direction. There is deliberately no compatibility fallback: a v3 registration
+    proof does not cover the fields v4 relies on, so honouring it would mean
+    accepting a weaker proof. If your buddy is not upgrading at the same time,
+    either coordinate the update or run the old and new servers side by side on
+    two ports and migrate pair by pair (see `docs/PROTOCOL.md`). No settings-page
+    change and no re-pairing needed once both sides are on v4.0.0.
+  - Fixes that approval mode (`--authorized`) never worked end to end over the
+    default QUIC transport: an un-approved client could not deliver its `--code`,
+    so the operator could never approve it. Enrollment now completes without a
+    restart on either side.
+  - Registrations carry a per-attempt nonce and a signature covering every field
+    the server acts on; the server derives the virtual IP from the key instead of
+    trusting the claim; the address-validation cookie now gates every expensive
+    operation; control connections are bounded per source and in time; a peer
+    reaches `peers.json` only after its identity is confirmed; and a deleted
+    allowlist now means zero authorized clients instead of silently keeping the
+    last-loaded keys.
+  - Adds a second binary, `buddynet-handshake`, for anyone running a public
+    matchmaker — not used by this plugin, which continues to ship the full
+    `buddynet`. Checksum gate set to the v4.0.0 `buddynet-linux-amd64` sha256.
 
 ###2026.07.04.2
 - Pinned to buddynet **v3.0.1** — a hardening + documentation release, **no
@@ -665,12 +690,12 @@ mkdir -p "$PLG"
 # NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
 # version and URL are hard-coded here on purpose.
 # MAINTAINER: bump both together on each new release (tag -> release.yml build).
-BINVER="v3.0.1"
+BINVER="v4.0.0"
 BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
 # SHA256 of the release binary; verified on every install so a corrupted or
 # tampered download is never installed. Matches buddynet-linux-amd64.sha256 of
 # the BINVER release — bump both together on each new release.
-BINSHA="489405770eba61a0f7b10e48315d54ce40dc55c6ffca71afd8aa8a674b40139a"
+BINSHA="a7eca7436f3c69ecc05695e4ebefbe2b7c847abc0429a5f98de503b8f0f542a9"
 verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
 
 # Download the buddynet binary to flash (only if missing or its checksum is wrong).
