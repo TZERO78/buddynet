@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
@@ -80,5 +81,44 @@ func TestTokenFormsValidation(t *testing.T) {
 	})
 	if _, ok := parseRegister(both); ok {
 		t.Fatal("a register with BOTH Token and TokenEnc must be rejected")
+	}
+}
+
+// Sealing the pairing token or the enrollment code must FAIL CLOSED. Both used to
+// degrade silently: setToken fell back to the cleartext field — putting the token
+// on the wire unencrypted exactly when something was already wrong — and a
+// code that would not seal was simply dropped, leaving the operator waiting for a
+// `pending` line that could never appear.
+//
+// A truncated server key cannot be decoded as an Ed25519 point, so SealCode
+// fails — the one reliable way to reach the error path. (An all-zero or all-0xFF
+// key does NOT fail: both decode to a point. That is why this test carries a hard
+// assertion instead of a t.Skip — a skip would silently stop testing anything the
+// day the failure mode changes.)
+func TestSealingFailuresFailClosed(t *testing.T) {
+	nd, _ := testNode(t)
+	nd.serverPub = make(ed25519.PublicKey, 16) // too short to be a point
+	if _, err := bcrypto.SealCode("x", nd.serverPub); err == nil {
+		t.Fatal("test setup is broken: SealCode must fail for this key, or the test proves nothing")
+	}
+
+	raw, err := buildRegister(BuddyConfig{}, nd, "rendezvous", "")
+	if err == nil {
+		var m protocol.Message
+		_ = json.Unmarshal(raw, &m)
+		t.Fatalf("a registration was built despite an unsealable token (Token=%q TokenEnc=%q) — "+
+			"the cleartext fallback is back", m.Token, m.TokenEnc)
+	}
+
+	// The code is sealed BEFORE the token, so with --code the failure must name the
+	// CODE. Asserting only "some error" would be satisfied by the token failure that
+	// follows anyway, and a silently dropped code would slip through.
+	_, cerr := buildRegister(BuddyConfig{Code: "ENROLL-ME"}, nd, "rendezvous", "")
+	if cerr == nil {
+		t.Fatal("a registration was built despite an unsealable enrollment code")
+	}
+	if !strings.Contains(cerr.Error(), "enrollment code") {
+		t.Fatalf("the enrollment code was dropped silently and the registration failed for another "+
+			"reason instead (%v) — the operator would wait for a `pending` line that never comes", cerr)
 	}
 }
