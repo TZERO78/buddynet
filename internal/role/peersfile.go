@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"fmt"
+	"github.com/tzero78/buddynet/pkg/protocol"
 	"log"
 	"net/netip"
 	"os"
@@ -252,8 +253,15 @@ func (b manifestBuddy) toSpec() (peerSpec, error) {
 	if err != nil {
 		return peerSpec{}, fmt.Errorf("bad peer key: %w", err)
 	}
-	if strings.ContainsAny(b.Token, " \t") {
-		return peerSpec{}, fmt.Errorf("bootstrap token must not contain whitespace")
+	// The handshake server accepts a token only in the base64url alphabet (see
+	// role.validField), which is what --invite mints. Catching it HERE means the
+	// operator gets a pointed error at startup instead of a pairing that silently
+	// never happens — the server would just drop those registrations, and nothing
+	// on the buddy side would say why.
+	if b.Token != "" && !validField(b.Token) {
+		return peerSpec{}, fmt.Errorf("bootstrap token %q is not usable: it must be 1..%d characters "+
+			"of A-Z a-z 0-9 - _ (that is what `--invite` mints; a token with spaces, punctuation or "+
+			"control characters is rejected by the handshake server)", b.Token, protocol.MaxFieldLen)
 	}
 	if err := validateBuddyName(b.Name); err != nil {
 		return peerSpec{}, err
