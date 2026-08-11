@@ -491,6 +491,17 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		req.Reply(nil)
 		return
 	}
+	// QUIC validated the source address in its own handshake, so an incompatible
+	// client can be told so directly.
+	if m.Ver != protocol.Version {
+		hsStats.dropped.Add(1)
+		if b, err := json.Marshal(replyIncompatible()); err == nil {
+			req.Reply(b)
+		} else {
+			req.Reply(nil)
+		}
+		return
+	}
 	if !resolveToken(&m, priv) {
 		hsStats.dropped.Add(1)
 		req.Reply(nil)
@@ -595,6 +606,15 @@ func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey,
 		hsDebugf("challenged unvalidated register token=%s from %s", logTag(m.Token), src)
 		return
 	}
+	// Source validated: an incompatible client now gets a clear answer rather than
+	// silence. Nothing else is done with the message.
+	if m.Ver != protocol.Version {
+		hsStats.dropped.Add(1)
+		if b, err := json.Marshal(replyIncompatible()); err == nil {
+			conn.WriteToUDP(b, src)
+		}
+		return
+	}
 	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
 	if !ok || len(peers) == 0 {
 		return // dropped, or parked (UDP sends nothing until paired)
@@ -626,10 +646,26 @@ func parseRegister(raw []byte) (protocol.Message, bool) {
 	case !validField(m.Token):
 		return m, false
 	}
-	if m.Ver != protocol.Version {
-		return m, false
-	}
+	// NOTE: the protocol version is deliberately NOT checked here. A mismatched
+	// client is answered with an explicit incompatibility reply (see
+	// replyIncompatible) instead of being dropped in silence, so the operator sees
+	// "update buddynet" rather than an unexplained failure to pair. Callers check
+	// it only once the source address is validated.
 	return m, true
+}
+
+// replyIncompatible answers a client speaking a different protocol version with a
+// version-stamped, EMPTY PEER_LIST. Both buddy transports compare Ver before they
+// look at the roster or its signature, so this surfaces as
+// "server speaks vN, we speak vM — update buddynet" instead of a silent timeout.
+//
+// v7 is a breaking change (the registration signature covers new fields), and an
+// older client is NOT served under the old rules — this reply is a diagnostic, not
+// a compatibility path. It is emitted only after the source address has been
+// validated (cookie on UDP, the handshake itself on QUIC), and it is smaller than
+// the REGISTER that triggered it, so it is never a reflector or an amplifier.
+func replyIncompatible() protocol.Message {
+	return protocol.Message{Type: protocol.TypePeerList, Ver: protocol.Version}
 }
 
 // resolveToken unseals a sealed pairing token (TokenEnc) into m.Token using the
@@ -659,12 +695,13 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			hsDebugf("drop unsigned/stale register token=%s from %s", logTag(m.Token), src)
 			return nil, false
 		}
-		if authz.replayed(m.RegSig) {
-			// A valid signature seen twice within the freshness window: an actual
-			// replay attempt against approval mode. This was previously silent.
+		if authz.replayed(m.PubKey, m.Nonce) {
+			// This key already used this nonce inside the freshness window. A polling
+			// buddy draws a fresh nonce every attempt, so this is a genuine replay of a
+			// captured registration, not ordinary re-registration.
 			hsStats.replay.Add(1)
 			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
-				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration signature replayed")
+				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration nonce reused by the same key")
 			return nil, false
 		}
 		if !authz.allowed(m.PubKey) {
@@ -687,6 +724,12 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			hsDebugf("drop register with invalid key-ownership proof token=%s from %s", logTag(m.Token), src)
 			return nil, false
 		}
+	}
+	// Identity is address: derive the virtual IP from the key rather than trusting
+	// the claim. Runs AFTER signature verification, so the value the client signed
+	// is the value that was checked.
+	if !deriveVIP(&m, src) {
+		return nil, false
 	}
 	self, partner, ok := reg.upsert(m, src)
 	if !ok {
@@ -723,8 +766,19 @@ func signedPeerList(priv ed25519.PrivateKey, token string, peers []protocol.Peer
 // validField rejects empty and oversized strings before they become map keys.
 func validField(s string) bool { return s != "" && len(s) <= protocol.MaxFieldLen }
 
-// verifyRegistration checks a client's key-ownership proof (approval mode).
+// verifyRegistration checks a client's key-ownership proof. m must already carry
+// the PLAINTEXT token (resolveToken ran), because that is what the client signed.
+//
+// The nonce is validated here rather than in parseRegister because it is only
+// meaningful together with the signature: it is covered by RegistrationPayload,
+// so a malformed or attacker-chosen nonce cannot be swapped in, and its strict
+// fixed length keeps the replay-cache key bounded.
 func verifyRegistration(m protocol.Message, skew time.Duration) bool {
+	if !protocol.ValidNonce(m.Nonce) {
+		return false
+	}
+	// The nonce is only replay-relevant while the registration is fresh, so the
+	// same ±skew window bounds both.
 	if d := time.Since(time.Unix(m.Ts, 0)); d > skew || d < -skew {
 		return false
 	}
@@ -736,7 +790,32 @@ func verifyRegistration(m protocol.Message, skew time.Duration) bool {
 	if err != nil || len(sig) != ed25519.SignatureSize {
 		return false
 	}
-	return ed25519.Verify(ed25519.PublicKey(pub), protocol.RegistrationPayload(m.Token, m.ID, m.PubKey, m.Ts), sig)
+	return ed25519.Verify(ed25519.PublicKey(pub), protocol.RegistrationPayload(m), sig)
+}
+
+// deriveVIP enforces the project's core invariant server-side: the virtual IP is
+// a pure function of the public key, so the server never takes the client's word
+// for it. A registration claiming an inconsistent VIP is rejected (it is signed,
+// so this is a deliberately crafted client, not a wire error); one that omits it
+// gets the derived value filled in, so the roster the server signs always carries
+// the address the key actually derives.
+func deriveVIP(m *protocol.Message, src *net.UDPAddr) bool {
+	if m.PubKey == "" {
+		return true // no key to derive from (open mode, unsigned legacy peer)
+	}
+	pub, err := bcrypto.DecodePubKey(m.PubKey)
+	if err != nil {
+		return false
+	}
+	want := bcrypto.VirtualIPString(pub)
+	if m.VirtualIP != "" && m.VirtualIP != want {
+		hsStats.dropped.Add(1)
+		hsDebugf("drop register token=%s from %s: claims vip %s but its key derives %s",
+			logTag(m.Token), src, m.VirtualIP, want)
+		return false
+	}
+	m.VirtualIP = want
+	return true
 }
 
 // shortHash returns a non-reversible 8-hex tag for a secret token, used as the

@@ -29,7 +29,7 @@ const (
 	logDedupWindow = 30 * time.Second // suppress repeat "pending" logs per key
 	maxLoggedKeys  = 1024             // distinct keys tracked for log dedup
 	maxPending     = 1024             // distinct enrollment codes held pending
-	maxReplaySigs  = 4096             // recently-seen registration signatures kept
+	maxReplayRegs  = 4096             // recently-seen (key,nonce) registrations kept
 
 	// A registration signature is accepted while its timestamp is within ±regSkew
 	// of now, so a captured one is replayable over a 2*regSkew span; the replay
@@ -72,7 +72,7 @@ type authorizer struct {
 	mtime      time.Time
 	logged     map[string]time.Time
 	pend       map[string]pendingEntry
-	recentSigs map[string]time.Time // reg signature -> first seen (replay defense)
+	recentRegs map[string]time.Time // "pubkey\x00nonce" -> first seen (replay defense)
 }
 
 type pendingEntry struct {
@@ -88,7 +88,7 @@ func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error
 		keys:       map[string]string{},
 		logged:     map[string]time.Time{},
 		pend:       map[string]pendingEntry{},
-		recentSigs: map[string]time.Time{},
+		recentRegs: map[string]time.Time{},
 	}
 	if err := a.reload(); err != nil {
 		return nil, err
@@ -186,57 +186,68 @@ func (a *authorizer) pruneLoggedLocked() {
 	}
 }
 
-// replayed reports whether this exact registration signature was seen recently,
+// replayed reports whether this (public key, nonce) pair was seen recently,
 // recording fresh ones. Callers invoke it only AFTER verifyRegistration passes,
-// so the cache holds valid signatures and an attacker cannot pollute it with
-// garbage. The map is bounded; when it is full we prune expired entries and, if
-// still full, EVICT THE OLDEST (LRU) to make room — never failing open (which
-// would let a replay through) and never refusing the new entry (which would let
-// an attacker with one approved key DoS all pairings by flooding fresh sigs).
-// Under a sustained flood the effective replay window narrows to the most recent
-// maxReplaySigs entries, but the global rate limiter bounds how fast that can
+// so the cache holds proven-valid pairs and an attacker cannot pollute it with
+// garbage (nor grow the key: ValidNonce fixes the nonce length, and the pubkey is
+// length-bounded by parseRegister).
+//
+// Keying on (key,nonce) rather than on the signature is what makes ordinary
+// polling work: a buddy waiting for its partner re-registers about once a second,
+// each time with a fresh nonce and therefore a fresh cache key, while a captured
+// registration replayed verbatim reuses both and is caught.
+//
+// The map is bounded; when it is full we prune expired entries and, if still
+// full, EVICT THE OLDEST (LRU) to make room — never failing open (which would let
+// a replay through) and never refusing the new entry (which would let an attacker
+// with one approved key DoS all pairings by flooding fresh nonces). Under a
+// sustained flood the effective replay window narrows to the most recent
+// maxReplayRegs entries, but the global rate limiter bounds how fast that can
 // happen.
-func (a *authorizer) replayed(sig string) bool {
-	if sig == "" {
+func (a *authorizer) replayed(pubkey, nonce string) bool {
+	if pubkey == "" || nonce == "" {
 		return false
 	}
+	// NUL-separated: neither field can contain it (both are base64), so no pair of
+	// distinct (key,nonce) inputs can collide onto one cache entry.
+	k := pubkey + "\x00" + nonce
 	now := time.Now()
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if seen, ok := a.recentSigs[sig]; ok && now.Sub(seen) < regReplayWindow {
+	if seen, ok := a.recentRegs[k]; ok && now.Sub(seen) < regReplayWindow {
 		return true
 	}
-	if len(a.recentSigs) >= maxReplaySigs {
-		a.pruneSigsLocked(now)
-		if len(a.recentSigs) >= maxReplaySigs {
-			a.evictOldestSigLocked()
+	if len(a.recentRegs) >= maxReplayRegs {
+		a.pruneRegsLocked(now)
+		if len(a.recentRegs) >= maxReplayRegs {
+			a.evictOldestRegLocked()
 		}
 	}
-	a.recentSigs[sig] = now
+	a.recentRegs[k] = now
 	return false
 }
 
-// evictOldestSigLocked removes the single oldest replay-cache entry (closest to
+// evictOldestRegLocked removes the single oldest replay-cache entry (closest to
 // expiry), freeing a slot without failing open. Caller holds a.mu.
-func (a *authorizer) evictOldestSigLocked() {
+func (a *authorizer) evictOldestRegLocked() {
 	var oldest string
 	var oldestT time.Time
 	first := true
-	for s, t := range a.recentSigs {
+	for s, t := range a.recentRegs {
 		if first || t.Before(oldestT) {
 			oldest, oldestT, first = s, t, false
 		}
 	}
 	if !first {
-		delete(a.recentSigs, oldest)
+		delete(a.recentRegs, oldest)
 	}
 }
 
-// pruneSigsLocked drops replay-cache entries past the replay window. Caller holds a.mu.
-func (a *authorizer) pruneSigsLocked(now time.Time) {
-	for s, t := range a.recentSigs {
+// pruneRegsLocked drops replay-cache entries past the replay window. Caller holds a.mu.
+func (a *authorizer) pruneRegsLocked(now time.Time) {
+	for s, t := range a.recentRegs {
 		if now.Sub(t) >= regReplayWindow {
-			delete(a.recentSigs, s)
+			delete(a.recentRegs, s)
 		}
 	}
 }

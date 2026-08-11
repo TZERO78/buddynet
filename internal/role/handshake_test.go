@@ -27,6 +27,24 @@ func regMsg(token, id, pk string) protocol.Message {
 	return protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: token, ID: id, PubKey: pk}
 }
 
+// signReg stamps a FRESH nonce on m and signs it, mirroring what buildRegister
+// does on the buddy for every single registration attempt. Tests must go through
+// this (rather than reusing one signed blob) for the same reason the client does:
+// a repeated (key,nonce) is rejected as a replay.
+func signReg(t *testing.T, priv ed25519.PrivateKey, m protocol.Message) protocol.Message {
+	t.Helper()
+	if m.Ver == 0 {
+		m.Ver = protocol.Version
+	}
+	nonce, err := protocol.NewNonce()
+	if err != nil {
+		t.Fatalf("nonce: %v", err)
+	}
+	m.Nonce = nonce
+	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(m)))
+	return m
+}
+
 // --- registry / pairing logic ------------------------------------------
 
 func TestUpsertPairsTwoDistinctPeers(t *testing.T) {
@@ -60,16 +78,15 @@ func TestOpenModeProofOfPossession(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pkB64 := base64.StdEncoding.EncodeToString(pub)
 	ts := time.Now().Unix()
-	good := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts}
-	good.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("tok", "A", pkB64, ts)))
+	good := signReg(t, priv, protocol.Message{Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts})
 
 	// Valid proof: accepted (parks awaiting a partner).
 	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), good); !ok {
 		t.Fatal("valid open-mode registration must be accepted")
 	}
 	// Forged proof: a present-but-invalid signature is dropped.
-	forged := good
-	forged.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("OTHER", "A", pkB64, ts)))
+	forged := signReg(t, priv, protocol.Message{Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts})
+	forged.Token = "OTHER-token-not-signed"
 	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), forged); ok {
 		t.Fatal("open-mode registration with an invalid key-ownership proof must be dropped")
 	}
@@ -90,9 +107,7 @@ func TestOpenModeProofOfPossession(t *testing.T) {
 // pairing and no roster/endpoint leak.
 func TestTokenSquatResidualAndApprovalModeBlock(t *testing.T) {
 	sign := func(priv ed25519.PrivateKey, token, id, pk string, ts int64) protocol.Message {
-		m := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: token, ID: id, PubKey: pk, Ts: ts}
-		m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(token, id, pk, ts)))
-		return m
+		return signReg(t, priv, protocol.Message{Type: protocol.TypeRegister, Token: token, ID: id, PubKey: pk, Ts: ts})
 	}
 	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
 	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader) // attacker's own key
@@ -175,15 +190,14 @@ func TestReplayIsLoggedAndCounted(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts := time.Now().Unix()
-	m := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts}
-	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload("tok", "A", pkB64, ts)))
+	m := signReg(t, priv, protocol.Message{Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: pkB64, Ts: ts})
 
 	reg := newHSRegistry(time.Minute)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), m); !ok {
 		t.Fatal("first allowlisted registration should be accepted")
 	}
 	if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
-		t.Fatal("a replayed registration (same signature) must be dropped")
+		t.Fatal("a replayed registration (same key+nonce) must be dropped")
 	}
 	if got := hsStats.replay.Load(); got != 1 {
 		t.Fatalf("replay counter = %d, want 1 (replay must be counted, not silent)", got)
@@ -495,15 +509,21 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 	defer a.Close()
 	defer b.Close()
 
+	// Real Ed25519 identities: the server derives each peer's virtual IP from its
+	// key, so a placeholder string would be rejected as an inconsistent identity.
+	pkAPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pkBPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pkA, pkB := bcrypto.PubKeyB64(pkAPub), bcrypto.PubKeyB64(pkBPub)
+
 	// A registers first and should get no reply yet (parked).
-	register(a, "tok", "A", "pkA")
+	register(a, "tok", "A", pkA)
 	a.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	if _, err := a.Read(make([]byte, 1500)); err == nil {
 		t.Fatal("A got a reply while still alone; expected to be parked")
 	}
 
 	// B registers and must immediately receive a signed PEER_LIST naming A.
-	register(b, "tok", "B", "pkB")
+	register(b, "tok", "B", pkB)
 	got, err := readReply(b)
 	if err != nil {
 		t.Fatalf("B read: %v", err)
@@ -511,8 +531,13 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 	if got.Type != protocol.TypePeerList || len(got.Peers) != 1 {
 		t.Fatalf("B got %+v, want a one-peer PEER_LIST", got)
 	}
-	if got.Peers[0].ID != "A" || got.Peers[0].PubKey != "pkA" {
-		t.Fatalf("B got peer %+v, want A/pkA", got.Peers[0])
+	if got.Peers[0].ID != "A" || got.Peers[0].PubKey != pkA {
+		t.Fatalf("B got peer %+v, want A/%s", got.Peers[0], pkA)
+	}
+	// The server must publish the virtual IP DERIVED from the key, never a
+	// client-supplied claim.
+	if want := bcrypto.VirtualIPString(pkAPub); got.Peers[0].VirtualIP != want {
+		t.Fatalf("B got vip %q for A, want the key-derived %q", got.Peers[0].VirtualIP, want)
 	}
 	if len(got.Peers[0].Candidates) < 1 {
 		t.Fatal("B got no candidates for A")
@@ -534,12 +559,12 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 	}
 
 	// A re-registers (retransmit) and now learns about B.
-	register(a, "tok", "A", "pkA")
+	register(a, "tok", "A", pkA)
 	got, err = readReply(a)
 	if err != nil {
 		t.Fatalf("A read: %v", err)
 	}
-	if len(got.Peers) != 1 || got.Peers[0].ID != "B" || got.Peers[0].PubKey != "pkB" {
-		t.Fatalf("A got %+v, want peer B/pkB", got.Peers)
+	if len(got.Peers) != 1 || got.Peers[0].ID != "B" || got.Peers[0].PubKey != pkB {
+		t.Fatalf("A got %+v, want peer B/%s", got.Peers, pkB)
 	}
 }

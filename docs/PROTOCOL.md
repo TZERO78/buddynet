@@ -5,12 +5,22 @@ of truth is [`pkg/protocol`](../pkg/protocol); a one-byte drift between
 implementations would break signature verification, so anything that crosses the
 wire or is signed lives there and nowhere else.
 
-- **Version:** `6` (`protocol.Version`). Every message stamps `ver`; a mismatch
+- **Version:** `7` (`protocol.Version`). Every message stamps `ver`; a mismatch
   is reported clearly instead of failing as an opaque signature error. Server and
   buddies must run the same version. Notable bumps: **v3** added the relay bind
   address-validation cookie (see "Relay bind handshake"), **v4** widened the
   virtual IP to a `/16` (`10.66.X.Y`), **v6** lets the pairing token travel sealed
-  to the server's pinned key (`token_enc`) instead of in cleartext.
+  to the server's pinned key (`token_enc`) instead of in cleartext, **v7** adds
+  the per-attempt `nonce` and widens the registration signature to cover every
+  field the server acts on.
+
+> **v7 is a breaking change with no compatibility shim.** A v6 registration
+> signature does not cover `ver`, `role`, `virtual_ip`, `name`, `nonce` or
+> `code_enc`, so it cannot be verified under v7 — and it is *not* accepted under
+> the old rules. Once the source address is validated, a mismatched client is
+> answered with a version-stamped empty `PEER_LIST`, which surfaces on the buddy
+> as *"server speaks vN, we speak vM — update buddynet"*. **Upgrade the handshake
+> server and every buddy together.**
 - **Field cap:** untrusted strings are bounded by `MaxFieldLen` (128) before
   being used as map keys.
 
@@ -19,7 +29,7 @@ wire or is signed lives there and nowhere else.
 ```jsonc
 {
   "type": "REGISTER|PEER_LIST|COOKIE|RELAY_OFFER|CONNECT|PING|PONG",
-  "ver":  6,
+  "ver":  7,
   // ...type-specific fields, all omitempty...
 }
 ```
@@ -37,14 +47,38 @@ candidate and the same NAT mapping is reused for the tunnel.
 | `role` | `buddy` / `relay` |
 | `id` | ephemeral per-run id (dedupes a peer's v4+v6 registrations) |
 | `pubkey` | base64 Ed25519 identity |
-| `virtual_ip` | the sender's `10.66.X.Y` |
-| `ts`, `reg_sig` | key-ownership proof for an allowlist server (sign `RegistrationPayload(token,id,pubkey,ts)`) |
+| `virtual_ip` | the sender's `10.66.X.Y`. **The server does not trust this**: it derives the virtual IP from `pubkey` and rejects a registration claiming a different one. |
+| `ts`, `nonce`, `reg_sig` | key-ownership proof: `nonce` is 128 bits of CSPRNG, base64url (22 chars, strictly validated), **fresh for every attempt**; `reg_sig` signs `RegistrationPayload(m)` — see below |
 | `code_enc` | optional enrollment code, sealed to the server identity |
 | `cookie` | address-validation token echoed from a prior `COOKIE` reply (UDP transport) |
 
 The server observes the **source address** of the datagram as a candidate
 endpoint (over IPv6 this is directly reachable; over IPv4 it is the punched NAT
 mapping).
+
+**What `reg_sig` covers (v7).** `RegistrationPayload` signs every field the
+server acts on: `ver`, `role`, `token` (the **plaintext**, i.e. what `token_enc`
+unseals to), `id`, `pubkey`, `virtual_ip`, `name`, `ts`, `nonce` and `code_enc`.
+Two fields are deliberately outside it:
+
+- `cookie` — minted by the server and checked against the server's own HMAC key
+  and the packet's source IP, so signing it would add nothing; leaving it out is
+  what lets a buddy attach a freshly challenged cookie without re-deriving
+  anything else.
+- `token_enc` — it must first decrypt under the server's identity key; the signed
+  value is the recovered plaintext `token`, which is what every downstream check
+  uses.
+
+Because `code_enc` is signed, a captured enrollment code cannot be grafted onto a
+different public key's registration.
+
+**Freshness and replay.** `ts` must be within ±60 s of the server's clock. Within
+that window the server keeps a bounded cache of `(pubkey, nonce)` pairs and
+rejects a repeat as a replay. A **fresh nonce per attempt** is therefore
+mandatory, not optional: a buddy waiting for its partner re-registers about once
+a second, and sends one datagram per server address, so every one of those
+datagrams must be signed anew. Re-sending a cached registration is
+indistinguishable from an attacker replaying a captured one, and is refused.
 
 **Address validation.** On the plain-UDP transport a `REGISTER` without a valid
 `cookie` is answered only with a `COOKIE` message — `HMAC(subkey, epoch‖src-IP)`,
@@ -190,7 +224,9 @@ endpoint — the relay forwards ciphertext and never sees content.
 | MITM at first contact (TOFU) | SAS compared out of band over the TLS channel binding before the key is trusted |
 | Leaked pairing token | invite token is one-time/short-lived; the long-lived session secret is derived from the channel binding and never sent |
 | Replaying an old roster | `ts` freshness window binds each roster in time |
-| Replaying a signed registration (approval mode) | bounded cache rejects a repeated `reg_sig` within the freshness window |
+| Replaying a signed registration (approval mode) | bounded cache rejects a repeated `(pubkey, nonce)` within the freshness window |
+| Forging a peer's virtual IP in the roster | the server derives `virtual_ip` from `pubkey` and rejects any other claim |
+| Grafting a captured enrollment code onto another key | `code_enc` is inside the registration signature |
 | Spoofed-source memory blowup | hard caps on tokens / ids / candidates; capped+pruned approval-mode maps |
 | Flooding the listener (CPU) | global + per-source rate limit before any crypto |
 | Turning a server into a reflector | source address validated first — a UDP cookie (`HMAC(subkey, epoch‖src-IP)`, reply smaller than request) or QUIC's handshake — before any `PEER_LIST` |
