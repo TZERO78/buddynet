@@ -491,7 +491,12 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	m, ok := parseRegister(req.Payload)
 	if !ok {
 		hsStats.dropped.Add(1)
-		req.Reply(nil)
+		// Drop the CONNECTION, not just the request. No buddy ever sends something
+		// that fails to parse, so this peer is either broken or probing — and a
+		// connection kept alive across refusals is a slot held for free. Making it
+		// cost a fresh QUIC handshake per attempt is what keeps the table from being
+		// filled by someone who never intends to register.
+		req.Drop("malformed registration")
 		return
 	}
 	// Bind the registration to the identity the TLS handshake actually proved. A
@@ -518,15 +523,22 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	}
 	// Same order as the UDP path: the key-ownership fields are required once the
 	// version agreed, and before the sealed token costs an X25519 open.
+	// Same reasoning as the parse failure above: a v7 client always carries the
+	// proof fields and always seals a token we can open, so failing either is
+	// structural, not transient. The connection goes with the request.
+	//
+	// The VERSION mismatch above deliberately does NOT drop: that peer gets a reply
+	// it is meant to read ("update buddynet"), and cutting the connection would take
+	// the diagnostic with it.
 	if !requireV7Fields(m) {
 		hsStats.dropped.Add(1)
 		hsDebugf("drop register without a v7 key-ownership proof id=%s from %s", m.ID, src)
-		req.Reply(nil)
+		req.Drop("registration carries no key-ownership proof")
 		return
 	}
 	if !resolveToken(&m, priv) {
 		hsStats.dropped.Add(1)
-		req.Reply(nil)
+		req.Drop("sealed pairing token does not open")
 		return
 	}
 	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)

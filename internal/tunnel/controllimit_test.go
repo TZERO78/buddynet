@@ -4,7 +4,11 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"errors"
+	"fmt"
 	"net"
+	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -229,10 +233,149 @@ func TestIncompleteRequestTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Deliberately no Close(): the server must not wait forever for the rest.
+	// Assert the SERVER acted, not merely that no answer arrived: "no answer" is
+	// equally true when the server hangs forever, which is exactly what this test
+	// is supposed to rule out. When the read deadline fires, the server closes its
+	// end and the client sees EOF / a stream error; when it hangs, the client only
+	// ever hits its OWN deadline.
 	st.SetReadDeadline(time.Now().Add(controlReadTimeout + 5*time.Second))
 	buf := make([]byte, 16)
-	if _, err := st.Read(buf); err == nil {
+	_, err = st.Read(buf)
+	if err == nil {
 		t.Fatal("an incomplete request was answered instead of being timed out")
+	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("the CLIENT's deadline fired first (%v) — the server never closed the "+
+			"incomplete request, so the goroutine and stream slot are still pinned", err)
+	}
+}
+
+// The request size limit must REJECT, not truncate. io.LimitReader reports clean
+// EOF at exactly the limit, so an oversize request used to have its prefix served:
+// valid JSON padded with whitespace up to maxControlReq, followed by more bytes
+// and no half-close, was answered while the client kept sending.
+func TestOversizeRequestIsRejectedNotTruncated(t *testing.T) {
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srvConn.Close()
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer srv.Close()
+
+	served := make(chan int, 2)
+	go func() {
+		for {
+			req, aerr := srv.Accept(context.Background())
+			if aerr != nil {
+				return
+			}
+			served <- len(req.Payload)
+			req.Reply([]byte("ok"))
+		}
+	}()
+
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, priv, _ := ed25519.GenerateKey(rand.Reader)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cli, err := DialControl(ctx, c, srvConn.LocalAddr().(*net.UDPAddr), srvPriv.Public().(ed25519.PublicKey), priv, 30*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cli.Close()
+
+	body := `{"type":"REGISTER","token":"x","id":"x"}`
+	over := body + strings.Repeat(" ", maxControlReq-len(body)) + strings.Repeat("A", 4096)
+	st, err := cli.conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Write([]byte(over)); err != nil {
+		t.Fatal(err)
+	}
+	// No Close(): the send side stays open, so a size check can still fire.
+	select {
+	case n := <-served:
+		t.Fatalf("an oversize request (%d bytes, limit %d) was truncated to %d and served",
+			len(over), maxControlReq, n)
+	case <-time.After(controlReadTimeout + 3*time.Second):
+	}
+
+	// Positive control: a request AT the limit is still served, so the fix rejects
+	// oversize rather than everything near it.
+	atLimit := body + strings.Repeat(" ", maxControlReq-len(body))
+	st2, err := cli.conn.OpenStreamSync(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st2.Write([]byte(atLimit)); err != nil {
+		t.Fatal(err)
+	}
+	st2.Close()
+	select {
+	case n := <-served:
+		if n != maxControlReq {
+			t.Fatalf("request at the limit arrived as %d bytes, want %d", n, maxControlReq)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a request at exactly the limit was not served — the gate is too strict")
+	}
+}
+
+// Accounting per EXACT IPv6 address is free money for an attacker: one /64 is the
+// smallest block a site is handed, so a single host could mint
+// maxCtrlConns/maxCtrlConnsPerIP distinct "sources" out of it and fill the global
+// table. Aggregating to /64 takes that away.
+//
+// It does NOT make the table unfillable: a residential /56 or /48 contains 256
+// resp. 65536 distinct /64s, so a determined attacker still has enough prefixes.
+// Closing that needs eviction under pressure (the way hsRegistry.evictStalestLocked
+// handles the same problem for token buckets) rather than a wider prefix — see
+// docs/plans/audit-v4-followup.md. What this test pins is that the CHEAPEST
+// version of the attack, one prefix, is gone.
+func TestOneIPv6PrefixCannotFillTheGlobalTable(t *testing.T) {
+	s := &ControlServer{perIP: map[string]int{}}
+	admitted := 0
+	for host := 1; host <= maxCtrlConns; host++ {
+		addr := &net.UDPAddr{IP: net.ParseIP(fmt.Sprintf("2001:db8::%x", host)), Port: 1000}
+		if _, ok := s.admit(addr); ok {
+			admitted++
+		}
+	}
+	if admitted > maxCtrlConnsPerIP {
+		t.Fatalf("one /64 was admitted %d times, want at most %d — IPv6 is accounted per address again",
+			admitted, maxCtrlConnsPerIP)
+	}
+	// A buddy from a different prefix is unaffected.
+	if _, ok := s.admit(&net.UDPAddr{IP: net.ParseIP("2001:db8:1::9"), Port: 1}); !ok {
+		t.Fatal("a source in another /64 was locked out by the first one")
+	}
+}
+
+// The /64 aggregation must be real: two addresses in one prefix share a budget,
+// two prefixes do not, and IPv4 stays per address.
+func TestIPv6IsAccountedPerPrefix(t *testing.T) {
+	a := ipKey(&net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1})
+	b := ipKey(&net.UDPAddr{IP: net.ParseIP("2001:db8::dead:beef"), Port: 2})
+	if a != b {
+		t.Fatalf("addresses in one /64 must share a key: %q vs %q", a, b)
+	}
+	if other := ipKey(&net.UDPAddr{IP: net.ParseIP("2001:db8:1::1"), Port: 1}); other == a {
+		t.Fatalf("a different /64 must NOT share the key %q", a)
+	}
+	v4a := ipKey(&net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1})
+	v4b := ipKey(&net.UDPAddr{IP: net.ParseIP("192.0.2.2"), Port: 1})
+	if v4a == v4b {
+		t.Fatal("IPv4 must stay accounted per address")
 	}
 }
 

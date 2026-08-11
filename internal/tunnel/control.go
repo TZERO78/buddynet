@@ -210,10 +210,16 @@ type ControlRequest struct {
 	qc        *quic.Conn
 }
 
-// Reply writes b as the response and closes the stream. A parked registration
-// replies with an empty PEER_LIST so the client's Roundtrip returns and retries.
+// Reply writes b as the response and closes the stream in BOTH directions. A
+// parked registration replies with an empty PEER_LIST so the client's Roundtrip
+// returns and retries.
+//
+// The receive side is cancelled too: the request has been read in full and
+// answered, so anything the peer still sends on this stream is unwanted, and
+// leaving the side open lets it hold flow-control credit we will never consume.
 func (r *ControlRequest) Reply(b []byte) error {
 	_, err := r.st.Write(b)
+	r.st.CancelRead(0)
 	r.st.Close()
 	return err
 }
@@ -264,19 +270,38 @@ func (s *ControlServer) connLoop() func(*ControlServer, *quic.Conn) {
 	return (*ControlServer).acceptStreams
 }
 
+// v6AccountingBits is the prefix an IPv6 source is accounted on. Counting per
+// exact address is useless there: a /64 is the smallest block a site is normally
+// handed, so one host can mint 2^64 "distinct sources" for free and hold the
+// global table with maxCtrlConns/maxCtrlConnsPerIP = 16 of them. Aggregating to
+// /64 charges exactly the addresses an attacker gets for nothing, and no two
+// legitimately separate parties share one.
+//
+// IPv4 stays per address on purpose: addresses there are scarce enough that
+// rotation is not a cheap lever, while aggregating (say /24) would fold unrelated
+// customers of one provider into a single budget.
+const v6AccountingBits = 64
+
 // ipKey normalizes a source address to one connection-accounting key. IPv4,
 // IPv6 and IPv4-mapped IPv6 must land on the SAME key, or a peer could double its
 // allowance simply by reaching us over a mapped address. The port is dropped: the
-// limit is per host, not per socket.
+// limit is per host, not per socket — and for IPv6, per /64 (see above).
 func ipKey(a net.Addr) string {
 	ua, ok := a.(*net.UDPAddr)
 	if !ok {
 		return a.String()
 	}
-	if addr, ok := netip.AddrFromSlice(ua.IP); ok {
-		return addr.Unmap().String()
+	addr, ok := netip.AddrFromSlice(ua.IP)
+	if !ok {
+		return ua.IP.String()
 	}
-	return ua.IP.String()
+	addr = addr.Unmap()
+	if addr.Is6() {
+		if p, err := addr.Prefix(v6AccountingBits); err == nil {
+			return p.String()
+		}
+	}
+	return addr.String()
 }
 
 // admit reserves a connection slot for a source, returning the release closure.
@@ -440,8 +465,13 @@ func (s *ControlServer) readRequest(qc *quic.Conn, clientKey ed25519.PublicKey, 
 	// send side, would otherwise pin this goroutine and one of the connection's
 	// stream slots indefinitely. An incomplete request is closed, not queued.
 	_ = st.SetReadDeadline(time.Now().Add(controlReadTimeout))
-	payload, err := io.ReadAll(io.LimitReader(st, maxControlReq))
-	if err != nil {
+	// Read ONE byte past the limit so going over it is detectable. A plain
+	// LimitReader(st, maxControlReq) reports clean EOF at exactly the limit, so an
+	// oversize request was silently TRUNCATED and its prefix served — pad valid
+	// JSON with whitespace up to the limit and the server answers while the client
+	// keeps sending. The documented bound has to reject, not trim.
+	payload, err := io.ReadAll(io.LimitReader(st, maxControlReq+1))
+	if err != nil || len(payload) > maxControlReq {
 		st.CancelRead(0)
 		st.Close()
 		return

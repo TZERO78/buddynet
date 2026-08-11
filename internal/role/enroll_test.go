@@ -612,3 +612,46 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 		t.Fatal("a pre-auth flood evicted an approved buddy's replay entry")
 	}
 }
+
+// A structurally broken request costs the CONNECTION, not just the request. No
+// buddy ever sends one, so a peer that does is broken or probing — and a
+// connection kept alive across refusals is a control-plane slot held for free.
+func TestMalformedRequestDropsTheConnection(t *testing.T) {
+	nd, _ := testNode(t)
+	srvAddr, srvPub, _, _, _ := enrollServer(t, nd.pub)
+	nd.serverPub = srvPub
+
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cli, err := tunnel.DialControl(ctx, c, srvAddr, srvPub, nd.priv, controlIdleTimeout)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	// Positive control on this very connection: a well-formed registration works,
+	// so anything failing below fails for the reason under test.
+	rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
+	resp, err := cli.Roundtrip(rctx, mustBuild(t, nd, ""))
+	rcancel()
+	if err != nil || len(resp) == 0 {
+		t.Fatalf("positive control failed: a valid registration was not answered (%v)", err)
+	}
+
+	// Now something that cannot parse.
+	bctx, bcancel := context.WithTimeout(ctx, 5*time.Second)
+	cli.Roundtrip(bctx, []byte("this is not a registration"))
+	bcancel()
+
+	// The connection must be gone, not merely the request unanswered.
+	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer ncancel()
+	if resp, err := cli.Roundtrip(nctx, mustBuild(t, nd, "")); err == nil && len(resp) > 0 {
+		t.Fatal("the connection survived a malformed request; it must be closed")
+	}
+}
