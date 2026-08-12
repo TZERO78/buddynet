@@ -39,7 +39,8 @@ import (
 const (
 	defaultMaxSessions  = 4096 // concurrent relayed sessions (override: --relay-max-sessions)
 	maxLegsPerSes       = 2    // exactly two buddies per session; reject a third (fixed)
-	defaultMaxLegsPerIP = 64   // legs one source address may hold (override: --relay-max-legs-per-ip)
+	defaultMaxLegsPerIP = 64   // legs one SOURCE may hold — one IPv4 address or one
+	// IPv6 /64, see internal/netkey (override: --relay-max-legs-per-ip)
 )
 
 // Rate-limit ceilings for bind CONTROL packets only — data forwarding is the
@@ -115,14 +116,14 @@ type Server struct {
 	statPaired     atomic.Int64
 	statChallenged atomic.Int64
 	statRejected   atomic.Int64 // over-cap / outside allowlist / rate-limited
-	statHoard      atomic.Int64 // per-IP leg cap hit (possible session hoarding)
+	statHoard      atomic.Int64 // per-source leg cap hit (possible session hoarding)
 
 	// lastPanic is the process-wide recovered-panic total at the previous stats
 	// tick, so statsLoop can report the per-interval delta. Touched only by the
 	// single statsLoop goroutine, so it needs no atomic.
 	lastPanic int64
 
-	// hoardWarned throttles the per-IP leg-cap WARNING to once per statsInterval so
+	// hoardWarned throttles the per-source leg-cap WARNING to once per statsInterval so
 	// a source hammering the cap cannot turn each packet into a log line. Bounded
 	// and pruned; the counter carries the volume into the stats line.
 	hoardWarned map[string]time.Time
@@ -489,7 +490,7 @@ func (s *Server) reap() {
 				delete(s.sessions, token)
 			}
 		}
-		// Release stale per-IP hoard-warning latches so the map mirrors recent abuse.
+		// Release stale per-source hoard-warning latches so the map mirrors recent abuse.
 		for ip, t := range s.hoardWarned {
 			if now.Sub(t) >= statsInterval {
 				delete(s.hoardWarned, ip)
