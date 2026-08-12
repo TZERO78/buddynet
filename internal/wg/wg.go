@@ -24,10 +24,13 @@
 package wg
 
 import (
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
+	"time"
 
 	"github.com/tzero78/buddynet/internal/crypto"
 )
@@ -134,4 +137,91 @@ func ConfigForPeer(ifName string, listenPort int, myPriv ed25519.PrivateKey, par
 		},
 		Routes: peerVIP,
 	}, nil
+}
+
+// HandshakeTimeout is how long ConfirmHandshake waits for the kernel to complete
+// a handshake with the partner. It matches the QUIC path's dial budget, so both
+// data planes give up after the same wait and let the supervisor retry.
+const HandshakeTimeout = 10 * time.Second
+
+const (
+	// handshakePollInterval is how often WG_CMD_GET_DEVICE is queried.
+	handshakePollInterval = 250 * time.Millisecond
+	// handshakeProbeEvery is how often a probe datagram is sent while waiting.
+	handshakeProbeEvery = 4 // every 4th poll ≈ 1 s
+	// handshakeProbePort is the discard port: the payload is irrelevant, only the
+	// fact that the kernel has something to send to the peer's AllowedIP is.
+	handshakeProbePort = 9
+)
+
+// ConfirmHandshake proves the partner is really behind ifName before the caller
+// treats the tunnel as established. Up is pure netlink configuration: it accepts
+// whatever key the control plane handed us and brings the interface up whether or
+// not that partner exists anywhere. A completed WireGuard handshake is different
+// — only the holder of the partner's private key can produce one — so nothing
+// derived from "we are connected" (the .buddy name table, the cached endpoint,
+// retiring the invite token) may be persisted before this returns.
+//
+// It sends small UDP datagrams to the partner's key-derived virtual IP: a packet
+// routed to the peer's AllowedIP is what makes the kernel start the handshake,
+// and no listener is needed on the far side (the handshake happens below the
+// payload, so the partner's nftables scope does not affect it). The probe is not
+// optional — with only the 25 s persistent keepalive the first handshake could be
+// that late. Then it polls WG_CMD_GET_DEVICE until the peer reports a non-zero
+// last-handshake time; the interface is freshly created by Up, so no stale
+// timestamp can exist.
+//
+// On timeout or cancellation it returns an error and the caller must tear the
+// interface down and persist nothing.
+func ConfirmHandshake(ctx context.Context, ifName string, partnerPub ed25519.PublicKey, timeout time.Duration) (time.Time, error) {
+	peerX, err := crypto.X25519FromEd25519Public(partnerPub)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("wg: derive partner X25519 key: %w", err)
+	}
+	target := netip.AddrPortFrom(crypto.VirtualIP(partnerPub), handshakeProbePort)
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var lastProbeErr error
+	for i := 0; ; i++ {
+		ts, err := Handshaked(ifName, peerX)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if !ts.IsZero() {
+			return ts, nil
+		}
+		if i%handshakeProbeEvery == 0 {
+			if perr := sendHandshakeProbe(target); perr != nil {
+				lastProbeErr = perr
+			}
+		}
+		select {
+		case <-waitCtx.Done():
+			if err := ctx.Err(); err != nil {
+				return time.Time{}, err // shutdown, not a failed partner
+			}
+			if lastProbeErr != nil {
+				return time.Time{}, fmt.Errorf("wg: no WireGuard handshake on %s within %s (last probe to %s failed: %v) — is the buddy online and is this path usable?", ifName, timeout, target, lastProbeErr)
+			}
+			return time.Time{}, fmt.Errorf("wg: no WireGuard handshake on %s within %s — the partner did not answer; is the buddy online with the same pinned key?", ifName, timeout)
+		case <-time.After(handshakePollInterval):
+		}
+	}
+}
+
+// sendHandshakeProbe sends one datagram to the partner's virtual IP so the
+// kernel has traffic to route over the interface and starts the handshake. Our
+// own egress is untouched by internal/nft (it hooks NF_INET_LOCAL_IN only).
+func sendHandshakeProbe(target netip.AddrPort) error {
+	c, err := net.DialUDP("udp4", nil, net.UDPAddrFromAddrPort(target))
+	if err != nil {
+		return err
+	}
+	defer c.Close()
+	if err := c.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+		return err
+	}
+	_, err = c.Write([]byte{0})
+	return err
 }

@@ -236,8 +236,13 @@ AUTHZ: action=reload  count=N         # authorized file was hot-reloaded
 ```
 PAIRED:       token=… a=KEY/IP b=KEY/IP cands=N/N      # two buddies paired at the server
 CONNECTED:    role=buddy partner=… key=… vip=… via=… remote=…   # tunnel up
+CONNECTED:    … via="… (WireGuard)" remote=… handshake=…       # --wireguard: proven handshake time
 DISCONNECTED: role=buddy partner=… key=… reason=… duration=… streams=N
 ```
+
+On the `--wireguard` path `CONNECTED` carries `handshake=` — the time of the
+WireGuard handshake the partner completed. The line is only logged once that
+handshake exists, so it never reports a tunnel to a partner that never answered.
 
 ### Connection lifecycle — `CONNECT:` (bring-up) / `RECONNECT:` (retry loop)
 

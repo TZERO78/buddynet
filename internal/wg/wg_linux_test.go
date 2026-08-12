@@ -6,6 +6,7 @@ import (
 	"net/netip"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func TestNlAttrAlignment(t *testing.T) {
@@ -173,6 +174,151 @@ func TestParseFamilyIDError(t *testing.T) {
 	msg := nlMessage(syscall.NLMSG_ERROR, 0, 1, payload)
 	if _, err := parseFamilyID(msg); err == nil {
 		t.Fatalf("want error for NLMSG_ERROR reply, got nil")
+	}
+}
+
+// --- WG_CMD_GET_DEVICE read path (the handshake proof) ----------------------
+
+// peerEntry synthesizes one WGPEER entry as the kernel emits it in a dump.
+func peerEntry(pub [32]byte, sec, nsec int64) []byte {
+	out := nlAttr(wgPeerAPublicKey, pub[:])
+	ts := make([]byte, 16) // struct __kernel_timespec { s64 tv_sec; s64 tv_nsec; }
+	nativeEndian.PutUint64(ts[0:8], uint64(sec))
+	nativeEndian.PutUint64(ts[8:16], uint64(nsec))
+	out = append(out, nlAttr(wgPeerALastHandshakeTime, ts)...)
+	// A real entry carries more than these two; include one so the parser is
+	// exercised against attributes it must skip.
+	out = append(out, nlAttrU16(wgPeerAPersistentKeepaliveInterval, 25)...)
+	return out
+}
+
+// deviceReply synthesizes one datagram of a WG_CMD_GET_DEVICE dump.
+func deviceReply(peers ...[]byte) []byte {
+	var nest []byte
+	for i, p := range peers {
+		nest = append(nest, nlNested(uint16(i), p)...)
+	}
+	attrs := nlAttrU32(wgDeviceAIfindex, 7)
+	attrs = append(attrs, nlNested(wgDeviceAPeers, nest)...)
+	return genlMessage(0x2a, syscall.NLM_F_MULTI, 1, wgCmdGetDevice, wgGenlVersion, attrs)
+}
+
+func TestScanGetDeviceReplyFindsPartnerHandshake(t *testing.T) {
+	partner := [32]byte{7, 7, 7}
+	other := [32]byte{1, 2, 3}
+	resp := deviceReply(peerEntry(other, 1000, 0), peerEntry(partner, 1712345678, 500))
+
+	ts, found, _, err := scanGetDeviceReply(resp, partner)
+	if err != nil {
+		t.Fatalf("scanGetDeviceReply: %v", err)
+	}
+	if !found {
+		t.Fatal("partner's completed handshake not found")
+	}
+	if want := time.Unix(1712345678, 500); !ts.Equal(want) {
+		t.Fatalf("handshake time: want %s, got %s", want, ts)
+	}
+}
+
+// TestScanGetDeviceReplyIgnoresOtherPeersHandshake is the one that matters for
+// the security property: a handshake by SOME peer on the device must never be
+// read as a handshake by the partner we pinned.
+func TestScanGetDeviceReplyIgnoresOtherPeersHandshake(t *testing.T) {
+	partner := [32]byte{7, 7, 7}
+	other := [32]byte{1, 2, 3}
+	resp := deviceReply(peerEntry(other, 1712345678, 0))
+
+	ts, found, _, err := scanGetDeviceReply(resp, partner)
+	if err != nil {
+		t.Fatalf("scanGetDeviceReply: %v", err)
+	}
+	if found || !ts.IsZero() {
+		t.Fatalf("another peer's handshake was accepted for the partner (ts=%s)", ts)
+	}
+}
+
+// TestScanGetDeviceReplyZeroTimestampIsNotAHandshake covers the state right
+// after Up: the peer is configured, but nothing has been proven yet.
+func TestScanGetDeviceReplyZeroTimestampIsNotAHandshake(t *testing.T) {
+	partner := [32]byte{7, 7, 7}
+	resp := deviceReply(peerEntry(partner, 0, 0))
+
+	_, found, done, err := scanGetDeviceReply(resp, partner)
+	if err != nil {
+		t.Fatalf("scanGetDeviceReply: %v", err)
+	}
+	if found {
+		t.Fatal("a never-handshaked peer was reported as confirmed")
+	}
+	if done {
+		t.Fatal("a peer datagram must not terminate the dump on its own")
+	}
+}
+
+func TestScanGetDeviceReplyMissingTimestampAttr(t *testing.T) {
+	partner := [32]byte{7, 7, 7}
+	resp := deviceReply(nlAttr(wgPeerAPublicKey, partner[:]))
+
+	if _, found, _, err := scanGetDeviceReply(resp, partner); err != nil || found {
+		t.Fatalf("peer without a handshake attribute must not be confirmed (found=%v err=%v)", found, err)
+	}
+}
+
+func TestScanGetDeviceReplyDoneTerminatesTheDump(t *testing.T) {
+	done4 := make([]byte, 4)
+	msg := nlMessage(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, 1, done4)
+	_, found, done, err := scanGetDeviceReply(msg, [32]byte{7})
+	if err != nil {
+		t.Fatalf("scanGetDeviceReply: %v", err)
+	}
+	if found {
+		t.Fatal("NLMSG_DONE reported a handshake")
+	}
+	if !done {
+		t.Fatal("NLMSG_DONE did not terminate the dump — Handshaked would block")
+	}
+}
+
+func TestScanGetDeviceReplySurfacesKernelError(t *testing.T) {
+	payload := make([]byte, 4)
+	var code int32 = -int32(syscall.ENODEV)
+	nativeEndian.PutUint32(payload, uint32(code))
+	msg := nlMessage(syscall.NLMSG_ERROR, 0, 1, payload)
+
+	if _, found, _, err := scanGetDeviceReply(msg, [32]byte{7}); err == nil || found {
+		t.Fatalf("kernel error swallowed (found=%v err=%v)", found, err)
+	}
+}
+
+// TestScanGetDeviceReplyAcrossDatagrams mirrors what Handshaked does when the
+// kernel splits a dump: the first datagram carries the peer but no handshake and
+// does not terminate, the second terminates it.
+func TestScanGetDeviceReplyAcrossDatagrams(t *testing.T) {
+	partner := [32]byte{7, 7, 7}
+	first := deviceReply(peerEntry(partner, 0, 0))
+	done4 := make([]byte, 4)
+	second := nlMessage(syscall.NLMSG_DONE, syscall.NLM_F_MULTI, 1, done4)
+
+	if _, found, done, err := scanGetDeviceReply(first, partner); err != nil || found || done {
+		t.Fatalf("first datagram: found=%v done=%v err=%v", found, done, err)
+	}
+	if _, _, done, err := scanGetDeviceReply(second, partner); err != nil || !done {
+		t.Fatalf("second datagram: done=%v err=%v", done, err)
+	}
+}
+
+// TestGetDeviceAttrNumbers pins the read-path uapi numbers the same way
+// TestPeerAttrNumbers pins the write path. A drift here would silently make the
+// proof unprovable (or, worse, always-true) instead of failing loudly.
+func TestGetDeviceAttrNumbers(t *testing.T) {
+	if wgCmdGetDevice != 0 {
+		t.Fatalf("WG_CMD_GET_DEVICE: want 0, got %d", wgCmdGetDevice)
+	}
+	if wgDeviceAIfname != 2 {
+		t.Fatalf("WGDEVICE_A_IFNAME: want 2, got %d", wgDeviceAIfname)
+	}
+	if wgPeerALastHandshakeTime != 6 {
+		t.Fatalf("WGPEER_A_LAST_HANDSHAKE_TIME: want 6, got %d", wgPeerALastHandshakeTime)
 	}
 }
 

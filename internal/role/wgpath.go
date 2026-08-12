@@ -233,13 +233,26 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 	}
 	defer func() { _ = down() }()
 
-	log.Printf("CONNECTED: role=buddy partner=%s key=%s vip=%s via=%q remote=%s",
-		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, used.Desc+" (WireGuard)", remoteAP)
+	// wg.Up is pure netlink configuration — it succeeds against a partner that
+	// does not exist, so on its own it proves nothing. Require a completed
+	// WireGuard handshake first: without it a compromised handshake server could
+	// hand us any endpoint and still get a .buddy name TOFU-pinned, the endpoint
+	// cache poisoned, and the invite token retired for a connection that never
+	// happened. Only the holder of the pinned key can complete this handshake.
+	hsAt, err := wg.ConfirmHandshake(ctx, ifName, partnerPub, wg.HandshakeTimeout)
+	if err != nil {
+		// Nothing is persisted and the deferred teardown removes the interface;
+		// returning an error lets the supervisor retry the chain.
+		return fmt.Errorf("--wireguard: %w", err)
+	}
 
-	// Identity confirmed (the interface is up with the partner's key as its sole
-	// peer, and on first contact the SAS was matched above): only now is the peer
-	// written to the offline cache and the .buddy name table — same rule as the
-	// QUIC path.
+	log.Printf("CONNECTED: role=buddy partner=%s key=%s vip=%s via=%q remote=%s handshake=%s",
+		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, used.Desc+" (WireGuard)", remoteAP, hsAt.UTC().Format(time.RFC3339))
+
+	// Identity confirmed (the partner completed a WireGuard handshake with the
+	// pinned key as the interface's sole peer, and on first contact the SAS was
+	// matched above): only now is the peer written to the offline cache and the
+	// .buddy name table — same rule as the QUIC path.
 	rememberPeer(nd.reg, partner)
 
 	if att.firstPairing {

@@ -1,9 +1,11 @@
 package wg
 
 import (
+	"context"
 	"crypto/ed25519"
 	"net/netip"
 	"testing"
+	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 )
@@ -46,5 +48,43 @@ func TestConfigForPeer(t *testing.T) {
 	}
 	if err := cfg.validate(); err != nil {
 		t.Fatalf("derived config failed validate(): %v", err)
+	}
+}
+
+// TestConfirmHandshakeFailsClosedOnUnknownDevice pins the property the whole
+// proof rests on: when the kernel cannot be asked about the device (no such
+// interface, no wireguard module, or not Linux at all), ConfirmHandshake must
+// report an error — never a confirmed partner. It must also not sit out its full
+// budget in that case.
+func TestConfirmHandshakeFailsClosedOnUnknownDevice(t *testing.T) {
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	ts, err := ConfirmHandshake(context.Background(), "bn-nosuchdev0", peerPub, 3*time.Second)
+	if err == nil {
+		t.Fatalf("want an error for an unknown device, got handshake at %s", ts)
+	}
+	if !ts.IsZero() {
+		t.Fatalf("error path must not report a handshake time, got %s", ts)
+	}
+	if el := time.Since(start); el > 2*time.Second {
+		t.Fatalf("a device that cannot be queried should fail fast, took %s", el)
+	}
+}
+
+// TestConfirmHandshakeHonoursCancellation proves a shutdown while waiting is
+// surfaced as the context's error, not as a "partner did not answer" failure —
+// the supervisor distinguishes the two.
+func TestConfirmHandshakeHonoursCancellation(t *testing.T) {
+	peerPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := ConfirmHandshake(ctx, "bn-nosuchdev0", peerPub, HandshakeTimeout); err == nil {
+		t.Fatal("want an error on a cancelled context")
 	}
 }
