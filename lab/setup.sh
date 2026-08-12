@@ -15,6 +15,11 @@ echo ""
 
 # ── 1. Build images ────────────────────────────────────────────────────────
 echo "==> Building images (this takes a minute on first run)..."
+# The base buddy image first: lab/Dockerfile.dns (used by the party and vip
+# stacks) starts `FROM buddynet-lab-buddy`, and compose does not order builds by
+# that dependency — built in the wrong order, those stacks silently keep the
+# PREVIOUS binary while everything else is current.
+docker compose build buddy-a
 docker compose build
 echo ""
 
