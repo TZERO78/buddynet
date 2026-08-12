@@ -45,7 +45,7 @@ services:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
       BUDDYNET_LAB: "1"
-      BUDDYNET_TOKEN: "lab-vip-token"
+      BUDDYNET_JOIN: "lab-vip-token"
     depends_on:
       - server
     volumes:
@@ -80,7 +80,7 @@ services:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
       BUDDYNET_LAB: "1"
-      BUDDYNET_TOKEN: "lab-vip-token"
+      BUDDYNET_JOIN: "lab-vip-token"
     depends_on:
       - server
     volumes:

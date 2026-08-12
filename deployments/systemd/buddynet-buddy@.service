@@ -5,14 +5,16 @@
 # Example /etc/buddynet/backup.env (chmod 600 — it holds the secret token):
 #   BUDDYNET_SERVER=vps.example:51820
 #   BUDDYNET_SERVER_KEY=9MWkTpllyniJQi2x6ELl1jgbtiLDr1Apjc2+0XDMvOo=
-#   BUDDYNET_TOKEN=a-long-random-shared-secret
+#   BUDDYNET_JOIN=<the one-time invite token your buddy gave you>   # first pairing only
 #   BUDDYNET_PEER_KEY=<buddy's Ed25519 identity, base64>   # recommended: pin the buddy
 #   # else trust-on-first-use is used; keep its store on durable state:
 #   BUDDYNET_KNOWN_PEERS=/var/lib/buddynet/known_peers
 #   BUDDYNET_ARGS=-forward 127.0.0.1:873   # or: -forward unix:/run/app.sock, -L unix:/run/bn.sock
 #
-# The token is passed via the environment, NOT the command line, so it does not
-# show up in `ps`. server/server-key/args come from the same file.
+# The invite token is passed via the environment, NOT the command line, so it
+# does not show up in `ps`. It is needed for the FIRST pairing only — afterwards
+# the stored session secret takes over and the line can be dropped.
+# server/server-key/args come from the same file.
 
 [Unit]
 Description=BuddyNet P2P tunnel (%i)

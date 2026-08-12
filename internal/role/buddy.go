@@ -37,7 +37,7 @@ type BuddyConfig struct {
 	// tunnel to every listed buddy at once (plus any previously paired peers from
 	// the session store). Each buddy is pinned by key (Model A) and pairs via its
 	// own token; once paired, reconnects use a stored per-peer session secret.
-	// Incompatible with the single-peer pairing modes (--invite/--join/--token)
+	// Incompatible with the single-peer pairing modes (--invite/--join)
 	// and --lazy; use --vip-listen (not -L) to route to more than one buddy.
 	PeersFile string
 	Insecure  bool   // disable partner verification (testing only); set only when --lab is passed

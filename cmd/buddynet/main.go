@@ -113,7 +113,7 @@ func main() {
 	lab := flag.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1.")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
-	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest (YAML: buddies with key/token/name/expose per entry; legacy line format still read — run `peers migrate`); maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
+	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest (YAML: buddies with key/token/name/expose per entry; legacy line format still read — run `peers migrate`); maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--lazy")
 	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
 	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
@@ -168,6 +168,9 @@ func main() {
 	*peerKey = orEnv(*peerKey, "BUDDYNET_PEER_KEY")
 	*knownPeers = orEnv(*knownPeers, "BUDDYNET_KNOWN_PEERS")
 	*code = orEnv(*code, "BUDDYNET_CODE")
+	// The invite token is a bearer secret, so it needs a way out of argv/ps. That
+	// used to be BUDDYNET_TOKEN for the removed --token; --join inherits the role.
+	*join = orEnv(*join, "BUDDYNET_JOIN")
 	*name = orEnv(*name, "BUDDYNET_NAME")
 	if !*dnsFlag {
 		if v := os.Getenv("BUDDYNET_DNS"); v == "1" || v == "true" {
@@ -425,7 +428,7 @@ func (a buddyArgs) validate() {
 		fmt.Fprintln(os.Stderr, "error: --lab disables all identity verification (MITM-exposed).\nOnly for throwaway test setups. Set BUDDYNET_LAB=1 to confirm.")
 		os.Exit(2)
 	}
-	// A token is needed for a first pairing (--invite/--join/--token) and for a
+	// A token is needed for a first pairing (--invite/--join) and for a
 	// --status probe; once paired, a stored session lets you reconnect with none.
 	if a.status && a.token == "" {
 		fmt.Fprintln(os.Stderr, "error: --status needs a pairing token — pass --join <TOKEN> (or run it where a session is already stored)")

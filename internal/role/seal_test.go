@@ -116,7 +116,7 @@ func TestSealingFailuresFailClosed(t *testing.T) {
 		t.Fatal("test setup is broken: SealCode must fail for this key, or the test proves nothing")
 	}
 
-	raw, err := buildRegister(BuddyConfig{}, nd, "rendezvous", "")
+	raw, err := buildRegister(BuddyConfig{}, nd, "rendezvous")
 	if err == nil {
 		var m protocol.Message
 		_ = json.Unmarshal(raw, &m)
@@ -127,7 +127,7 @@ func TestSealingFailuresFailClosed(t *testing.T) {
 	// The code is sealed BEFORE the token, so with --code the failure must name the
 	// CODE. Asserting only "some error" would be satisfied by the token failure that
 	// follows anyway, and a silently dropped code would slip through.
-	_, cerr := buildRegister(BuddyConfig{Code: "ENROLL-ME"}, nd, "rendezvous", "")
+	_, cerr := buildRegister(BuddyConfig{Code: "ENROLL-ME"}, nd, "rendezvous")
 	if cerr == nil {
 		t.Fatal("a registration was built despite an unsealable enrollment code")
 	}

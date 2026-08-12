@@ -497,6 +497,7 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	}
 	if !resolveToken(&m, priv) {
 		hsStats.dropped.Add(1)
+		hsDebugf("drop register with undecryptable sealed token from %s", src)
 		req.Drop("sealed pairing token does not open")
 		return
 	}

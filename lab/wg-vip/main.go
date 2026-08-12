@@ -37,7 +37,6 @@ func main() {
 	keyPath := flag.String("key", "", "attacker identity key file (created if missing)")
 	token := flag.String("token", "", "pairing token")
 	vip := flag.String("vip", "", "FORGED virtual IP to advertise (empty = advertise the correct one)")
-	quic := flag.Bool("quic", true, "register over the QUIC control plane (the default since QUIC-by-default); -quic=false uses the legacy plain-UDP plane")
 	flag.Parse()
 
 	srvPub, err := bcrypto.DecodePubKey(*serverKeyB64)
@@ -85,9 +84,8 @@ func main() {
 
 	// The attacker only needs to REGISTER a parked entry carrying the forged VIP; the
 	// victim rejects it at the pre-connect VIP↔key check, so no data plane is needed.
-	// The control transport must match the server's — QUIC by default (the server and
-	// victim both default to QUIC since #97), plain UDP under -quic=false.
-	if *quic {
+	// Since v8 there is one control plane: QUIC.
+	{
 		addr, rerr := net.ResolveUDPAddr("udp", *server)
 		if rerr != nil {
 			log.Fatalf("wg-vip: resolve server: %v", rerr)
@@ -99,7 +97,7 @@ func main() {
 		defer conn.Close()
 		cli, derr := tunnel.DialControl(context.Background(), conn, addr, srvPub, priv, 2*time.Minute)
 		if derr != nil {
-			log.Fatalf("wg-vip: QUIC control dial (is the server on QUIC? pass -quic=false for plain UDP): %v", derr)
+			log.Fatalf("wg-vip: QUIC control dial: %v", derr)
 		}
 		defer cli.Close()
 		// Re-roundtrip periodically so the parked entry survives the server's
@@ -117,32 +115,4 @@ func main() {
 		}
 	}
 
-	// Legacy plain-UDP plane (server started with --quic-handshake=false).
-	c, err := net.Dial("udp", *server)
-	if err != nil {
-		log.Fatalf("wg-vip: dial: %v", err)
-	}
-	defer c.Close()
-	register := func() {
-		m := signedRegister()
-		r, _ := json.Marshal(m)
-		c.Write(r)
-		c.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
-		buf := make([]byte, 2048)
-		n, rerr := c.Read(buf)
-		if rerr != nil {
-			return
-		}
-		var cm protocol.Message
-		if json.Unmarshal(buf[:n], &cm) == nil && cm.Type == protocol.TypeCookie {
-			m.Cookie = cm.Cookie
-			r, _ = json.Marshal(m)
-			c.Write(r)
-		}
-	}
-	register()
-	log.Printf("wg-vip: registered+parked (plain UDP) under the token — waiting for a victim to pair")
-	for range time.Tick(3 * time.Second) {
-		register()
-	}
 }

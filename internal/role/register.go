@@ -130,9 +130,16 @@ func buildRegister(cfg BuddyConfig, nd *node, rendezvous string) ([]byte, error)
 	if cfg.Code != "" {
 		// Sealed BEFORE signing: CodeEnc is covered by the signature, so a captured
 		// enrollment code cannot be re-bound to a different public key.
-		if enc, serr := bcrypto.SealCode(cfg.Code, nd.serverPub); serr == nil {
-			m.CodeEnc = enc
+		//
+		// A sealing failure is an ERROR, not a silently code-less registration: the
+		// operator passed --code because they are waiting to approve this client, and
+		// dropping the field would leave them watching a `pending` line that never
+		// appears, with nothing anywhere saying why.
+		enc, serr := bcrypto.SealCode(cfg.Code, nd.serverPub)
+		if serr != nil {
+			return nil, fmt.Errorf("seal the enrollment code to the server key: %w", serr)
 		}
+		m.CodeEnc = enc
 	}
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(nd.priv, protocol.RegistrationPayload(m)))
 	if err := setToken(&m, rendezvous, nd.serverPub); err != nil {
