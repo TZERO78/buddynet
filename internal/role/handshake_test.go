@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,6 +36,12 @@ func signReg(t *testing.T, priv ed25519.PrivateKey, m protocol.Message) protocol
 	t.Helper()
 	if m.Ver == 0 {
 		m.Ver = protocol.Version
+	}
+	// A registration with no timestamp reads as 1970 and fails the freshness check.
+	// buildRegister always stamps one, so this helper must too — otherwise a test
+	// silently exercises a message no real client ever sends.
+	if m.Ts == 0 {
+		m.Ts = time.Now().Unix()
 	}
 	nonce, err := protocol.NewNonce()
 	if err != nil {
@@ -70,10 +77,11 @@ func TestUpsertPairsTwoDistinctPeers(t *testing.T) {
 	}
 }
 
-// F4: in open mode (no allowlist) a buddy always signs its REGISTER, so when a
-// signature is present we verify it — a registration claiming a public key it
-// does not own (forged/mismatched signature) must be dropped, while a valid one
-// (and a legacy unsigned one) is accepted.
+// In open mode (no allowlist) the key-ownership proof is MANDATORY, not merely
+// checked when it happens to be there. Under v7 every buddy signs, so an unsigned
+// registration is never a legitimate client — and treating the proof as optional
+// let whoever omitted the field register under someone else's public key, or under
+// no key at all.
 func TestOpenModeProofOfPossession(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
 	pkB64 := base64.StdEncoding.EncodeToString(pub)
@@ -90,11 +98,84 @@ func TestOpenModeProofOfPossession(t *testing.T) {
 	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), forged); ok {
 		t.Fatal("open-mode registration with an invalid key-ownership proof must be dropped")
 	}
-	// Legacy unsigned registration: still accepted (token-gated, backward compatible).
-	legacy := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64}
-	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), legacy); !ok {
-		t.Fatal("legacy unsigned open-mode registration must still be accepted")
+	// UNSIGNED registration: refused. There is no v7 client that sends one, so the
+	// only party that benefits from an optional proof is one that wants to claim a
+	// key it does not hold.
+	unsigned := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: "A", PubKey: pkB64}
+	if _, ok := pairRegister(newHSRegistry(time.Minute), nil, "", v4(1000), unsigned); ok {
+		t.Fatal("an unsigned open-mode registration was accepted — the key-ownership proof is optional again")
 	}
+}
+
+// The concrete attack the mandatory proof closes: a party that knows the token
+// omits reg_sig and registers under the VICTIM's public key. The server would sign
+// a roster naming the victim's identity at the attacker's endpoints.
+func TestUnsignedRegisterCannotClaimAForeignKey(t *testing.T) {
+	victimPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	partnerPub, partnerPriv, _ := ed25519.GenerateKey(rand.Reader)
+	vB64 := base64.StdEncoding.EncodeToString(victimPub)
+	pB64 := base64.StdEncoding.EncodeToString(partnerPub)
+	reg := newHSRegistry(time.Minute)
+
+	if _, ok := pairRegister(reg, nil, "", v4(1000), signReg(t, partnerPriv, protocol.Message{
+		Type: protocol.TypeRegister, Token: "tok", ID: "P", PubKey: pB64, Ts: time.Now().Unix()})); !ok {
+		t.Fatal("setup: the honest peer should park")
+	}
+	forgery := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok",
+		ID: "ATTACKER", PubKey: vB64, VirtualIP: bcrypto.VirtualIPString(victimPub), Ts: time.Now().Unix()}
+	if _, ok := pairRegister(reg, nil, "", v4(2000), forgery); ok {
+		t.Fatal("an unsigned registration claiming a foreign public key was accepted")
+	}
+}
+
+// The same hole without any key at all: deriveVIP returns early for an empty
+// PubKey, so a made-up virtual IP was signed into the roster and both of the
+// token's slots filled — a pairing DoS costing the attacker no cryptography.
+func TestKeylessRegisterCannotSquatASlot(t *testing.T) {
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	reg := newHSRegistry(time.Minute)
+
+	if _, ok := pairRegister(reg, nil, "", v4(1000), signReg(t, aPriv, protocol.Message{
+		Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: aB64, Ts: time.Now().Unix()})); !ok {
+		t.Fatal("setup: the honest peer should park")
+	}
+	squat := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok",
+		ID: "SQUAT", VirtualIP: "10.66.1.1", Ts: time.Now().Unix()}
+	if _, ok := pairRegister(reg, nil, "", v4(2000), squat); ok {
+		t.Fatal("a keyless registration took a token slot and had its claimed virtual IP signed")
+	}
+	// And the real partner still finds room.
+	bPub, bPriv, _ := ed25519.GenerateKey(rand.Reader)
+	if _, ok := pairRegister(reg, nil, "", v4(3000), signReg(t, bPriv, protocol.Message{
+		Type: protocol.TypeRegister, Token: "tok", ID: "B",
+		PubKey: base64.StdEncoding.EncodeToString(bPub), Ts: time.Now().Unix()})); !ok {
+		t.Fatal("the real partner was locked out of its own token")
+	}
+}
+
+// requireV7Fields must sit AFTER the version check: a v6 client carries no nonce,
+// and rejecting it structurally would replace the "update buddynet" diagnostic
+// with a silent timeout — the side-by-side rollout in docs/PROTOCOL.md depends on
+// that message.
+func TestV6ClientStillGetsTheVersionDiagnostic(t *testing.T) {
+	v6 := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version - 1,
+		Token: "tok", ID: "OLD", PubKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))}
+	if _, ok := parseRegister(mustMarshal(t, v6)); !ok {
+		t.Fatal("a v6 registration must still PARSE, or it can never be told to update")
+	}
+	if requireV7Fields(v6) {
+		t.Fatal("a v6 registration must not pass the v7 field check")
+	}
+}
+
+func mustMarshal(t *testing.T, m protocol.Message) []byte {
+	t.Helper()
+	b, err := json.Marshal(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
 }
 
 // TestTokenSquatResidualAndApprovalModeBlock pins the live pentest result: a
@@ -311,15 +392,71 @@ func TestReapDropsStale(t *testing.T) {
 
 func TestValidField(t *testing.T) {
 	cases := map[string]bool{
-		"":                        false,
-		"ok":                      true,
-		string(make([]byte, 128)): true,  // exactly the limit
-		string(make([]byte, 129)): false, // over the limit
+		"":                           false,
+		"ok":                         true,
+		"AbC-123_xyz":                true, // base64url, what every generator emits
+		strings.Repeat("a", 128):     true, // exactly the limit
+		strings.Repeat("a", 129):     false,
+		string(make([]byte, 128)):    false, // 128 NUL bytes: the old check called this VALID
+		"ok\nSECURITY: event=forged": false, // the log-injection payload
+		"ok\rSECURITY: event=forged": false,
+		"tab\there":                  false,
+		"space here":                 false,
+		"semi;colon":                 false,
+		"quote\"here":                false,
+		"ünïcode":                    false,
 	}
 	for in, want := range cases {
 		if got := validField(in); got != want {
-			t.Errorf("validField(len %d) = %v, want %v", len(in), got, want)
+			t.Errorf("validField(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// The concrete attack: REGISTER.ID is written into the PAIRED line, so an id
+// carrying a newline used to forge a second line in the operator's audit trail —
+// in the exact format the project's own log schema uses for security events.
+func TestRegisterIDCannotInjectALogLine(t *testing.T) {
+	const evil = "ok\nSECURITY: event=forged-by-attacker detail=\"injected\""
+	if validField(evil) {
+		t.Fatal("an id with a newline is still accepted at the boundary")
+	}
+	// And it cannot even reach the pairing core: parseRegister rejects it.
+	raw, err := json.Marshal(protocol.Message{
+		Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: evil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parseRegister(raw); ok {
+		t.Fatal("a registration with a control character in its id was parsed")
+	}
+}
+
+// The pairing is announced ONCE, at the transition. A waiting buddy re-registers
+// about once a second for as long as the tunnel lives, so logging on every
+// registration wrote a line per second per pair in NORMAL operation — and let
+// anyone who knows a token turn that into a flood.
+func TestPairedIsLoggedOncePerToken(t *testing.T) {
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	xB64 := base64.StdEncoding.EncodeToString(xPub)
+	tokenLogKey = []byte("test-log-key")
+
+	reg := newHSRegistry(time.Minute)
+	if _, ok := pairRegister(reg, nil, "", v4(1000), signReg(t, aPriv, protocol.Message{
+		Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: aB64})); !ok {
+		t.Fatal("setup: first peer should park")
+	}
+	out := captureLog(t, func() {
+		for i := 0; i < 20; i++ {
+			pairRegister(reg, nil, "", v4(2000), signReg(t, xPriv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: "X", PubKey: xB64}))
+		}
+	})
+	if n := strings.Count(out, "PAIRED:"); n != 1 {
+		t.Fatalf("20 registrations on a paired token produced %d PAIRED lines, want 1", n)
 	}
 }
 
@@ -488,8 +625,8 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 	// register performs the address-validation cookie round-trip transparently:
 	// the first REGISTER is answered with a COOKIE challenge, which the second
 	// REGISTER echoes. Callers then read the validated reply (parked or PEER_LIST).
-	register := func(c *net.UDPConn, token, id, pk string) {
-		b, _ := json.Marshal(regMsg(token, id, pk))
+	register := func(c *net.UDPConn, priv ed25519.PrivateKey, token, id, pk string) {
+		b, _ := json.Marshal(signReg(t, priv, regMsg(token, id, pk)))
 		if _, err := c.Write(b); err != nil {
 			t.Fatalf("write: %v", err)
 		}
@@ -497,7 +634,7 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 		if err != nil || r.Type != protocol.TypeCookie || r.Cookie == "" {
 			t.Fatalf("expected cookie challenge, got %+v (err %v)", r, err)
 		}
-		m := regMsg(token, id, pk)
+		m := signReg(t, priv, regMsg(token, id, pk))
 		m.Cookie = r.Cookie
 		b, _ = json.Marshal(m)
 		if _, err := c.Write(b); err != nil {
@@ -511,19 +648,19 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 
 	// Real Ed25519 identities: the server derives each peer's virtual IP from its
 	// key, so a placeholder string would be rejected as an inconsistent identity.
-	pkAPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	pkBPub, _, _ := ed25519.GenerateKey(rand.Reader)
+	pkAPub, pkAPriv, _ := ed25519.GenerateKey(rand.Reader)
+	pkBPub, pkBPriv, _ := ed25519.GenerateKey(rand.Reader)
 	pkA, pkB := bcrypto.PubKeyB64(pkAPub), bcrypto.PubKeyB64(pkBPub)
 
 	// A registers first and should get no reply yet (parked).
-	register(a, "tok", "A", pkA)
+	register(a, pkAPriv, "tok", "A", pkA)
 	a.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
 	if _, err := a.Read(make([]byte, 1500)); err == nil {
 		t.Fatal("A got a reply while still alone; expected to be parked")
 	}
 
 	// B registers and must immediately receive a signed PEER_LIST naming A.
-	register(b, "tok", "B", pkB)
+	register(b, pkBPriv, "tok", "B", pkB)
 	got, err := readReply(b)
 	if err != nil {
 		t.Fatalf("B read: %v", err)
@@ -559,12 +696,121 @@ func TestIntegrationPairingOverUDP(t *testing.T) {
 	}
 
 	// A re-registers (retransmit) and now learns about B.
-	register(a, "tok", "A", pkA)
+	register(a, pkAPriv, "tok", "A", pkA)
 	got, err = readReply(a)
 	if err != nil {
 		t.Fatalf("A read: %v", err)
 	}
 	if len(got.Peers) != 1 || got.Peers[0].ID != "B" || got.Peers[0].PubKey != pkB {
 		t.Fatalf("A got %+v, want peer B/%s", got.Peers, pkB)
+	}
+}
+
+// The paired-once latch must be released with the token, or two things break: it
+// grows until maxTokens while the tokens behind it are long gone, and a pair that
+// separates and pairs AGAIN is never announced a second time. The eviction path
+// released it; the reaper did not.
+func TestPairedLatchIsReleasedWhenTheTokenIsReaped(t *testing.T) {
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	xB64 := base64.StdEncoding.EncodeToString(xPub)
+	tokenLogKey = []byte("test-log-key")
+
+	pair := func(reg *hsRegistry) string {
+		t.Helper()
+		return captureLog(t, func() {
+			pairRegister(reg, nil, "", v4(1000), signReg(t, aPriv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: aB64}))
+			pairRegister(reg, nil, "", v4(2000), signReg(t, xPriv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: "X", PubKey: xB64}))
+		})
+	}
+
+	// A TTL short enough that one reap tick clears the bucket.
+	reg := newHSRegistry(50 * time.Millisecond)
+	if out := pair(reg); !contains(out, "PAIRED:") {
+		t.Fatal("setup: the first pairing must be logged")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go reg.reap(ctx)
+	if !waitFor(t, 3*time.Second, func() bool {
+		reg.mu.Lock()
+		defer reg.mu.Unlock()
+		return len(reg.waiting) == 0
+	}) {
+		t.Fatal("the reaper never dropped the expired token")
+	}
+
+	reg.mu.Lock()
+	latched := len(reg.pairedLogged)
+	reg.mu.Unlock()
+	if latched != 0 {
+		t.Errorf("the paired-once latch still holds %d token(s) after the reaper cleared them — it leaks", latched)
+	}
+	// And a genuine RE-pairing of the same token is announced again.
+	if out := pair(reg); !contains(out, "PAIRED:") {
+		t.Error("a token that paired again after expiring was never logged — the latch is permanent")
+	}
+}
+
+// The paired-once latch must also be released on the INLINE expiry path, with no
+// reaper involved at all: upsert drops peers whose TTL has passed while it looks
+// for a partner, so a token can lose its partner and gain a new one between two
+// reap ticks — or in a registry whose reaper was never started.
+//
+// Deliberately no reg.reap() here. If this test needed one, it would be testing
+// the path that was already fixed.
+func TestPairedLatchResetsWithoutTheReaper(t *testing.T) {
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
+	yPub, yPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	xB64 := base64.StdEncoding.EncodeToString(xPub)
+	yB64 := base64.StdEncoding.EncodeToString(yPub)
+	tokenLogKey = []byte("test-log-key")
+
+	reg := newHSRegistry(80 * time.Millisecond)
+	regOnce := func(priv ed25519.PrivateKey, id, pk string, port int) string {
+		t.Helper()
+		return captureLog(t, func() {
+			pairRegister(reg, nil, "", v4(port), signReg(t, priv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: id, PubKey: pk}))
+		})
+	}
+
+	// 1./2. A and X pair; announced exactly once.
+	regOnce(aPriv, "A", aB64, 1000)
+	if out := regOnce(xPriv, "X", xB64, 2000); strings.Count(out, "PAIRED:") != 1 {
+		t.Fatalf("setup: first pairing produced %d PAIRED lines, want 1", strings.Count(out, "PAIRED:"))
+	}
+
+	// 3. X goes stale. A re-registers: upsert expires X INLINE while looking for a
+	//    partner, so the token is back to one live peer.
+	time.Sleep(120 * time.Millisecond)
+	reg.mu.Lock()
+	_, xStillThere := reg.waiting["tok"]["X"]
+	reg.mu.Unlock()
+	if !xStillThere {
+		t.Fatal("setup: X should still be in the bucket until an upsert expires it")
+	}
+	regOnce(aPriv, "A", aB64, 1000)
+	reg.mu.Lock()
+	live := len(reg.waiting["tok"])
+	latched := len(reg.pairedLogged)
+	reg.mu.Unlock()
+	if live != 1 {
+		t.Fatalf("after the inline expiry the token holds %d peers, want 1 (A only)", live)
+	}
+	if latched != 0 {
+		t.Errorf("the paired-once latch survived the drop to one live peer (%d entries) — "+
+			"a genuinely new pairing on this token will never be announced", latched)
+	}
+
+	// 4./5. A NEW second peer arrives: this is a new pairing and must be logged.
+	if out := regOnce(yPriv, "Y", yB64, 3000); strings.Count(out, "PAIRED:") != 1 {
+		t.Fatalf("the new pairing produced %d PAIRED lines, want exactly 1", strings.Count(out, "PAIRED:"))
 	}
 }

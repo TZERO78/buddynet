@@ -2,19 +2,30 @@
 # WG-4 live VIP<->pubkey binding on the WireGuard path (Phase 3).
 #
 # identity = key = VIP (10.66.X.Y = SHA-256(pubkey)). A peer that advertises a VIP
-# inconsistent with its key — a hostile/buggy roster, or a squat with a forged VIP —
-# must be REFUSED before any data plane comes up. The check is in the shared
-# pre-connect step (connect.go), so it gates the WireGuard path exactly like QUIC.
+# inconsistent with its key — a squat with a forged VIP — must never reach a data
+# plane. TWO layers enforce that, and this test measures the one that actually
+# fires against a hostile PEER:
+#
+#   1. the SERVER derives the VIP from the key itself and DROPS a registration
+#      claiming a different one (handshake.go deriveVIP) — so the forged entry
+#      never enters a roster, and the victim never pairs at all;
+#   2. the BUDDY re-checks the roster before connecting (connect.go
+#      checkPartnerVIP) — this is the defense against a hostile or buggy SERVER,
+#      which layer 1 cannot protect against because it IS the server.
+#
+# Layer 2 therefore cannot be triggered from here (a peer cannot forge a roster
+# the server signs); it is covered by internal/role/vipbinding_test.go. A live
+# proof of layer 2 needs a hostile handshake-server harness — proposed, not built.
 #
 # Topology (one bridge, three netns):
 #   ns-srv 10.50.0.10  handshake server
 #   ns-atk 10.50.0.30  wg-vip attacker (parks claiming a VIP; forged or correct)
 #   ns-vic 10.50.0.20  victim buddy (--wireguard, pins the attacker's key)
 #
-# Phase 1 (attack):  attacker advertises a FORGED VIP → victim logs
-#                    SECURITY: event=vip-mismatch and brings up NO bnet interface.
-# Phase 2 (control): attacker advertises the CORRECT VIP → victim passes the check
-#                    (action=partner-verified), no vip-mismatch.
+# Phase 1 (attack):  attacker advertises a FORGED VIP → the pairing never happens
+#                    and the victim brings up NO bnet interface.
+# Phase 2 (control): attacker advertises the CORRECT VIP → it pairs and the victim
+#                    passes the check (action=partner-verified), no vip-mismatch.
 # Needs root + the wg module.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -102,11 +113,16 @@ start_attacker "$TOK1" "$FORGED_VIP"
 run_victim "$TOK1" "$D/vic.forged.log"
 NB=$(bnet_count)
 echo "  attacker advertised vip=$FORGED_VIP ; attacker key derives a different vip"
-if grep -qE 'event=vip-mismatch|does not match its key' "$D/vic.forged.log" && [ "$NB" = "0" ]; then
-	echo "  [PASS] victim rejected the forged VIP (vip-mismatch) and brought up NO bnet interface"
-	grep -m1 'vip-mismatch' "$D/vic.forged.log" | sed 's/^/    /'
+# The forged registration is dropped by the server, so the victim never gets a
+# partner: it must stay in the retry loop, never log partner-verified, and never
+# create a bnet interface. (If it DID pair, the buddy-side check would refuse the
+# roster — that layer is unit-tested; see the header.)
+if ! grep -q 'action=partner-verified' "$D/vic.forged.log" &&
+	grep -q 'no peer with this token yet' "$D/vic.forged.log" && [ "$NB" = "0" ]; then
+	echo "  [PASS] forged VIP never entered a roster: no pairing, no bnet interface"
+	grep -m1 'no peer with this token yet' "$D/vic.forged.log" | sed 's/^/    /'
 else
-	echo "  [FAIL] expected a vip-mismatch reject and no bnet (bnet count=$NB)"; FAIL=1
+	echo "  [FAIL] expected no pairing and no bnet (bnet count=$NB)"; FAIL=1
 	tail -6 "$D/vic.forged.log" | sed 's/^/    /'
 fi
 kill_phase; sleep 2
@@ -124,4 +140,7 @@ else
 fi
 
 echo
-if [ "$FAIL" = 0 ]; then echo "RESULT: PASS — WG-4 VIP<->pubkey binding holds on the WireGuard path"; else echo "RESULT: FAIL"; exit 1; fi
+if [ "$FAIL" = 0 ]; then
+	echo "RESULT: PASS — a forged VIP never reaches a data plane on the WireGuard path"
+	echo "         (server-side reject; the buddy-side roster check is unit-tested — see the header)"
+else echo "RESULT: FAIL"; exit 1; fi

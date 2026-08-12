@@ -17,6 +17,12 @@ BUDDIES=(beta gamma delta epsilon zeta)
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.party.yml"
 
 echo "==> Building party image..."
+# Two steps ON PURPOSE. lab/Dockerfile.dns starts `FROM buddynet-lab-buddy`, and
+# compose does not know that dependency: in one `build` it can finish the dns
+# image BEFORE the base image it inherits from, so the party stack silently runs
+# the PREVIOUS binary. That is how a v6 hub once ran against a v7 server here —
+# the stack came up, the test failed, and nothing pointed at a stale image.
+docker compose -f docker-compose.yml build buddy-a >/dev/null
 $COMPOSE build >/dev/null
 
 # Placeholder manifests FIRST, so the compose bind-mounts resolve to files (not

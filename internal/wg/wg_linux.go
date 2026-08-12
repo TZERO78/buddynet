@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/netip"
 	"syscall"
+	"time"
 )
 
 // --- WireGuard generic-netlink constants (uapi/linux/wireguard.h) -----------
@@ -17,9 +18,12 @@ const (
 	wgGenlName    = "wireguard"
 	wgGenlVersion = 1
 
+	// enum wg_cmd { WG_CMD_GET_DEVICE, WG_CMD_SET_DEVICE } — GET is 0.
+	wgCmdGetDevice = 0
 	wgCmdSetDevice = 1
 
 	wgDeviceAIfindex    = 1
+	wgDeviceAIfname     = 2
 	wgDeviceAPrivateKey = 3
 	wgDeviceAFlags      = 5
 	wgDeviceAListenPort = 6
@@ -32,6 +36,7 @@ const (
 	wgPeerAFlags                       = 3
 	wgPeerAEndpoint                    = 4
 	wgPeerAPersistentKeepaliveInterval = 5
+	wgPeerALastHandshakeTime           = 6
 	wgPeerAAllowedips                  = 9
 
 	wgPeerFRemoveMe          = 1 // 1<<0 — drop this peer from the device
@@ -236,17 +241,36 @@ func parseFamilyID(resp []byte) (uint16, error) {
 
 // --- netlink I/O ------------------------------------------------------------
 
-// roundtrip opens a netlink socket of proto, sends req, and returns the reply.
-func roundtrip(proto int, req []byte) ([]byte, error) {
+// nlDial opens and binds a netlink socket of proto. A non-zero rcvTimeout arms
+// SO_RCVTIMEO so a reply that never arrives surfaces as EAGAIN instead of
+// blocking the caller forever.
+func nlDial(proto int, rcvTimeout time.Duration) (int, *syscall.SockaddrNetlink, error) {
 	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, proto)
 	if err != nil {
-		return nil, fmt.Errorf("wg: netlink socket: %w", err)
+		return -1, nil, fmt.Errorf("wg: netlink socket: %w", err)
 	}
-	defer syscall.Close(fd)
+	if rcvTimeout > 0 {
+		tv := syscall.NsecToTimeval(rcvTimeout.Nanoseconds())
+		if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+			syscall.Close(fd)
+			return -1, nil, fmt.Errorf("wg: netlink recv timeout: %w", err)
+		}
+	}
 	sa := &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}
 	if err := syscall.Bind(fd, sa); err != nil {
-		return nil, fmt.Errorf("wg: netlink bind: %w", err)
+		syscall.Close(fd)
+		return -1, nil, fmt.Errorf("wg: netlink bind: %w", err)
 	}
+	return fd, sa, nil
+}
+
+// roundtrip opens a netlink socket of proto, sends req, and returns the reply.
+func roundtrip(proto int, req []byte) ([]byte, error) {
+	fd, sa, err := nlDial(proto, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer syscall.Close(fd)
 	if err := syscall.Sendto(fd, req, 0, sa); err != nil {
 		return nil, fmt.Errorf("wg: netlink send: %w", err)
 	}
@@ -257,6 +281,40 @@ func roundtrip(proto int, req []byte) ([]byte, error) {
 	}
 	return buf[:n], nil
 }
+
+// roundtripDump sends a dump request and hands every reply datagram to onReply
+// until it reports the dump finished (NLMSG_DONE) or returns an error. Unlike
+// roundtrip it must read repeatedly: a dump can span several datagrams, and the
+// terminating NLMSG_DONE may arrive in one of its own.
+func roundtripDump(proto int, req []byte, onReply func([]byte) (done bool, err error)) error {
+	fd, sa, err := nlDial(proto, dumpRecvTimeout)
+	if err != nil {
+		return err
+	}
+	defer syscall.Close(fd)
+	if err := syscall.Sendto(fd, req, 0, sa); err != nil {
+		return fmt.Errorf("wg: netlink send: %w", err)
+	}
+	buf := make([]byte, 1<<16)
+	for {
+		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		if err != nil {
+			return fmt.Errorf("wg: netlink recv: %w", err)
+		}
+		done, err := onReply(buf[:n])
+		if err != nil {
+			return err
+		}
+		if done {
+			return nil
+		}
+	}
+}
+
+// dumpRecvTimeout bounds a single netlink dump read. The kernel answers a
+// GET_DEVICE dump immediately; this only keeps a lost reply from wedging the
+// handshake proof, which runs on the buddy's connect path.
+const dumpRecvTimeout = 2 * time.Second
 
 // ackErr decodes an NLMSG_ERROR payload (leading negated errno). Zero is success.
 func ackErr(payload []byte) error {
@@ -413,6 +471,114 @@ func resolveDevice(ifName string) (family uint16, ifindex int, err error) {
 		return 0, 0, err
 	}
 	return family, iface.Index, nil
+}
+
+// --- device state over NETLINK_GENERIC (the read path) ----------------------
+
+// scanGetDeviceReply walks one datagram of a WG_CMD_GET_DEVICE dump and reports
+// the last-handshake time of the peer whose public key is peerPub. found is false
+// while the kernel still reports an all-zero timestamp — i.e. no handshake has
+// completed yet — and stays false for every other peer, so a live third party on
+// the same device can never stand in for the partner we pinned. done is true once
+// the dump is terminated (NLMSG_DONE, or an ACK the kernel sends in its place).
+func scanGetDeviceReply(resp []byte, peerPub [32]byte) (ts time.Time, found, done bool, err error) {
+	msgs, perr := syscall.ParseNetlinkMessage(resp)
+	if perr != nil {
+		return time.Time{}, false, false, fmt.Errorf("wg: parse get device reply: %w", perr)
+	}
+	for _, m := range msgs {
+		switch m.Header.Type {
+		case syscall.NLMSG_ERROR:
+			if e := ackErr(m.Data); e != nil {
+				return time.Time{}, false, false, fmt.Errorf("wg: get device: %w", e)
+			}
+			done = true
+			continue
+		case syscall.NLMSG_DONE:
+			done = true
+			continue
+		}
+		if len(m.Data) < genlHdrLen {
+			continue
+		}
+		attrWalk(m.Data[genlHdrLen:], func(typ uint16, val []byte) {
+			if typ != wgDeviceAPeers {
+				return
+			}
+			// WGDEVICE_A_PEERS nests one entry per peer, keyed by array index.
+			attrWalk(val, func(_ uint16, peer []byte) {
+				if t, ok := peerHandshake(peer, peerPub); ok {
+					ts, found = t, true
+				}
+			})
+		})
+	}
+	return ts, found, done, nil
+}
+
+// peerHandshake decodes one WGPEER entry: it reports the peer's last-handshake
+// time if the entry belongs to peerPub AND that timestamp is non-zero. The
+// kernel reports it as a struct __kernel_timespec on CLOCK_REALTIME; zero means
+// "never handshaked", and the interface is freshly created by Up, so a stale
+// value from an earlier run cannot exist.
+func peerHandshake(peer []byte, peerPub [32]byte) (time.Time, bool) {
+	var (
+		key      [32]byte
+		haveKey  bool
+		sec      int64
+		nsec     int64
+		haveTime bool
+	)
+	attrWalk(peer, func(typ uint16, val []byte) {
+		switch typ {
+		case wgPeerAPublicKey:
+			if len(val) == 32 {
+				copy(key[:], val)
+				haveKey = true
+			}
+		case wgPeerALastHandshakeTime:
+			if len(val) >= 16 {
+				sec = int64(nativeEndian.Uint64(val[0:8]))
+				nsec = int64(nativeEndian.Uint64(val[8:16]))
+				haveTime = true
+			}
+		}
+	})
+	if !haveKey || key != peerPub || !haveTime {
+		return time.Time{}, false
+	}
+	if sec == 0 && nsec == 0 {
+		return time.Time{}, false // configured, but never handshaked
+	}
+	return time.Unix(sec, nsec), true
+}
+
+// Handshaked returns the time of the last completed WireGuard handshake with
+// peerPub on ifName, or the zero time if the kernel has not completed one yet.
+// A completed handshake is the only proof the data plane has that the partner
+// really holds the pinned key — bringing the interface up proves nothing.
+func Handshaked(ifName string, peerPub [32]byte) (time.Time, error) {
+	family, err := resolveFamily(wgGenlName)
+	if err != nil {
+		return time.Time{}, err
+	}
+	attrs := nlAttr(wgDeviceAIfname, append([]byte(ifName), 0))
+	req := genlMessage(family, syscall.NLM_F_REQUEST|syscall.NLM_F_DUMP, 1, wgCmdGetDevice, wgGenlVersion, attrs)
+	var ts time.Time
+	err = roundtripDump(syscall.NETLINK_GENERIC, req, func(resp []byte) (bool, error) {
+		t, found, done, err := scanGetDeviceReply(resp, peerPub)
+		if err != nil {
+			return true, err
+		}
+		if found {
+			ts = t
+		}
+		return done, nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return ts, nil
 }
 
 // --- orchestration ----------------------------------------------------------

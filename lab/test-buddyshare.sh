@@ -74,7 +74,7 @@ add_node a 10.50.0.20
 add_node b 10.50.0.30
 
 echo "== [$(date +%T)] samba: private instance in ns-a (stock Unraid shape: bind 0.0.0.0) =="
-mkdir -p "$D/share" "$D/smb-private" "$D/smb-lock" "$D/smb-state" "$D/smb-cache" "$D/smb-pid"
+mkdir -p "$D/share" "$D/smb-private" "$D/smb-lock" "$D/smb-state" "$D/smb-cache" "$D/smb-pid" "$D/smb-ncalrpc"
 echo "hello from buddy A" > "$D/share/greeting.txt"
 cat > "$D/smb.conf" <<CONF
 [global]
@@ -86,6 +86,10 @@ cat > "$D/smb.conf" <<CONF
   state directory = $D/smb-state
   cache directory = $D/smb-cache
   pid directory = $D/smb-pid
+  # Without this smbd falls back to /run/samba/ncalrpc and EXITS if that
+  # directory is absent — which it is on any host where the system smbd has
+  # never run. The instance is only "private" once every path it needs is here.
+  ncalrpc dir = $D/smb-ncalrpc
   log file = $D/smb.log
   log level = 1
   server min protocol = SMB2

@@ -374,8 +374,14 @@ func TestUnapprovedKeysCannotOccupyTheReplayCache(t *testing.T) {
 
 	// A stranger now hammers the server with valid, self-signed registrations —
 	// far more than the cache can hold.
+	//
+	// The enrollment limiter has to come OFF for the flood to be a flood: at 2/s
+	// per source it admits about four of these before the loop is done, so with it
+	// in place the cache never fills and this test asserted its property over an
+	// almost-empty map. A real attacker is not bounded by the test's wall clock.
 	stranger, _ := testNode(t)
 	stranger.serverPub = approved.serverPub
+	authz.enroll = nil
 	for i := 0; i < maxReplayRegs+64; i++ {
 		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
@@ -587,9 +593,12 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 		t.Fatal("the approved registration should have been accepted")
 	}
 
-	// A stranger floods far past the pre-auth cache's capacity.
+	// A stranger floods far past the pre-auth cache's capacity. As above, the
+	// limiter comes off so the flood actually reaches the cache — otherwise the
+	// eviction path this test exists for is never executed at all.
 	stranger, _ := testNode(t)
 	stranger.serverPub = approved.serverPub
+	authz.enroll = nil
 	for i := 0; i < maxPreAuthRegs+256; i++ {
 		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
@@ -607,8 +616,57 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 	if preAuthEntries > maxPreAuthRegs {
 		t.Fatalf("pre-auth cache grew to %d, past its cap of %d", preAuthEntries, maxPreAuthRegs)
 	}
+	// The point of the flood: the cache must actually have FILLED, or the eviction
+	// path below is never exercised and the assertion that follows is vacuous.
+	if preAuthEntries < maxPreAuthRegs {
+		t.Fatalf("pre-auth cache only reached %d of %d entries — the flood never filled it, "+
+			"so this test proves nothing about eviction", preAuthEntries, maxPreAuthRegs)
+	}
 	// The decisive assertion: the approved buddy's registration is STILL caught.
 	if _, ok := pairRegister(reg, authz, "", v4(3000), victim); ok {
 		t.Fatal("a pre-auth flood evicted an approved buddy's replay entry")
+	}
+}
+
+// A structurally broken request costs the CONNECTION, not just the request. No
+// buddy ever sends one, so a peer that does is broken or probing — and a
+// connection kept alive across refusals is a control-plane slot held for free.
+func TestMalformedRequestDropsTheConnection(t *testing.T) {
+	nd, _ := testNode(t)
+	srvAddr, srvPub, _, _, _ := enrollServer(t, nd.pub)
+	nd.serverPub = srvPub
+
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cli, err := tunnel.DialControl(ctx, c, srvAddr, srvPub, nd.priv, controlIdleTimeout)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer cli.Close()
+
+	// Positive control on this very connection: a well-formed registration works,
+	// so anything failing below fails for the reason under test.
+	rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
+	resp, err := cli.Roundtrip(rctx, mustBuild(t, nd, ""))
+	rcancel()
+	if err != nil || len(resp) == 0 {
+		t.Fatalf("positive control failed: a valid registration was not answered (%v)", err)
+	}
+
+	// Now something that cannot parse.
+	bctx, bcancel := context.WithTimeout(ctx, 5*time.Second)
+	cli.Roundtrip(bctx, []byte("this is not a registration"))
+	bcancel()
+
+	// The connection must be gone, not merely the request unanswered.
+	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer ncancel()
+	if resp, err := cli.Roundtrip(nctx, mustBuild(t, nd, "")); err == nil && len(resp) > 0 {
+		t.Fatal("the connection survived a malformed request; it must be closed")
 	}
 }

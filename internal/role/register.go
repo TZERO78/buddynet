@@ -217,27 +217,43 @@ func buildRegister(cfg BuddyConfig, nd *node, rendezvous, cookie string) ([]byte
 	if cfg.Code != "" {
 		// Sealed BEFORE signing: CodeEnc is covered by the signature, so a captured
 		// enrollment code cannot be re-bound to a different public key.
-		if enc, serr := bcrypto.SealCode(cfg.Code, nd.serverPub); serr == nil {
-			m.CodeEnc = enc
+		//
+		// A sealing failure is an ERROR, not a silently code-less registration: the
+		// operator passed --code because they are waiting to approve this client, and
+		// dropping the field would leave them watching a `pending` line that never
+		// appears, with nothing anywhere saying why.
+		enc, serr := bcrypto.SealCode(cfg.Code, nd.serverPub)
+		if serr != nil {
+			return nil, fmt.Errorf("seal the enrollment code to the server key: %w", serr)
 		}
+		m.CodeEnc = enc
 	}
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(nd.priv, protocol.RegistrationPayload(m)))
-	setToken(&m, rendezvous, nd.serverPub)
+	if err := setToken(&m, rendezvous, nd.serverPub); err != nil {
+		return nil, err
+	}
 	return json.Marshal(m)
 }
 
 // setToken puts the pairing rendezvous on a REGISTER, sealed to the server's
 // pinned identity key so it never travels in cleartext on the plain-UDP control
-// plane (an on-path observer sees only ciphertext). It falls back to the
-// plaintext field only if sealing is somehow unavailable; the signature is always
-// over the raw rendezvous, which the server recovers by unsealing.
-func setToken(m *protocol.Message, rendezvous string, serverPub ed25519.PublicKey) {
-	if enc, err := bcrypto.SealCode(rendezvous, serverPub); err == nil {
-		m.TokenEnc = enc
-		m.Token = "" // sealed form only on the wire; the signature still covers the plaintext
-		return
+// plane (an on-path observer sees only ciphertext). The signature is always over
+// the raw rendezvous, which the server recovers by unsealing.
+//
+// A sealing failure is an ERROR rather than a fall back to the cleartext field.
+// That fallback put the pairing token on the wire unencrypted precisely when
+// something was already wrong — and silently, so an operator who had chosen the
+// plain-UDP transport would have had no way to notice that the one protection it
+// still had was gone. Refusing to register is the safe outcome: the buddy retries,
+// and a token that stays secret can still be used.
+func setToken(m *protocol.Message, rendezvous string, serverPub ed25519.PublicKey) error {
+	enc, err := bcrypto.SealCode(rendezvous, serverPub)
+	if err != nil {
+		return fmt.Errorf("seal the pairing token to the server key: %w", err)
 	}
-	m.Token = rendezvous
+	m.TokenEnc = enc
+	m.Token = "" // sealed form only on the wire; the signature still covers the plaintext
+	return nil
 }
 
 // canonicalPeers returns the roster in the same ID-sorted order the server

@@ -91,11 +91,21 @@ The WG path walks the **same fallback chain** as QUIC — direct first, then a r
    survives the handoff (`lab/test-wg-handoff.sh`). Over a relay, the relay
    blindly forwards the encrypted WireGuard packets between the two legs — it is
    **not** a WireGuard peer and holds no key, exactly as it forwards QUIC.
-5. **Reconnects** use a deterministic static-DH secret (`crypto.PairSecret`) of the
+5. **Wait for the WireGuard handshake.** Bringing the interface up is pure
+   configuration — it succeeds even if that partner does not exist anywhere. So
+   BuddyNet sends a probe datagram to the partner's VIP (this is what makes the
+   kernel start the handshake; the 25 s keepalive alone could be that late) and
+   polls the device until the peer reports a completed handshake. Only the holder
+   of the pinned key can produce one. Timeout: 10 s — same budget as the QUIC
+   dial; then the interface is torn down, **nothing is persisted**, and the
+   supervisor retries.
+6. **Reconnects** use a deterministic static-DH secret (`crypto.PairSecret`) of the
    two identities — no stored TLS material.
 
-`CONNECTED` logs the path, e.g. `via="direct P2P (WireGuard)"` or
-`via="handshake server as relay (WireGuard)"`.
+`CONNECTED` logs the path and the proven handshake time, e.g.
+`via="direct P2P (WireGuard)" … handshake=2026-08-12T09:14:07Z`, or
+`via="handshake server as relay (WireGuard)"`. It is logged **after** step 5, so a
+`CONNECTED` line on this path always means a real partner answered.
 
 ## Reaching the partner
 
@@ -183,8 +193,14 @@ The supervisor assigns each buddy a stable interface index, reconciled live on
 
 - All control-plane guarantees are unchanged: signed `PEER_LIST`, VIP↔key reject,
   pinning/TOFU with a SAS on first contact, replay/cap protections, blind relay.
-- **Fails closed:** WG unavailable, no usable path, or a rejected SAS → an error,
-  never a silent switch to another data plane.
+- **Fails closed:** WG unavailable, no usable path, a rejected SAS, or no
+  WireGuard handshake within 10 s → an error, never a silent switch to another
+  data plane.
+- **Nothing is persisted before the partner is proven.** The `.buddy` name table,
+  the cached endpoint and retiring the invite token all wait for the completed
+  handshake (step 5 above). Without that, a compromised handshake server could get
+  a name TOFU-pinned and an invite token retired for a connection that never
+  existed — configuring an interface proves nothing about who is on the far end.
 - **Whole-host exposure: RESOLVED by scoped exposure.** The formerly documented
   residual risk — every `0.0.0.0` service reachable by the buddy — is closed:
   inbound on `bnetN` is **fail-closed by default** and opened per port with

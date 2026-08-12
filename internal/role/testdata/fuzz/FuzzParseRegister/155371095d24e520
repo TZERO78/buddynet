@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"tYpe\":\"REGISTER\",\"token\":\"0\",\"id\":\"0\"}")

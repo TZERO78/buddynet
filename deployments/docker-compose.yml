@@ -18,7 +18,7 @@ services:
     build:
       context: ..
       dockerfile: deployments/Dockerfile
-    image: ghcr.io/tzero78/buddynet:v1.2.1   # locally built by the handshake service; bump per release
+    image: ghcr.io/tzero78/buddynet:v4.0.0   # locally built by the handshake service; bump per release
     command:
       - --role=handshake
       - --listen
@@ -32,6 +32,12 @@ services:
     volumes:
       - buddynet:/var/lib/buddynet   # persistent identity key (and allowlist)
     restart: unless-stopped
+    # Bound the log: the roles log per-event, and an abuse burst must not be able
+    # to fill the host disk. The systemd units carry LogRateLimit for the same
+    # reason; compose needs it stated explicitly.
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     # --- container hardening -------------------------------------------------
     read_only: true
     cap_drop: [ALL]
@@ -39,7 +45,7 @@ services:
       - no-new-privileges:true
 
   relay:
-    image: ghcr.io/tzero78/buddynet:v1.2.1   # locally built by the handshake service; bump per release
+    image: ghcr.io/tzero78/buddynet:v4.0.0   # locally built by the handshake service; bump per release
     command:
       - --role=relay
       - --listen
@@ -47,6 +53,12 @@ services:
     ports:
       - "${BUDDYNET_RELAY_PORT:-51821}:${BUDDYNET_RELAY_PORT:-51821}/udp"
     restart: unless-stopped
+    # Bound the log: the roles log per-event, and an abuse burst must not be able
+    # to fill the host disk. The systemd units carry LogRateLimit for the same
+    # reason; compose needs it stated explicitly.
+    logging:
+      driver: json-file
+      options: {max-size: "10m", max-file: "3"}
     # --- container hardening -------------------------------------------------
     read_only: true
     cap_drop: [ALL]

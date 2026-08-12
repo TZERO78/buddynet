@@ -6,9 +6,11 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"github.com/tzero78/buddynet/internal/atomicfile"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/tzero78/buddynet/internal/tunnel"
 )
@@ -53,15 +55,30 @@ type storedSession struct {
 	secret string
 }
 
+// sessionFileMu serialises every read-modify-write of the session store within
+// this process. MultiPeer runs one worker per buddy, and they confirm their
+// partners independently, so concurrent upserts are the normal case rather than
+// the exception.
+var sessionFileMu sync.Mutex
+
 // saveSession upserts the session line FOR THIS PARTNER: it drops only the
 // previous session line whose partner key matches partnerB64 (re-pairing the same
 // buddy), preserves session lines for OTHER partners (multi-peer) and legacy
 // 2-field TOFU lines, then appends the new one. The store stays 0600 in a 0700
 // directory (same trust domain as id.key).
+//
+// The whole read-modify-write runs under sessionFileMu, and the write itself is
+// atomic. In MultiPeer mode several buddy workers reach this concurrently, and
+// each one reads the file, adds ITS line and writes the result back — so without
+// serialisation the last writer silently drops every session another worker
+// stored in between, and a crash mid-write could leave a truncated store (which
+// reads as "no sessions", i.e. every buddy falls back to needing a fresh invite).
 func saveSession(path, inviteToken, partnerB64, secret string) error {
 	if path == "" {
 		return fmt.Errorf("no known-peers path to persist the session")
 	}
+	sessionFileMu.Lock()
+	defer sessionFileMu.Unlock()
 	var kept []string
 	if f, err := os.Open(path); err == nil {
 		sc := bufio.NewScanner(f)
@@ -86,7 +103,7 @@ func saveSession(path, inviteToken, partnerB64, secret string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(strings.Join(kept, "\n")+"\n"), 0o600)
+	return atomicfile.Write(path, []byte(strings.Join(kept, "\n")+"\n"), 0o600)
 }
 
 // removeSession drops the stored session line(s) for partnerB64 from the store
@@ -98,6 +115,8 @@ func removeSession(path, partnerB64 string) (int, error) {
 	if path == "" {
 		return 0, nil
 	}
+	sessionFileMu.Lock() // same read-modify-write as saveSession; same serialisation
+	defer sessionFileMu.Unlock()
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -130,7 +149,7 @@ func removeSession(path, partnerB64 string) (int, error) {
 	if out != "" {
 		out += "\n"
 	}
-	return removed, os.WriteFile(path, []byte(out), 0o600)
+	return removed, atomicfile.Write(path, []byte(out), 0o600)
 }
 
 // loadSessions returns every stored session (one per pinned partner). The

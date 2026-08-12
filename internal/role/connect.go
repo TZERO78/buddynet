@@ -74,15 +74,8 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
 			return err
 		}
-		// The virtual IP is a pure function of the key; reject a roster that
-		// claims an inconsistent one (defends against a buggy/hostile server, or a
-		// squat that forged a virtual IP). Log the security event HERE, at the
-		// detection point, rather than letting it surface as a generic tunnel error.
-		if want := bcrypto.VirtualIPString(partnerPub); partner.VirtualIP != "" && partner.VirtualIP != want {
-			log.Printf("SECURITY: event=vip-mismatch key=%s detail=%q",
-				keyTag(partner.PubKey),
-				fmt.Sprintf("roster claims vip %s but the key derives %s (hostile/buggy server, or a squat with a forged vip)", partner.VirtualIP, want))
-			return fmt.Errorf("partner virtual IP %s does not match its key (want %s)", partner.VirtualIP, want)
+		if err := checkPartnerVIP(partner, partnerPub); err != nil {
+			return err
 		}
 		// NOTE: deliberately NOT persisted here. The roster has been checked for
 		// consistency, but nothing has yet PROVEN that the key on it belongs to the
@@ -268,6 +261,30 @@ func rememberPeer(reg *peer.Registry, p protocol.Peer) {
 	if err := reg.Upsert(p); err != nil {
 		log.Printf("NOTE: could not update the peer cache (%v) — the tunnel is unaffected, but the offline fallback may be stale", err)
 	}
+}
+
+// checkPartnerVIP enforces "identity IS address" on the roster the server handed
+// us: the virtual IP is a pure function of the public key, so a roster claiming
+// an inconsistent one is refused before any data plane comes up. This is the
+// buddy-side half of the defense — the server derives the VIP itself and drops a
+// registration that claims a different one, so in a healthy deployment this never
+// fires. It exists for the case the server itself is hostile or buggy, which is
+// exactly the case where the server-side check is worth nothing.
+//
+// An absent VirtualIP is not a mismatch: it carries no claim, and everything that
+// matters (the WG peer address, the route) is derived from the key regardless.
+//
+// The SECURITY event is logged here, at the detection point, rather than being
+// left to surface as a generic tunnel error somewhere up the stack.
+func checkPartnerVIP(partner protocol.Peer, partnerPub ed25519.PublicKey) error {
+	want := bcrypto.VirtualIPString(partnerPub)
+	if partner.VirtualIP == "" || partner.VirtualIP == want {
+		return nil
+	}
+	log.Printf("SECURITY: event=vip-mismatch key=%s detail=%q",
+		keyTag(partner.PubKey),
+		fmt.Sprintf("roster claims vip %s but the key derives %s (hostile/buggy server, or a squat with a forged vip)", partner.VirtualIP, want))
+	return fmt.Errorf("partner virtual IP %s does not match its key (want %s)", partner.VirtualIP, want)
 }
 
 // dialChain walks the fallback chain and returns the first session it can

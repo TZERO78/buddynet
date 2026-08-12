@@ -27,15 +27,37 @@ const BindPrefix = "BNRELAY1"
 // ChallengePrefix tags a relay's address-validation challenge. The relay sends
 // it (carrying an opaque cookie) when a bind arrives without a valid cookie; the
 // buddy echoes the cookie on its next bind to prove return-routability. The
-// challenge is a fixed, compact binary message (prefix + raw cookie bytes) that
-// is SMALLER than the bind that triggers it, so it can never be an amplifier —
-// the same property the handshake server's cookie has. It closes the relay's
+// challenge is a fixed, compact binary message (prefix + raw cookie bytes). The
+// sender compares its length against the received datagram and stays silent when
+// it would not be strictly smaller — the same gate the handshake server's cookie
+// has, and the actual anti-amplification control here (MinSessionTokenLen happens
+// to keep it out of reach of honest traffic, but does not replace it). It closes the relay's
 // only reflection/traffic-laundering vector: without it, a spoofed bind could
 // register a victim's address as a leg and have attacker data forwarded to it.
 const ChallengePrefix = "BNRLYC1"
 
 // CookieLen is the length of the raw address-validation cookie a relay mints.
 const CookieLen = 16
+
+// MinSessionTokenLen is the shortest session token a relay will act on.
+//
+// This is a WIRE-POLICY TIGHTENING introduced by this branch, not a pre-existing
+// rule — the relay used to accept a single character. It stands on its own
+// security argument: the session token is the ONLY thing that splices two legs
+// together, so a short one is guessable, and a third party that hits it lands in
+// someone else's session (the leg cap then costs the real partner its slot).
+//
+// Compatibility: every buddy derives this token in role.sessionToken as 16 bytes
+// of SHA-256 rendered base64url — 22 characters, always, in every released
+// version. No client has ever sent anything shorter, so the floor rejects nothing
+// that exists. An operator cannot set it by hand; it is derived, never configured.
+//
+// It is NOT the anti-amplification control. That is the length comparison in
+// Server.bind, which holds whatever this constant is set to. The two are
+// independent: this bounds guessability, the gate bounds the reply. A side effect
+// is that the gate never fires on honest traffic — the smallest bind admitted here
+// is 32 bytes against a 23-byte challenge.
+const MinSessionTokenLen = 16
 
 // Bind is the control message a buddy sends a relay to claim one leg of a
 // session. Two legs presenting the same SessionToken are spliced together. The
@@ -63,7 +85,8 @@ func ParseBind(pkt []byte) (Bind, bool) {
 		return Bind{}, false
 	}
 	var b Bind
-	if json.Unmarshal(pkt[len(BindPrefix):], &b) != nil || b.SessionToken == "" ||
+	if json.Unmarshal(pkt[len(BindPrefix):], &b) != nil ||
+		len(b.SessionToken) < MinSessionTokenLen ||
 		len(b.SessionToken) > protocol.MaxFieldLen || len(b.Cookie) > protocol.MaxFieldLen {
 		return Bind{}, false
 	}

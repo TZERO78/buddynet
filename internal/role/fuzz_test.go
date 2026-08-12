@@ -24,6 +24,12 @@ func FuzzParseRegister(f *testing.F) {
 	f.Add([]byte("not json at all"))
 	f.Add([]byte(""))
 	f.Add([]byte(`{"type":"REGISTER","ver":` + itoa(protocol.Version) + `,"token":"","id":"x"}`))
+	// Found by fuzzing, kept as a seed: Go's JSON decoder matches field names
+	// CASE-INSENSITIVELY, so "tYpe" reaches Message.Type. Nothing is gained by it —
+	// an attacker can just write "type" — but it means the wire format is laxer than
+	// the struct tags suggest, and a future check that keys off the raw bytes rather
+	// than the decoded message would be wrong.
+	f.Add([]byte(`{"tYpe":"REGISTER","token":"0","id":"0"}`))
 
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		m, ok := parseRegister(raw)
@@ -33,9 +39,13 @@ func FuzzParseRegister(f *testing.F) {
 		if m.Type != protocol.TypeRegister {
 			t.Fatalf("accepted a non-REGISTER type %q", m.Type)
 		}
-		if m.Ver != protocol.Version {
-			t.Fatalf("accepted a mismatched version %d", m.Ver)
-		}
+		// NOT asserted: the protocol version. parseRegister deliberately does not
+		// check it — a client on an older version must reach the point where the
+		// server can answer replyIncompatible ("update buddynet") instead of being
+		// dropped in silence, which is what the side-by-side rollout in
+		// docs/PROTOCOL.md depends on. The version is checked by the callers, after
+		// the source address is validated. Asserting it here made the fuzzer report
+		// the documented design as a bug.
 		if m.Token == "" || len(m.Token) > protocol.MaxFieldLen {
 			t.Fatalf("accepted bad token len=%d", len(m.Token))
 		}
