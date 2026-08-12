@@ -74,6 +74,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   slice of subnet routing shipped early under a flag that says "expose ports on
   this host".
 
+### Added
+
+- **`lab/test-relay-accounting.sh`** — a root-only network-namespace lab that
+  claims relay legs from 65 addresses of one IPv6 `/64` (and one address of
+  another) against the real relay binary, through the real client bind path, and
+  asserts the `/64` shares one budget and cannot lock out an unrelated prefix.
+  Point `BNBIN=` at an older build to watch it fail.
+
+### Changed
+
+- The Unraid plugin loses its *Encrypt the control plane* option (there is only
+  one control plane now) and passes the pairing token as `--join`.
+- The lab scripts, compose files and the pentest probe follow: the probe drops
+  every scenario that targeted the UDP plane. Those attacks are not untested now,
+  they are **unreachable** — QUIC will not carry a connection without a valid
+  Ed25519 client certificate, and the server binds `REGISTER.pubkey` to it. A
+  QUIC-native scenario set is separate work.
+
 ### Fixed
 
 - **Concurrent peer updates no longer lose entries from `peers.json`.** `Upsert`
@@ -92,17 +110,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   i.e. exactly when something was already wrong. It returns an error now; there
   is no cleartext field left to fall back to either.
 
-### Changed
-
-- The Unraid plugin loses its *Encrypt the control plane* option (there is only
-  one control plane now) and passes the pairing token as `--join`.
-- The lab scripts, compose files and the pentest probe follow: the probe drops
-  every scenario that targeted the UDP plane. Those attacks are not untested now,
-  they are **unreachable** — QUIC will not carry a connection without a valid
-  Ed25519 client certificate, and the server binds `REGISTER.pubkey` to it. A
-  QUIC-native scenario set is separate work.
-
 ### Security
+
+- **A revoked buddy can no longer be resurrected by a concurrent reconnect.** The
+  `known_peers` session store is written by TWO processes — the running buddy
+  (`saveSession`, on every reconnect) and the operator's CLI (`peers remove`, the
+  revoke path) — but its read-modify-write was serialised only by an in-process
+  mutex. Two processes hold different mutexes, so one could rename its snapshot
+  over the other's: a stored session silently dropped, or a session the operator
+  had just revoked written back and reconnectable again. Both directions are now
+  serialised by the same advisory file lock the allowlist already uses, taken
+  across the read-modify-write and fail-closed (a lock that cannot be taken means
+  another process is mid-update — exactly when writing anyway loses data).
 
 - **One IPv6 /64 could exhaust a public relay (unauthenticated remote DoS).** The
   relay charged its abuse budgets — the per-source bind rate limit and the
@@ -149,14 +168,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   Found by the network-namespace lab after the fix above, not by the unit tests;
   both cases are covered by regression tests now.
-
-### Added
-
-- **`lab/test-relay-accounting.sh`** — a root-only network-namespace lab that
-  claims relay legs from 65 addresses of one IPv6 `/64` (and one address of
-  another) against the real relay binary, through the real client bind path, and
-  asserts the `/64` shares one budget and cannot lock out an unrelated prefix.
-  Point `BNBIN=` at an older build to watch it fail.
 
 ## [v4.0.0] — 2026-08-11
 
