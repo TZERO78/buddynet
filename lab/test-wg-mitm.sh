@@ -50,9 +50,9 @@ go build -o "$MITM" ./lab/wg-mitm
 sudo modprobe wireguard
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
 echo "server=$SRVPUB"; echo "A=$APUB"; echo "B=$BPUB"
 
 echo "== bridge topology =="

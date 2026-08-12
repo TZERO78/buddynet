@@ -28,6 +28,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -62,16 +63,49 @@ func main() {
 
 	// `identity` subcommand: print this server's public key (the value buddies pin
 	// with --server-key, and that you bake into a pre-pinned client) and exit.
+	// READ-ONLY — creating an identity is `init`, on purpose: a public matchmaker
+	// that mints a fresh key after a lost volume is a different server to everyone
+	// who pinned the old one.
 	if flag.Arg(0) == "identity" {
 		if *keyPath == "" {
 			fmt.Fprintln(os.Stderr, "error: set --key <path> to read the persistent identity")
 			os.Exit(1)
 		}
-		priv, _, err := bcrypto.LoadOrCreateKey(*keyPath)
+		priv, _, err := bcrypto.LoadKey(*keyPath)
+		if errors.Is(err, bcrypto.ErrKeyMissing) {
+			fmt.Fprintf(os.Stderr, "error: %v\n\n"+
+				"  Create it once (this is the only command that does):\n"+
+				"      buddynet-handshake --key %s init\n\n"+
+				"  If this host has run before, the key is LOST rather than absent — check the\n"+
+				"  volume or credential holding it before creating a new identity.\n", err, *keyPath)
+			os.Exit(1)
+		}
 		if err != nil {
 			log.Fatalf("identity key: %v", err)
 		}
 		fmt.Println(bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
+		return
+	}
+
+	// `init` subcommand: create the identity, once. Refuses to replace one.
+	if flag.Arg(0) == "init" {
+		if *keyPath == "" {
+			fmt.Fprintln(os.Stderr, "error: set --key <path> — `init` creates a persistent identity, so it needs somewhere to put it")
+			os.Exit(1)
+		}
+		priv, err := bcrypto.CreateKey(*keyPath)
+		if err != nil {
+			if errors.Is(err, os.ErrExist) {
+				fmt.Fprintf(os.Stderr, "error: %s already holds an identity — refusing to replace it.\n"+
+					"  Print the existing one with: buddynet-handshake --key %s identity\n", *keyPath, *keyPath)
+				os.Exit(1)
+			}
+			log.Fatalf("create identity: %v", err)
+		}
+		fmt.Println(bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
+		fmt.Fprintf(os.Stderr, "\ncreated a new identity at %s\n"+
+			"  Buddies pin this key as --server-key. Back the file up: losing it makes\n"+
+			"  this a DIFFERENT server to every buddy, and they all have to re-pin.\n", *keyPath)
 		return
 	}
 
@@ -84,12 +118,21 @@ func main() {
 	// Surface the pinned identity up front so the operator can distribute/pre-pin
 	// it, and warn loudly if the key is ephemeral (public servers must be stable).
 	if *keyPath != "" {
-		if priv, created, err := bcrypto.LoadOrCreateKey(*keyPath); err == nil {
-			pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
-			log.Printf("handshake identity (buddies pin this --server-key): %s", pub)
-			if created {
-				log.Printf("WARNING: generated a NEW identity at %s — every buddy must (re-)pin it", *keyPath)
-			}
+		priv, _, kerr := bcrypto.LoadKey(*keyPath)
+		if errors.Is(kerr, bcrypto.ErrKeyMissing) {
+			fmt.Fprintf(os.Stderr, "error: %v\n\n"+
+				"  If this is the FIRST start on this host, create the identity once:\n"+
+				"      buddynet-handshake --key %s init\n\n"+
+				"  If this host HAS run before, the key is missing rather than absent — check\n"+
+				"  that the volume or credential holding it is mounted. Starting with a new\n"+
+				"  identity would lock out every buddy that pinned the old one, and this is a\n"+
+				"  PUBLIC matchmaker: its whole job is to be the one key everybody pinned.\n",
+				kerr, *keyPath)
+			os.Exit(1)
+		}
+		if kerr == nil {
+			log.Printf("handshake identity (buddies pin this --server-key): %s",
+				bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
 		}
 	} else {
 		log.Print("WARNING: no --key: identity is EPHEMERAL and changes on restart (buddies would have to re-pin). Inject a persistent key for a public server.")

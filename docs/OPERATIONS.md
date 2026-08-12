@@ -327,7 +327,7 @@ The `via=` field in `CONNECTED` tells you which path the tunnel used:
 
 ```
 WARNING: key file PATH has permissions MODE, expected 0600
-WARNING: generated a NEW identity at PATH — buddies must pin the new key
+WARNING: ephemeral identity KEY — pass --key to persist it (buddies pin this)
 NOTE: --reauth-interval is 0 (off): a server-side revocation will NOT tear down a direct tunnel
 NOTE: BuddyDNS: could not register .buddy with systemd-resolved (…)
 NOTE: server roster is signed but N out of date — check NTP/time-sync

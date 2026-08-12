@@ -35,9 +35,9 @@ echo "== build =="
 go build -o "$BN" ./cmd/buddynet
 sudo modprobe wireguard
 
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
 
 echo "== topology =="
 sudo ip netns add ns-sw; sudo ip netns add ns-srv; sudo ip netns add ns-a; sudo ip netns add ns-b

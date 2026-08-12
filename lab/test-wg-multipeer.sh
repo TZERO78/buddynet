@@ -32,10 +32,10 @@ go build -o "$BN" ./cmd/buddynet
 sudo modprobe wireguard
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
-CPUB=$("$BN" --key "$D/c.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
+CPUB=$("$BN" --key "$D/c.key" init)
 
 echo "== per-pair bootstrap tokens + manifests =="
 TAB=tok-ab; TAC=tok-ac; TBC=tok-bc

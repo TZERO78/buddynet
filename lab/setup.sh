@@ -25,11 +25,14 @@ echo ""
 
 # ── 2. Bootstrap server identity ─────────────────────────────────────────
 # Runs the server image with the persistent 'server-key' volume attached.
-# On first run: generates an Ed25519 key and saves it to the volume.
-# On subsequent runs: reads the existing key from the volume.
-# The 'identity' subcommand prints the base64 public key and exits.
+# First run: `init` creates the Ed25519 identity on the volume and prints it.
+# Later runs: `init` refuses (there is already an identity), so fall back to
+# `identity`, which only reads. A server never creates its own key — that is what
+# makes a lost volume a loud refusal instead of a new identity nobody has pinned.
 echo "==> Bootstrapping server identity..."
 SERVER_KEY=$(docker compose run --rm server \
+    --key /var/lib/buddynet/id.key init 2>/dev/null \
+  || docker compose run --rm server \
     --key /var/lib/buddynet/id.key identity 2>/dev/null)
 
 if [ -z "$SERVER_KEY" ]; then

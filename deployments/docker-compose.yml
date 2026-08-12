@@ -2,10 +2,21 @@
 # optional relay for buddies that cannot punch a direct path.
 #
 #   cp deployments/.env.example deployments/.env   # then edit ports if needed
+#
+#   # 1. Create the server identity ONCE. The server never creates its own key:
+#   #    that way a lost volume refuses to start instead of quietly coming up as a
+#   #    DIFFERENT server that every buddy rejects as a possible MITM.
+#   docker compose -f deployments/docker-compose.yml run --rm \
+#       handshake --role=handshake --key /var/lib/buddynet/id.key init
+#       # ^ prints the SERVER_KEY your buddies pin with --server-key. Back the
+#       #   volume up; losing it means every buddy has to re-pin.
+#
+#   # 2. Then start it:
 #   docker compose -f deployments/docker-compose.yml up -d --build
+#
+#   # Print the key again later (read-only):
 #   docker compose -f deployments/docker-compose.yml run --rm \
 #       handshake --role=handshake --key /var/lib/buddynet/id.key identity
-#       # ^ prints the SERVER_KEY your buddies pin with --server-key
 #
 # Ports are picked once via .env (BUDDYNET_HANDSHAKE_PORT / BUDDYNET_RELAY_PORT);
 # unset, they fall back to the documented defaults 51820 / 51821. The relay is a

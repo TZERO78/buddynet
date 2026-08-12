@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -333,18 +334,32 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	if cfg.TTL == 0 {
 		cfg.TTL = 10 * time.Second
 	}
-	priv, created, err := bcrypto.LoadOrCreateKey(cfg.KeyPath)
+	// LoadKey, never LoadOrCreateKey: a handshake server that invents an identity
+	// is a different server to every buddy that pinned the old one, and they all
+	// refuse it as a possible MITM. A missing key here means the key was LOST (an
+	// unmounted volume, a typo in --key), not that this is a first run — and the two
+	// are indistinguishable from in here, so we refuse and let the operator say
+	// which it is.
+	priv, created, err := bcrypto.LoadKey(cfg.KeyPath)
+	if errors.Is(err, bcrypto.ErrKeyMissing) {
+		return fmt.Errorf("%w\n\n"+
+			"  If this is the FIRST start on this host, create the identity once:\n"+
+			"      buddynet --role=handshake --key %s init\n\n"+
+			"  If this host HAS run before, the key is missing rather than absent —\n"+
+			"  check that the volume/credential holding it is mounted. Starting with a\n"+
+			"  new identity would lock out every buddy that pinned the old one.",
+			err, cfg.KeyPath)
+	}
 	if err != nil {
 		return err
 	}
 	tokenLogKey = deriveSubkey(priv.Seed(), "buddynet-logtag-v1")
 	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
-	switch {
-	case cfg.KeyPath == "":
+	// created can only be true for an EMPTY --key (the ephemeral case): LoadKey
+	// never writes one, which is the point.
+	if created {
 		log.Printf("WARNING: ephemeral identity %s — pass --key to persist it (buddies pin this)", pub)
-	case created:
-		log.Printf("WARNING: generated a NEW identity at %s — buddies must pin the new key (print it: buddynet --role=handshake --key %s identity)", cfg.KeyPath, cfg.KeyPath)
-	default:
+	} else {
 		log.Printf("identity loaded from %s (print the public key: buddynet --role=handshake --key %s identity)", cfg.KeyPath, cfg.KeyPath)
 	}
 

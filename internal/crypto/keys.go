@@ -73,16 +73,88 @@ func DecodePubKey(b64 string) (ed25519.PublicKey, error) {
 	return ed25519.PublicKey(raw), nil
 }
 
-// LoadOrCreateKey returns a long-term Ed25519 private key and whether it was
-// freshly generated (true) versus loaded from disk (false). With an empty path
-// it generates an ephemeral key (created=true). Otherwise it loads the base64
-// 32-byte seed from path, creating and persisting one (0600) on first run — or
-// after the key was lost, which the caller can surface via created.
+// ErrKeyMissing is returned by LoadKey when the key file does not exist. It is a
+// distinct error because the two reasons it happens need opposite reactions: on a
+// genuine first run the operator should create one, while on an existing node it
+// means the key was LOST (an unmounted volume, a typo in --key), and inventing a
+// replacement would silently change the node's identity.
+var ErrKeyMissing = errors.New("identity key file does not exist")
+
+// LoadKey loads a long-term Ed25519 private key from path and NEVER creates one:
+// a missing file returns ErrKeyMissing. This is what the server roles use.
 //
-// The same key is the node's identity, the subject of its self-signed TLS cert,
-// and the seed of its virtual IP, so losing it changes the node's address and
-// requires re-pinning by its buddies.
+// Creating an identity by accident is the failure this guards against. The key is
+// simultaneously the node's identity, the subject of its self-signed TLS cert and
+// the seed of its virtual IP, and buddies PIN it — so a handshake server that
+// quietly comes up with a fresh one is not a server with a rotated key, it is a
+// different server to everyone, and every buddy refuses it as a possible MITM
+// until the pins are redone by hand.
+//
+// With an empty path it still generates an ephemeral in-memory key (created=true),
+// which is the documented "no --key given" behaviour and touches no disk.
+func LoadKey(path string) (priv ed25519.PrivateKey, created bool, err error) {
+	return loadKey(path, false)
+}
+
+// CreateKey creates a new identity at path and returns it. It refuses if the file
+// already exists (O_EXCL), so it can never overwrite an identity that buddies have
+// pinned — running it twice is safe and the second run is an error, not a silent
+// re-key.
+//
+// This is the ONLY way a server identity comes into being. It is deliberately a
+// separate function with a name nobody puts in a start-up path: anything that runs
+// on every boot must not be able to mint an identity.
+func CreateKey(path string) (priv ed25519.PrivateKey, err error) {
+	if path == "" {
+		_, priv, err = ed25519.GenerateKey(rand.Reader)
+		return priv, err
+	}
+	// NOT loadKey: this must FAIL on an existing file rather than load it. Loading
+	// silently would let `init` report "created a new identity" for a node that
+	// already had one — the opposite of what the command promises.
+	return createKeyFile(path)
+}
+
+// createKeyFile generates an identity and writes it to path, refusing if anything
+// is already there. O_CREATE|O_EXCL|O_NOFOLLOW: create a fresh REAL file or fail —
+// never write THROUGH a symlink, never clobber a file that appeared in the
+// meantime. (Unchanged from the hardened original; see the 2026-07-04 audit.)
+func createKeyFile(path string) (ed25519.PrivateKey, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	seed := base64.StdEncoding.EncodeToString(priv.Seed())
+	cf, cerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if cerr != nil {
+		return nil, fmt.Errorf("create key %s: %w", path, cerr)
+	}
+	if _, werr := cf.WriteString(seed); werr != nil {
+		cf.Close()
+		return nil, werr
+	}
+	if cerr := cf.Close(); cerr != nil {
+		return nil, cerr
+	}
+	return priv, nil
+}
+
+// LoadOrCreateKey loads the key at path, creating one when it is missing. This is
+// the BUDDY behaviour: a buddy is set up by a person on their own machine and
+// should stay a single command, and a buddy that loses its key only has to be
+// re-pinned by its one partner — it does not lock a whole network out the way a
+// lost server identity does.
+//
+// Server roles must use LoadKey instead. See ErrKeyMissing.
 func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err error) {
+	return loadKey(path, true)
+}
+
+// loadKey is the shared implementation. create decides what happens when the file
+// is missing; everything else — the O_NOFOLLOW/TOCTOU handling, the permission
+// tightening, the O_EXCL creation — is identical for both callers and deliberately
+// untouched (hardened in the 2026-07-04 crypto audit).
+func loadKey(path string, create bool) (priv ed25519.PrivateKey, created bool, err error) {
 	if path == "" {
 		_, priv, err = ed25519.GenerateKey(rand.Reader)
 		return priv, true, err
@@ -136,22 +208,11 @@ func LoadOrCreateKey(path string) (priv ed25519.PrivateKey, created bool, err er
 	case errors.Is(oerr, syscall.ELOOP):
 		return nil, false, fmt.Errorf("key %s is a symlink; refusing (a key file must be a real file, not a link to one)", path)
 	case errors.Is(oerr, os.ErrNotExist):
-		_, priv, err = ed25519.GenerateKey(rand.Reader)
-		if err != nil {
-			return nil, false, err
+		if !create {
+			return nil, false, fmt.Errorf("%w: %s", ErrKeyMissing, path)
 		}
-		seed := base64.StdEncoding.EncodeToString(priv.Seed())
-		// O_CREATE|O_EXCL|O_NOFOLLOW: create a fresh real file or fail — never write
-		// THROUGH a symlink and never clobber a file that appeared in the meantime.
-		cf, cerr := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+		priv, cerr := createKeyFile(path)
 		if cerr != nil {
-			return nil, false, fmt.Errorf("create key %s: %w", path, cerr)
-		}
-		if _, werr := cf.WriteString(seed); werr != nil {
-			cf.Close()
-			return nil, false, werr
-		}
-		if cerr := cf.Close(); cerr != nil {
 			return nil, false, cerr
 		}
 		return priv, true, nil

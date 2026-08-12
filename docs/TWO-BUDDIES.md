@@ -14,9 +14,14 @@ buddy at once, see [MultiPeer](PEERS.md).
 Run the bootstrap server and print the key your buddies will pin:
 
 ```bash
+# Once: create the server identity (it never creates one itself).
+buddynet --role=handshake --key /var/lib/buddynet/id.key init
+
 buddynet --role=handshake,relay \
     --key /var/lib/buddynet/id.key \
-    --relay-endpoint vps.example:51821 \
+    --relay-endpoint vps.example:51821
+
+# Print the key again any time (read-only):
 buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
 ```
 

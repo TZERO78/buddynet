@@ -75,15 +75,24 @@ keep current.)
 
 ## Quickstart (two sites, one VPS)
 
-**1 — On the VPS,** run the bootstrap server with and grab the
-key to pin:
+**1 — On the VPS,** create the server identity once, then run the bootstrap
+server:
 
 ```bash
+# Once: create the identity and note the key your buddies will pin.
+buddynet --role=handshake --key /var/lib/buddynet/id.key init   # → SERVER_KEY
+
+# Then run it (a server never creates its own key — see below):
 buddynet --role=handshake,relay \
     --key /var/lib/buddynet/id.key \
-    --relay-endpoint vps.example:51821 \
-buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
+    --relay-endpoint vps.example:51821
 ```
+
+> **Why the extra step:** the server refuses to start without its key instead of
+> generating a fresh one. A lost volume or a typo in `--key` would otherwise bring
+> it up as a *different* server, and every buddy that pinned the old key would
+> refuse it as a possible MITM. Back that key file up. Print it again any time
+> with `… --key /var/lib/buddynet/id.key identity`.
 
 > **The control plane is always encrypted.** Matchmaking runs over QUIC/TLS 1.3;
 > the pairing token never travels in the clear and there is nothing to configure.

@@ -81,6 +81,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server still does the matchmaking, it just no longer needs an operator, because
   the key is already approved.
 
+- **A server never creates its own identity any more; `init` does.** The key file
+  was created whenever the `--key` path did not exist. That is right on a genuine
+  first run and wrong every time after — and from inside the process the two are
+  indistinguishable. A volume that did not mount, a typo in `--key`, an empty
+  credentials directory, or a fresh container expected to inherit a key all led to
+  the same outcome: the server came up happily with a **new identity**, logged one
+  warning, and every buddy that had pinned the old key refused it as a possible
+  MITM. For the public matchmaker — whose entire job is to be the one key everyone
+  pinned — that is the worst silent failure available.
+
+  Creating an identity is now an explicit act:
+
+  ```bash
+  buddynet --key PATH init                    # creates it, once; refuses to replace one
+  buddynet --key PATH identity                # READS only; errors if the file is missing
+  buddynet --role=handshake --key PATH        # refuses to start without it
+  ```
+
+  `identity` used to create the key as a side effect, which meant any wrapper that
+  read the key ("print the pubkey, then start the server") could mint a fresh
+  identity after a volume was lost. It only reads now, so no automation can do
+  that by accident — creating one requires typing a command whose name nobody puts
+  in a start-up path.
+
+  **Buddies are unchanged:** a buddy still creates its key on first start. Setting
+  one up is a person on their own machine, and a buddy that loses its key has to
+  be re-pinned by its one partner — it does not lock a network out.
+
+  Both refusals name the path and print the exact command, and say what the two
+  possible causes are (first run vs. lost key), because that is the decision only
+  the operator can make.
+
 ### Changed (Breaking, `--wireguard` only)
 
 - **A buddy is no longer routed THROUGH your host: `--expose` covers this host,

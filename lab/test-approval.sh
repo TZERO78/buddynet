@@ -49,6 +49,11 @@ waitlog() {
 }
 
 step "handshake server, approval mode, NO allowlist file yet"
+# The identity is created EXPLICITLY before the server runs: a server never mints
+# one, so that a lost key surfaces as a refusal instead of a new identity nobody
+# has pinned.
+SRVKEY=$("$BIN" --role=handshake --key "$DIR/srv.key" init | tr -d '[:space:]')
+[ -n "$SRVKEY" ] && ok "server identity created explicitly with init" || bad "init produced no identity"
 "$BIN" --role=handshake --key "$DIR/srv.key" --listen "127.0.0.1:$PORT" \
 	--authorized "$ALLOW" >"$DIR/srv.log" 2>&1 &
 PIDS+=($!)
@@ -67,8 +72,20 @@ else
 	ok "a missing allowlist did not enable open mode"
 fi
 
-SRVKEY=$("$BIN" --role=handshake --key "$DIR/srv.key" identity | tr -d '[:space:]')
-[ -n "$SRVKEY" ] && ok "server identity printed" || bad "no server identity"
+# A server must never invent an identity: with the key removed it refuses to
+# start rather than coming up as a DIFFERENT server to every buddy that pinned it.
+mv "$DIR/srv.key" "$DIR/srv.key.bak"
+if "$BIN" --role=handshake --key "$DIR/srv.key" --listen "127.0.0.1:$((PORT+9))" >"$DIR/nokey.log" 2>&1; then
+	bad "the server started WITHOUT an identity key"
+else
+	if grep -q "init" "$DIR/nokey.log"; then
+		ok "a missing identity refuses to start and names the init command"
+	else
+		bad "the refusal does not tell the operator what to do: $(head -1 "$DIR/nokey.log")"
+	fi
+fi
+[ -e "$DIR/srv.key" ] && bad "the refused start created a key anyway" || ok "the refused start created no identity"
+mv "$DIR/srv.key.bak" "$DIR/srv.key"
 
 # --- two buddies enroll with a code -----------------------------------------
 ECHO_PORT=$(( PORT + 1 ))
@@ -87,8 +104,8 @@ PIDS+=($!)
 # Create both buddy identities up front so each can PIN the other with
 # --peer-key: this test is about the control plane, and pinning keeps the SAS
 # (which needs a human) out of the picture without resorting to --lab.
-KEY_A=$("$BIN" --role=buddy --key "$DIR/a.key" identity | tr -d '[:space:]')
-KEY_B=$("$BIN" --role=buddy --key "$DIR/b.key" identity | tr -d '[:space:]')
+KEY_A=$("$BIN" --role=buddy --key "$DIR/a.key" init | tr -d '[:space:]')
+KEY_B=$("$BIN" --role=buddy --key "$DIR/b.key" init | tr -d '[:space:]')
 if [ -n "$KEY_A" ] && [ -n "$KEY_B" ] && [ "$KEY_A" != "$KEY_B" ]; then
 	ok "both buddy identities created"
 else
