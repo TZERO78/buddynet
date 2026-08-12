@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"log"
@@ -55,16 +56,32 @@ func main() {
 	}
 	log.Printf("wg-vip: pubkey=%s key-derives-vip=%s advertising-vip=%s", bcrypto.PubKeyB64(pub), correct, adv)
 
-	enc, err := bcrypto.SealCode(*token, srvPub)
-	if err != nil {
-		log.Fatalf("wg-vip: seal token: %v", err)
+	// signedRegister builds ONE registration the way an honest v7 client does:
+	// fresh nonce + current timestamp, signed over the payload with the plaintext
+	// token, then the token sealed to the server key. Everything here is legitimate
+	// client behaviour — the ONLY hostile part of this tool is the VirtualIP it
+	// claims. It must be rebuilt per attempt: the nonce is single-use (the server
+	// rejects a replay of the same (key, nonce)) and the timestamp has to stay
+	// inside the server's skew window while the attacker parks.
+	signedRegister := func() protocol.Message {
+		nonce, nerr := protocol.NewNonce()
+		if nerr != nil {
+			log.Fatalf("wg-vip: nonce: %v", nerr)
+		}
+		m := protocol.Message{
+			Type: protocol.TypeRegister, Ver: protocol.Version, Role: protocol.RoleBuddy,
+			ID: "vip-attacker", PubKey: bcrypto.PubKeyB64(pub), VirtualIP: adv,
+			Token: *token, Ts: time.Now().Unix(), Nonce: nonce,
+		}
+		m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, protocol.RegistrationPayload(m)))
+		enc, serr := bcrypto.SealCode(*token, srvPub)
+		if serr != nil {
+			log.Fatalf("wg-vip: seal token: %v", serr)
+		}
+		m.TokenEnc = enc
+		m.Token = "" // sealed on the wire; the signature covers the plaintext
+		return m
 	}
-
-	base := protocol.Message{
-		Type: protocol.TypeRegister, Ver: protocol.Version, Role: protocol.RoleBuddy,
-		ID: "vip-attacker", PubKey: bcrypto.PubKeyB64(pub), TokenEnc: enc, VirtualIP: adv,
-	}
-	raw, _ := json.Marshal(base)
 
 	// The attacker only needs to REGISTER a parked entry carrying the forged VIP; the
 	// victim rejects it at the pre-connect VIP↔key check, so no data plane is needed.
@@ -88,6 +105,10 @@ func main() {
 		// Re-roundtrip periodically so the parked entry survives the server's
 		// registration TTL until the victim pairs (each stream re-asserts the REGISTER).
 		for {
+			raw, merr := json.Marshal(signedRegister())
+			if merr != nil {
+				log.Fatalf("wg-vip: marshal register: %v", merr)
+			}
 			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			_, _ = cli.Roundtrip(rctx, raw)
 			cancel()
@@ -103,7 +124,7 @@ func main() {
 	}
 	defer c.Close()
 	register := func() {
-		m := base
+		m := signedRegister()
 		r, _ := json.Marshal(m)
 		c.Write(r)
 		c.SetReadDeadline(time.Now().Add(1500 * time.Millisecond))
