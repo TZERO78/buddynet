@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/netkey"
 	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/internal/safe"
 	"github.com/tzero78/buddynet/internal/tunnel"
@@ -442,7 +443,10 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		req.Reply(nil)
 		return
 	}
-	if !rl.Allow(src.IP.String()) {
+	// Same accounting key as every other per-source budget (netkey). The QUIC
+	// connection cap already aggregates per /64, so keying this per exact address
+	// would let one /64 hold several connections AND a fresh request budget each.
+	if !rl.Allow(netkey.FromIP(src.IP)) {
 		hsStats.rateLimited.Add(1)
 		req.Reply(nil)
 		return
@@ -697,7 +701,7 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			// rewrite, a log line), so gate them behind the tight enrollment limiter
 			// first: a stranger flood must not be able to spend an approved buddy's
 			// budget, fill the disk with pending entries, or fill the log.
-			if !authz.allowEnroll(src.IP.String()) {
+			if !authz.allowEnroll(netkey.FromIP(src.IP)) {
 				hsStats.enrollLimited.Add(1)
 				return nil, false
 			}
