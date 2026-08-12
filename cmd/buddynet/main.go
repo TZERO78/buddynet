@@ -102,7 +102,7 @@ func main() {
 	relayMaxSessions := flag.Int("relay-max-sessions", 0, "relay: max concurrent sessions (abuse ceiling; 0 = default 4096). Lower it for a small private relay")
 	relayMaxLegsPerIP := flag.Int("relay-max-legs-per-ip", 0, "relay: max legs one source may hold (anti-hoarding; 0 = default 64). A source is one IPv4 address or one IPv6 /64 — every address in a /64 is free to mint, so they share this budget. Lower it for a small private relay")
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
-	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
+	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
 	debug := flag.Bool("debug", false, "handshake: verbose logging of parked/dropped packets (not for production)")
 
@@ -653,11 +653,16 @@ func runAuthCmd(path, cmd string, args []string) int {
 		}
 		err = role.ApproveKey(path, args[0], label)
 	case "allowclient":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "usage: --authorized <file> allowclient <enrollment-code>")
-			return 2
-		}
-		err = role.AllowClient(path, args[0])
+		// Removed in v5.0.0 with the server's pending file: there is no longer any
+		// on-disk record mapping a code to a key, so nothing here could look one up.
+		// Kept as a named case purely so operators (and their scripts) get told what
+		// to do instead of "unknown command".
+		fmt.Fprintln(os.Stderr, "allowclient was removed in v5.0.0: the server no longer keeps a pending file.\n"+
+			"The server prints the ready-to-run command when a client enrols — approve by key instead:\n"+
+			"  buddynet --role=handshake --authorized "+path+" approve <CLIENT-PUBKEY>\n"+
+			"Find the key in the server log: AUTHZ: action=pending key=… code=… — approve with: …\n"+
+			"(The client must still be running: pending enrolments now live in memory only.)")
+		return 2
 	case "list":
 		err = role.ListKeys(path)
 	case "revoke":
@@ -742,7 +747,7 @@ COMMANDS
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
   %[1]s --peers-file PATH peers list|add|remove|migrate   manage your buddies (MultiPeer)
-  %[1]s --authorized FILE approve|allowclient|list|revoke   server allowlist (approval mode)
+  %[1]s --authorized FILE approve|list|revoke    server allowlist (approval mode)
   %[1]s version
 
 SECURITY — please read

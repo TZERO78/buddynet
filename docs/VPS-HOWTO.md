@@ -333,7 +333,7 @@ sudo systemctl edit buddynet-handshake
 
 # approve a buddy (get its key with `buddynet identity` on that host):
 sudo -u buddynet-handshake buddynet \
-  --authorized /var/lib/buddynet-handshake/clients.txt allowclient <buddy-key>
+  --authorized /var/lib/buddynet-handshake/clients.txt approve <buddy-key>
 ```
 
 See [APPROVAL.md](APPROVAL.md).

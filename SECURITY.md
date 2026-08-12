@@ -391,8 +391,11 @@ tighter rate limit than approved ones. Since the registration is bound to the
 authenticated key and the sealed code is inside the registration signature, a
 stranger can only ever enroll its own key.
 
-Clients enroll with a short code sealed to the server's identity (`--code`,
-approved via `allowclient <code>`); see [docs/APPROVAL.md](docs/APPROVAL.md).
+Clients enroll with a short code sealed to the server's identity (`--code`); the
+server prints the enrolling key and the operator approves THAT key while the
+client is running. Nothing about a pending enrolment is written to disk, so there
+is no `code → key` record to read or alter in between; see
+[docs/APPROVAL.md](docs/APPROVAL.md).
 
 ---
 
@@ -564,8 +567,8 @@ trusted automatically (the safe behaviour):
 - **Server key lost:** every buddy must update its pinned `--server-key`.
 - **Buddy key lost, `--peer-key` in use:** the partner rejects the new key as a
   mismatch until it updates the pin (like SSH's "host key changed").
-- **Buddy key lost, allowlist server:** re-enroll the new key (`--code` then
-  `allowclient`), revoke the dead one.
+- **Buddy key lost, allowlist server:** re-enroll the new key (`--code`, then
+  `approve` the key the server logs), revoke the dead one.
 
 **Prevention:** keys are tiny `0600` files — persist them on durable storage
 (server: `StateDirectory`/volume; buddy: `--key`) and back them up.

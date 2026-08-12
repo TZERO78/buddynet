@@ -373,8 +373,8 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 			// until a key is approved — never a silent fallback to open mode.
 			log.Printf("WARNING: the allowlist %s is empty or missing — NO client can pair yet. "+
 				"Approve one with: buddynet --role=handshake --authorized %s approve <CLIENT_KEY> "+
-				"(or --authorized %s allowclient <CODE> for code-based enrollment)",
-				cfg.Authorized, cfg.Authorized, cfg.Authorized)
+				"(the key is printed when a client enrols with --code)",
+				cfg.Authorized, cfg.Authorized)
 		}
 		go authz.watch(ctx)
 	} else {

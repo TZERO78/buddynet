@@ -94,11 +94,12 @@ buddynet --role=buddy ... --peer-key <buddy-identity>
 ```
 
 The token is a **bearer secret** — keep it out of argv (use a `0600` file or
-`--join`). On an allowlist server, enroll with `--code <code>` and have
-the operator approve it:
+`--join`). On an allowlist server, enroll with `--code <code>`; the server logs
+the enrolling key with the exact command to run, and the operator approves that
+key while your client keeps running:
 
 ```bash
-buddynet --role=handshake --authorized clients.txt allowclient <code>
+buddynet --role=handshake --authorized clients.txt approve <client-key>
 ```
 
 ## Checking the link

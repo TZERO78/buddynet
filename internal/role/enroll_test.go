@@ -116,9 +116,11 @@ func TestQUICEnrollmentLifecycle(t *testing.T) {
 		t.Fatalf("pending entry bound to %q, want the enrolling key %q", entry.Key, stranger.pub)
 	}
 
-	// 3. The operator approves by code; the hot reload picks it up.
-	if err := AllowClient(allowPath, code); err != nil {
-		t.Fatalf("AllowClient: %v", err)
+	// 3. The operator approves BY KEY — the pending set is memory-only since
+	// v5.0.0, so the log line is what carries the key to them. The hot reload
+	// picks the approval up.
+	if err := ApproveKey(allowPath, stranger.pub, "code:"+shortHash(code)); err != nil {
+		t.Fatalf("ApproveKey: %v", err)
 	}
 	if err := authz.reload(); err != nil {
 		t.Fatalf("reload: %v", err)
@@ -442,13 +444,10 @@ func TestEnrollmentLogsNoSecrets(t *testing.T) {
 	if !contains(out, keyTag(nd.pub)) {
 		t.Fatalf("expected a key tag in the log line, got %q", out)
 	}
-	// The pending FILE must not hold the cleartext code either.
-	data, err := os.ReadFile(authz.pendDB)
-	if err != nil {
-		t.Fatalf("read pending db: %v", err)
-	}
-	if contains(string(data), code) {
-		t.Fatalf("the cleartext enrollment code was persisted: %q", data)
+	// And nothing about the enrolment reaches the disk at all: the server keeps no
+	// runtime state, so there is no file that could hold the code in any form.
+	if _, err := os.Stat(authz.path + ".pending"); !os.IsNotExist(err) {
+		t.Fatalf("the server created a pending file (%v) — enrolments must stay in memory", err)
 	}
 }
 

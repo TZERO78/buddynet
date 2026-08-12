@@ -44,6 +44,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure mode, not a code path. `--status` now takes `--join <TOKEN>` (or runs
   where a session is already stored).
 
+- **`allowclient CODE` is removed, and the control server no longer writes
+  anything at runtime.** `authorized.pending` — a `code → key` mapping the server
+  maintained on disk so a separate CLI process could resolve a code — is gone.
+  Pending enrolments now live in memory only: bounded, pruned after 30 minutes,
+  and gone when the process stops. The server's only persistent state is its
+  identity key and the allowlist, both of which are operator configuration.
+
+  **This is a security improvement, not just a simplification.** That file was
+  written by two processes and `allowclient` *trusted* its contents: anyone able
+  to write it could swap the recorded key, and typing the correct code would then
+  approve the **wrong** key with nothing looking out of place. Approving the key
+  the server printed removes the indirection — you authorise exactly what the
+  server saw. It also means an enrolment exists only while the client is actually
+  running and talking to the server, so there is no waiting entry to tamper with.
+  As a side effect it removes the last instance of the pattern behind every
+  persistence bug this project has had: two writers on one file.
+
+  **What to do instead:** approve by key. The server already logs the complete
+  command when a client enrols:
+
+  ```
+  AUTHZ: action=pending key=abc12345 code=78c86dc0 — approve with:
+    buddynet --role=handshake --authorized FILE approve <CLIENT_KEY>
+  ```
+
+  Running `allowclient` now prints that guidance and exits non-zero, so existing
+  scripts fail loudly instead of silently doing nothing. A leftover `.pending`
+  file from an older version is ignored and can be deleted.
+
+  **The cost:** if the client is no longer running, there is nothing to approve —
+  start it again. Previously the entry survived 30 minutes regardless. In practice
+  this lands once per buddy, ever: it is the first-contact step, and after it the
+  key is on the allowlist and the pair holds a session secret. Later reconnects —
+  including after a provider hands a buddy a new IP — are unattended: the handshake
+  server still does the matchmaking, it just no longer needs an operator, because
+  the key is already approved.
+
 ### Changed (Breaking, `--wireguard` only)
 
 - **A buddy is no longer routed THROUGH your host: `--expose` covers this host,

@@ -65,7 +65,7 @@ buddynet --role=handshake \
   --authorized /var/lib/buddynet/clients.txt --key /var/lib/buddynet/id.key
 
 # Approve a buddy (get its key with `buddynet identity` on that node):
-buddynet --authorized /var/lib/buddynet/clients.txt allowclient <buddy-key>
+buddynet --authorized /var/lib/buddynet/clients.txt approve <buddy-key>
 ```
 
 Without `--authorized` (open mode) the QUIC handshake still encrypts the exchange
@@ -227,7 +227,7 @@ TRUST: action=insecure    key=… token=… detail=…           # --lab, no ver
 
 ```
 AUTHZ: action=pending key=… token=…   — approve with: buddynet … approve KEY
-AUTHZ: action=pending key=… code=…    — approve with: buddynet … allowclient CODE
+AUTHZ: action=pending key=… code=…    — approve with: buddynet … approve KEY
 AUTHZ: action=reload  count=N         # authorized file was hot-reloaded
 ```
 

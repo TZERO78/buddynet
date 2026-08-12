@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -68,11 +67,6 @@ const (
 // the assignment.
 var acquireLock = lockFile
 
-// duringPendWrite is a test hook fired inside persistPending, between taking the
-// contribution and writing it. Production leaves it nil; tests set it and restore
-// it with t.Cleanup.
-var duringPendWrite func()
-
 // tightenPerms enforces 0600 on a sensitive allowlist/pending file: if it is
 // group/other-accessible (e.g. a config-management edit dropped the mode), warn
 // and chmod it back — the same policy the identity key uses. fi is the stat of
@@ -90,7 +84,6 @@ func tightenPerms(path string, fi os.FileInfo) {
 // label, '#' comments ignored) and hot-reloaded when the file changes.
 type authorizer struct {
 	path     string
-	pendDB   string
 	selfPriv ed25519.PrivateKey
 
 	// enroll gates work done for keys that are NOT on the allowlist. Since an
@@ -134,18 +127,6 @@ type authorizer struct {
 	// lastStatWarn throttles the "cannot read the allowlist" warning, which would
 	// otherwise repeat on every poll for as long as the condition lasts.
 	lastStatWarn time.Time
-	// lastPendWarn throttles the failed-pending-write warning the same way.
-	lastPendWarn time.Time
-	// pendAdded holds the entries THIS PROCESS added since its last successful
-	// write. It is what gets merged into the file's own content, instead of
-	// overwriting the file with our whole map — see persistPending.
-	pendAdded map[string]pendingEntry
-	// pendDirty means the pending FILE does not reflect the map: a write failed, or
-	// a concurrent writer may have clobbered it. Without this a lost entry was
-	// PERMANENT — recordPending only wrote when the entry was new, so the client
-	// re-registering every second changed nothing and `allowclient <CODE>` stayed
-	// broken until the TTL expired or the server restarted.
-	pendDirty bool
 }
 
 // Enrollment ceilings. An enrolling client sends one REGISTER per second and only
@@ -165,12 +146,10 @@ type pendingEntry struct {
 func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error) {
 	a := &authorizer{
 		path:        path,
-		pendDB:      path + ".pending",
 		selfPriv:    selfPriv,
 		keys:        map[string]string{},
 		logged:      map[string]time.Time{},
 		pend:        map[string]pendingEntry{},
-		pendAdded:   map[string]pendingEntry{},
 		recentRegs:  map[string]time.Time{},
 		preAuthRegs: map[string]time.Time{},
 		approvedAt:  map[string]time.Time{},
@@ -179,7 +158,6 @@ func newAuthorizer(path string, selfPriv ed25519.PrivateKey) (*authorizer, error
 	if err := a.load(true); err != nil {
 		return nil, err
 	}
-	a.pend, _ = readPending(a.pendDB)
 	return a, nil
 }
 
@@ -554,164 +532,20 @@ func (a *authorizer) recordPending(codeEnc, key string) {
 			}
 		}
 	}
-	entry := pendingEntry{Key: key, Seen: time.Now()}
-	a.pend[h] = entry
-	if isNew || a.pendDirty {
-		a.pendAdded[h] = entry // ours to contribute at the next write
-	}
-	dirty := a.pendDirty
+	a.pend[h] = pendingEntry{Key: key, Seen: time.Now()}
 	a.mu.Unlock()
-	// Persist when the entry is new OR when the file is known to be out of sync.
-	// The dirty case is what makes a lost entry recoverable: the enrolling client
-	// re-registers about once a second, and each of those attempts now repairs the
-	// file instead of finding "already in the map" and doing nothing.
-	if isNew || dirty {
-		a.persistPending()
-	}
 	if isNew {
+		// This line is now the ONLY route from an enrolling client to an approval:
+		// the pending set lives in memory and dies with the process, so nothing on
+		// disk records it. It therefore carries the complete command to run.
+		//
 		// Do NOT log the cleartext enrollment code — it is a bearer secret and the
 		// log may be shipped off-box. The public key is a non-secret identifier, so
-		// approve by key; the code is also persisted in the 0600 .pending file for
-		// anyone who prefers code-based approval.
+		// approval goes by key; the code hash is printed only so an operator can
+		// match a line against the client that is talking to them.
 		log.Printf("AUTHZ: action=pending key=%s code=%s — approve with: buddynet --role=handshake --authorized %s approve %s",
 			keyTag(key), shortHash(code), a.path, key)
 	}
-}
-
-// persistPending writes the pending set to disk with the snapshot taken INSIDE
-// writeMu, so a slower writer can never rename an older set over a newer one. A
-// failure marks the file dirty, so the next registration retries rather than
-// leaving the operator with a code that `allowclient` cannot find.
-func (a *authorizer) persistPending() {
-	a.writeMu.Lock()
-	defer a.writeMu.Unlock()
-	// The ADVISORY FILE lock as well, not just the in-process one: `allowclient`
-	// runs in a separate process and does its own read-modify-write of this file.
-	// writeMu orders our own writers against each other and says nothing about that
-	// one, so without this an operator approving a code could still drop an entry
-	// the server wrote in between (or have its own write dropped).
-	//
-	// A lock we cannot take means we must NOT write: another process is mid-update,
-	// which is precisely the case this exists for. The state stays dirty, so the
-	// next registration retries — an enrolling client sends one about once a second.
-	unlock, lerr := acquireLock(a.pendDB)
-	if lerr != nil {
-		a.mu.Lock()
-		a.pendDirty = true
-		a.mu.Unlock()
-		a.notePendWriteError(lerr)
-		return
-	}
-	defer unlock()
-
-	// READ-MODIFY-WRITE, not overwrite. Holding the lock only orders the writes;
-	// it does not make our in-memory map the truth. `allowclient` removes an entry
-	// under the same lock, and a server that then wrote its own snapshot would
-	// RESURRECT the approved code — the operator's change lost despite the lock
-	// working exactly as intended.
-	//
-	// So the FILE is authoritative for what other processes did, and we contribute
-	// only what we added ourselves since the last successful write.
-	onDisk, rerr := readPending(a.pendDB)
-	if rerr != nil && !os.IsNotExist(rerr) {
-		a.mu.Lock()
-		a.pendDirty = true
-		a.mu.Unlock()
-		a.notePendWriteError(rerr)
-		return
-	}
-
-	// An approval CONFIRMED BY THE CLI always wins — over a stale in-memory entry
-	// and over one still queued in pendAdded. The allowlist is re-read from disk
-	// rather than taken from a.keys, which is only refreshed every authzPollInterval:
-	// AllowClient writes the allowlist INSIDE the pending lock it holds, before
-	// removing the entry, so a read taken here either already sees the approval or
-	// happens before AllowClient started — in which case its later removal wins
-	// anyway, because it comes after this write.
-	approvedNow, _, aerr := readAuthorized(a.path)
-	if aerr != nil && !os.IsNotExist(aerr) {
-		approvedNow = nil // unreadable: fall back to contributing, the write is still ordered
-	}
-
-	a.mu.RLock()
-	merged := clonePending(onDisk)
-	contributed := make(map[string]pendingEntry, len(a.pendAdded))
-	var approvedDrop []string
-	for h, e := range a.pendAdded {
-		if _, done := approvedNow[e.Key]; done {
-			// Already approved. Contributing it now would undo `allowclient`.
-			approvedDrop = append(approvedDrop, h)
-			continue
-		}
-		merged[h] = e
-		contributed[h] = e
-	}
-	a.mu.RUnlock()
-
-	// duringPendWrite is nil in production. A test sets it to run exactly while a
-	// write is in flight — the window recordPending can slip through, which is what
-	// makes the retire-by-value check below testable rather than argued.
-	if duringPendWrite != nil {
-		duringPendWrite()
-	}
-	err := writePending(a.pendDB, merged)
-	a.mu.Lock()
-	if err == nil {
-		// Retire exactly what THIS write carried, and only if it is STILL that value.
-		// recordPending does not hold writeMu — only a.mu, briefly — so it can update
-		// the same code while the write is in flight. Deleting by key alone would
-		// discard that newer entry without ever having written it.
-		for h, want := range contributed {
-			if cur, ok := a.pendAdded[h]; ok && cur.Key == want.Key && cur.Seen.Equal(want.Seen) {
-				delete(a.pendAdded, h)
-			}
-		}
-		// Realign the in-memory view with the file, so an entry `allowclient` removed
-		// does not linger and reappear at the next write. Entries still queued in
-		// pendAdded stay: they are ours and not on disk yet.
-		for h := range a.pend {
-			_, onDiskNow := merged[h]
-			_, stillQueued := a.pendAdded[h]
-			if !onDiskNow && !stillQueued {
-				delete(a.pend, h)
-			}
-		}
-		for h, e := range merged {
-			if _, known := a.pend[h]; !known {
-				a.pend[h] = e
-			}
-		}
-	}
-	// Entries whose key the operator has already approved are dropped whatever the
-	// write did: they must never be contributed again.
-	for _, h := range approvedDrop {
-		delete(a.pendAdded, h)
-		delete(a.pend, h)
-	}
-	a.pendDirty = err != nil
-	a.mu.Unlock()
-	if err != nil {
-		a.notePendWriteError(err)
-	}
-}
-
-// notePendWriteError reports a failed pending write, throttled: the write is
-// retried on every subsequent registration, and an enrolling client sends one
-// about once a second, so an unthrottled line would fill the log for as long as
-// the condition lasts.
-func (a *authorizer) notePendWriteError(err error) {
-	a.mu.Lock()
-	quiet := time.Since(a.lastPendWarn) < statErrorWindow
-	if !quiet {
-		a.lastPendWarn = time.Now()
-	}
-	a.mu.Unlock()
-	if quiet {
-		return
-	}
-	log.Printf("WARNING: could not persist pending enrollments to %s (%v) — "+
-		"`allowclient <CODE>` may not find a waiting client until this succeeds; "+
-		"retrying on the next registration", a.pendDB, err)
 }
 
 // prunePendingLocked drops enrollment entries past pendingTTL, so the pruned set
@@ -771,7 +605,7 @@ func validPubKey(b64 string) bool {
 	return err == nil && len(raw) == ed25519.PublicKeySize
 }
 
-// ApproveKey, ListKeys, RevokeKey and AllowClient back the handshake admin
+// ApproveKey, ListKeys and RevokeKey back the handshake admin
 // subcommands; they are exported so cmd/buddynet can wire them to the CLI.
 
 func ApproveKey(path, key, label string) error {
@@ -875,74 +709,3 @@ func RevokeKey(path, key string) error {
 }
 
 // --- pending enrollments (code -> key) ------------------------------------
-
-func readPending(path string) (map[string]pendingEntry, error) {
-	out := map[string]pendingEntry{}
-	f, err := os.Open(path)
-	if err != nil {
-		return out, err
-	}
-	defer f.Close()
-	if fi, serr := f.Stat(); serr == nil {
-		tightenPerms(path, fi)
-	}
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 3 {
-			continue
-		}
-		sec, _ := strconv.ParseInt(fields[2], 10, 64)
-		seen := time.Unix(sec, 0)
-		if time.Since(seen) > pendingTTL {
-			continue
-		}
-		out[fields[0]] = pendingEntry{Key: fields[1], Seen: seen}
-		if len(out) >= maxPending {
-			log.Printf("WARNING: %s has more than %d pending entries; ignoring the rest", path, maxPending)
-			break
-		}
-	}
-	return out, sc.Err()
-}
-
-func writePending(path string, m map[string]pendingEntry) error {
-	var b strings.Builder
-	for code, e := range m {
-		fmt.Fprintf(&b, "%s %s %d\n", code, e.Key, e.Seen.Unix())
-	}
-	return atomicfile.Write(path, []byte(b.String()), 0o600)
-}
-
-func AllowClient(authorizedPath, code string) error {
-	pendPath := authorizedPath + ".pending"
-	// Read-modify-write of the pending file under the SAME advisory lock the
-	// approve/revoke commands take, so a concurrent operator invocation cannot lose
-	// this update. (The server's own writes go through persistPending; the lock is
-	// what keeps the two processes from interleaving.)
-	unlock, lerr := acquireLock(pendPath)
-	if lerr != nil {
-		return fmt.Errorf("cannot lock the pending file for update: %w", lerr)
-	}
-	defer unlock()
-	pend, err := readPending(pendPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("no pending enrollments yet (has the client started with --code %q?)", code)
-		}
-		return err
-	}
-	h := shortHash(code)
-	e, ok := pend[h]
-	if !ok {
-		return fmt.Errorf("no pending client with code %q (not registered yet, or code expired)", code)
-	}
-	// Label the approval with a NON-reversible code tag, never the cleartext
-	// enrollment code — the allowlist file may end up in config management
-	// (Ansible/Chef), and the code is a bearer secret that must not persist.
-	if err := ApproveKey(authorizedPath, e.Key, "code:"+shortHash(code)); err != nil {
-		return err
-	}
-	delete(pend, h)
-	return writePending(pendPath, pend)
-}
