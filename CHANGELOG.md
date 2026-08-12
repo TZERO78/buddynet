@@ -12,6 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > release under SemVer. Upgrade the server and every buddy together, or run v7
 > and v8 side by side on two ports and migrate pair by pair (see *Migrating a
 > running server* in [docs/PROTOCOL.md](docs/PROTOCOL.md)).
+>
+> **Also breaking, `--wireguard` only: traffic arriving on `bnetN` is no longer
+> forwarded anywhere.** `--expose` now covers this host and nothing behind it. If
+> you route a LAN machine to a buddy through this node — or a buddy into your LAN —
+> that stops working; see *A buddy is no longer routed THROUGH your host* below.
 
 ### Removed (Breaking)
 
@@ -38,6 +43,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--join` already fed the same internal path, so this removes a flag and a
   failure mode, not a code path. `--status` now takes `--join <TOKEN>` (or runs
   where a session is already stored).
+
+### Changed (Breaking, `--wireguard` only)
+
+- **A buddy is no longer routed THROUGH your host: `--expose` covers this host,
+  not your LAN.** `--expose` installed its rules only on the nftables **input**
+  hook. A packet that arrives on `bnetN` and is routed onward never traverses that
+  hook — and WireGuard's AllowedIPs pins only the **source** of a decrypted packet,
+  never its destination. So a buddy could put its own permitted VIP in the source
+  field, any LAN address behind you in the destination field, and — on a host that
+  forwards, which includes anything running Docker — reach it. This held with ports
+  exposed, with **nothing** exposed, and under `--expose all`.
+
+  BuddyNet now also programs a `fwd` chain (forward hook, policy accept) that drops
+  everything arriving on `bnetN`, for every buddy interface and every scope. Ports
+  you expose are still reachable on the host itself; connections **you** open to a
+  buddy still get their replies (those traverse the input hook, where
+  established/related already accepts); and forwarding that never touches `bnetN`
+  is untouched — the rules are not a host-wide filter.
+
+  **What stops working:** routing a LAN machine to a buddy through this node, or a
+  buddy into your LAN. It was never a documented feature and it bypassed `--expose`,
+  which is why it is closed rather than grandfathered. Subnet routing over a buddy
+  tunnel is a legitimate thing to want and will return as its **own explicit
+  option**, with the destination networks named by you — never implied by
+  `--expose all`.
+
+  The forward rule is deliberately an unconditional drop: an established/related
+  accept there would already permit replies to *forwarded* connections, i.e. a
+  slice of subnet routing shipped early under a flag that says "expose ports on
+  this host".
 
 ### Fixed
 

@@ -111,17 +111,25 @@ func TestBuildBatchStructure(t *testing.T) {
 	if types[1] != nft(nftMsgNewTable) || types[2] != nft(nftMsgDelTable) || types[3] != nft(nftMsgNewTable) {
 		t.Fatalf("missing add-del-add table idiom: %v", types)
 	}
-	if types[4] != nft(nftMsgNewChain) {
-		t.Fatalf("chain must follow the table: %v", types)
+	// Two base chains follow the table: "in" (input hook) and "fwd" (forward hook).
+	if types[4] != nft(nftMsgNewChain) || types[5] != nft(nftMsgNewChain) {
+		t.Fatalf("both base chains must follow the table: %v", types)
 	}
+	chains := 0
 	rules := 0
 	for _, tt := range types {
-		if tt == nft(nftMsgNewRule) {
+		switch tt {
+		case nft(nftMsgNewChain):
+			chains++
+		case nft(nftMsgNewRule):
 			rules++
 		}
 	}
-	if rules != 5 { // est/rel + tcp/873 + icmp + icmpv6 + drop
-		t.Fatalf("want 5 rule messages, got %d (%v)", rules, types)
+	if chains != 2 { // input scope + forward block
+		t.Fatalf("want 2 base chains, got %d (%v)", chains, types)
+	}
+	if rules != 6 { // in: est/rel + tcp/873 + icmp + icmpv6 + drop; fwd: drop
+		t.Fatalf("want 6 rule messages, got %d (%v)", rules, types)
 	}
 	// BATCH_BEGIN/END res_id must name the nftables subsystem (big endian).
 	resID := binary.BigEndian.Uint16(msgs[0].Data[2:4])

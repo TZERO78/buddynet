@@ -7,10 +7,17 @@
 
 > ## ⚠️ Sharing is SCOPED by default (`--expose`)
 >
-> **A buddy can reach ONLY the port(s) you `--expose` — never your whole host.**
-> Without `--expose`, **nothing** on your host is reachable over the tunnel
-> (fail-closed; ping stays allowed for diagnosis). To share everything — the
-> pre-scoping behaviour — you must say so explicitly: `--expose all`.
+> **A buddy can reach ONLY the port(s) you `--expose` — never your whole host,
+> and never anything BEHIND it.** Without `--expose`, **nothing** on your host is
+> reachable over the tunnel (fail-closed; ping stays allowed for diagnosis). To
+> share everything on *this host* — the pre-scoping behaviour — you must say so
+> explicitly: `--expose all`.
+>
+> **`--expose all` means this HOST, not your LAN.** Traffic arriving on `bnetN` is
+> never routed onward, whatever your scope — see
+> [the `fwd` chain](#the-fwd-chain---expose-means-this-host-not-your-lan). If you
+> were relying on a buddy reaching your LAN through this node (or the other way
+> round), that stops in v5.0.0; subnet routing returns as its own explicit option.
 >
 > ```bash
 > buddynet --role=buddy ... --wireguard --expose 873          # buddy reaches ONLY tcp :873
@@ -144,14 +151,46 @@ table inet buddynet {            # private table — never touches your firewall
     iifname "bnet0" meta l4proto ipv6-icmp accept
     iifname "bnet0" drop                        # the fail-closed floor
   }
+  chain fwd {                    # forward hook, policy accept (host unaffected)
+    iifname "bnet0" drop         # a buddy is never routed THROUGH this host
+  }
 }
 ```
 
+### The `fwd` chain: `--expose` means *this host*, not your LAN
+
+The `in` chain answers "what may the buddy reach **on this host**". It does not,
+by itself, answer "may the buddy be routed **through** this host" — a packet that
+is forwarded onward never traverses the input hook at all. And WireGuard's
+AllowedIPs pins only the **source** of a decrypted packet, never its destination:
+a buddy may put its own permitted VIP in the source field and any address it likes
+in the destination field.
+
+So on a host that forwards — and Docker turns forwarding on — a buddy could send a
+packet addressed to a machine on your LAN and reach it: with ports exposed, with
+**nothing** exposed, and under `--expose all`. That is what the `fwd` chain closes.
+It is an unconditional drop, so:
+
+- `--expose` (any value) opens ports **on this host only**.
+- `--expose all` means the whole **host**, never the networks behind it.
+- With no `--expose` at all, nothing is reachable either way.
+
+> **Behaviour change (v5.0.0).** Traffic arriving on `bnetN` is no longer forwarded
+> anywhere. If you were routing a LAN machine to a buddy through this node — or a
+> buddy to your LAN — **that stops working.** It was never a documented feature and
+> it bypassed `--expose`, which is why it is closed rather than grandfathered.
+> Routing whole subnets over a buddy tunnel is a real thing to want; it will come
+> back as its **own explicit option**, with the destination networks named by you,
+> and never implicitly via `--expose all`.
+
 - The scope is installed **before** the interface comes up — there is never a
   window of whole-host access — and removed with it on teardown.
-- Established/related is allowed, so *your own* outbound connections to the buddy
-  always get their answers regardless of your scope.
-- Each buddy has its own interface, so each has its own scope (MultiPeer).
+- Established/related is allowed **on the input chain**, so *your own* outbound
+  connections to the buddy always get their answers regardless of your scope.
+  (There is deliberately no such rule on `fwd`: it would accept replies to
+  *forwarded* connections, which is subnet routing by another name.)
+- Each buddy has its own interface, so each has its own scope (MultiPeer) — and
+  each gets its own forward drop.
 - The whole table is rebuilt atomically on every change; a stale table from a
   killed process is cleared on the next start. Only a global `nft flush ruleset`
   removes it early — it is re-asserted on the next reconnect.
@@ -223,6 +262,12 @@ Run as root with the `wireguard` module loaded (netns labs):
 - `lab/test-wg-expose.sh` — scoped exposure: the exposed port answers, everything
   else is blocked, no `--expose` exposes nothing (fail-closed), `--expose all`
   keeps whole-host reach, and the nft table is gone after teardown.
+- `lab/test-wg-forward.sh` — the `fwd` chain: a buddy cannot reach a LAN host
+  behind the victim with ports exposed, with nothing exposed, or under
+  `--expose all`; forwarding that never touches `bnetN` keeps working; the host's
+  own outbound connections to the buddy keep working; and LAN→buddy forwarding is
+  blocked (deliberate, until subnet routing exists). Set `APPLYSCOPE=` to a
+  pre-fix build to watch it fail — 18/0 with the fix, 14/4 without.
 - `lab/test-wg-firewalls.sh` — coexistence with the host's own firewall:
   iptables-nft/iptables-legacy ACCEPTs cannot override the buddynet DROP, an
   `iptables-restore` reload leaves the buddynet table alone, a ufw-style
