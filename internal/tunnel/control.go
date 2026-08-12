@@ -9,12 +9,12 @@ import (
 	"io"
 	"log"
 	"net"
-	"net/netip"
 	"sync"
 	"time"
 
 	"github.com/quic-go/quic-go"
 
+	"github.com/tzero78/buddynet/internal/netkey"
 	"github.com/tzero78/buddynet/internal/safe"
 )
 
@@ -270,39 +270,16 @@ func (s *ControlServer) connLoop() func(*ControlServer, *quic.Conn) {
 	return (*ControlServer).acceptStreams
 }
 
-// v6AccountingBits is the prefix an IPv6 source is accounted on. Counting per
-// exact address is useless there: a /64 is the smallest block a site is normally
-// handed, so one host can mint 2^64 "distinct sources" for free and hold the
-// global table with maxCtrlConns/maxCtrlConnsPerIP = 16 of them. Aggregating to
-// /64 charges exactly the addresses an attacker gets for nothing, and no two
-// legitimately separate parties share one.
+// ipKey normalizes a source address to one connection-accounting key: IPv4 per
+// exact address, IPv6 per /64, IPv4-mapped IPv6 unmapped onto the IPv4 key, port
+// dropped.
 //
-// IPv4 stays per address on purpose: addresses there are scarce enough that
-// rotation is not a cheap lever, while aggregating (say /24) would fold unrelated
-// customers of one provider into a single budget.
-const v6AccountingBits = 64
-
-// ipKey normalizes a source address to one connection-accounting key. IPv4,
-// IPv6 and IPv4-mapped IPv6 must land on the SAME key, or a peer could double its
-// allowance simply by reaching us over a mapped address. The port is dropped: the
-// limit is per host, not per socket — and for IPv6, per /64 (see above).
-func ipKey(a net.Addr) string {
-	ua, ok := a.(*net.UDPAddr)
-	if !ok {
-		return a.String()
-	}
-	addr, ok := netip.AddrFromSlice(ua.IP)
-	if !ok {
-		return ua.IP.String()
-	}
-	addr = addr.Unmap()
-	if addr.Is6() {
-		if p, err := addr.Prefix(v6AccountingBits); err == nil {
-			return p.String()
-		}
-	}
-	return addr.String()
-}
+// The rule itself lives in internal/netkey, NOT here, and every other per-source
+// budget in the codebase (the handshake rate limiters, the relay's bind limiter
+// and leg cap) calls the same function. Two copies of this logic is exactly how
+// finding H-01 happened: this one aggregated to /64 while the relay keyed per
+// exact address, so a single /64 bypassed the relay's caps entirely.
+func ipKey(a net.Addr) string { return netkey.FromAddr(a) }
 
 // admit reserves a connection slot for a source, returning the release closure.
 // The closure is idempotent, so calling it on several exit paths is safe and

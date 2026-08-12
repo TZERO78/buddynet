@@ -22,6 +22,7 @@ import (
 	"golang.org/x/crypto/hkdf"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	"github.com/tzero78/buddynet/internal/netkey"
 	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/internal/safe"
 	"github.com/tzero78/buddynet/internal/tunnel"
@@ -477,7 +478,10 @@ func serveRegisterUDP(ctx context.Context, conn *net.UDPConn, rl *ratelimit.Limi
 		}
 		// Gate before any parsing or crypto so a flood is dropped cheaply and the
 		// expensive per-packet work stays bounded (DoS / reflection defense).
-		if !rl.Allow(src.IP.String()) {
+		// Keyed by the shared accounting rule (netkey: exact IPv4, /64 for IPv6) —
+		// on this plain-UDP path nothing else bounds a source, so keying per exact
+		// IPv6 address would hand one /64 an unlimited number of buckets.
+		if !rl.Allow(netkey.FromIP(src.IP)) {
 			hsStats.rateLimited.Add(1)
 			hsDebugf("rate-limited %s", src)
 			continue
@@ -531,7 +535,10 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		req.Reply(nil)
 		return
 	}
-	if !rl.Allow(src.IP.String()) {
+	// Same accounting key as every other per-source budget (netkey). The QUIC
+	// connection cap already aggregates per /64, so keying this per exact address
+	// would let one /64 hold several connections AND a fresh request budget each.
+	if !rl.Allow(netkey.FromIP(src.IP)) {
 		hsStats.rateLimited.Add(1)
 		req.Reply(nil)
 		return
@@ -856,7 +863,7 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			// rewrite, a log line), so gate them behind the tight enrollment limiter
 			// first: a stranger flood must not be able to spend an approved buddy's
 			// budget, fill the disk with pending entries, or fill the log.
-			if !authz.allowEnroll(src.IP.String()) {
+			if !authz.allowEnroll(netkey.FromIP(src.IP)) {
 				hsStats.enrollLimited.Add(1)
 				return nil, false
 			}
