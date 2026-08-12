@@ -76,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Concurrent peer updates no longer lose entries from `peers.json`.** `Upsert`
+  mutated the roster under a lock, took a snapshot, released the lock, and only
+  then wrote the file. Two updates landing together could therefore rename an
+  older snapshot over a newer one — the in-memory roster stayed correct, so the
+  loss surfaced only after a restart, which is exactly when the file matters: it
+  is the offline link of the connection fallback chain (a peer that vanished from
+  it can no longer be reached without the handshake server). A second mutex now
+  spans both the snapshot and the write, so the file order matches the map order;
+  the registry lock itself is still not held across disk I/O, since BuddyDNS reads
+  it on every lookup. A write that fails is reported instead of swallowed.
+
 - **A sealing failure no longer falls back to a cleartext token.** `setToken`
   used to drop the pairing token onto the wire unsealed if `SealCode` failed —
   i.e. exactly when something was already wrong. It returns an error now; there
