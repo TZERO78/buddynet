@@ -113,6 +113,12 @@ ns "$NSA" ip addr add 10.66.1.1/32 dev wgA
 ns "$NSA" ip link set wgA up
 ns "$NSA" ip route add 10.66.2.2/32 dev wgA
 ns "$NSA" ip route add 192.168.77.0/24 dev wgA
+# Same tunnel, IPv6: the rules live in an `inet` table and match on iifname only,
+# so they must cover v6 exactly like v4 — proven rather than argued.
+ns "$NSA" wg set wgA peer "$PV" allowed-ips 10.66.2.2/32,192.168.77.0/24,fd00:66::2/128,fd00:77::/64
+ns "$NSA" ip -6 addr add fd00:66::1/128 dev wgA nodad
+ns "$NSA" ip -6 route add fd00:66::2/128 dev wgA
+ns "$NSA" ip -6 route add fd00:77::/64 dev wgA
 
 # The victim is a stock buddy: AllowedIPs is the partner's VIP /32 only
 # (internal/wg/wg.go — AllowedIPs: peerVIP).
@@ -122,6 +128,9 @@ ns "$NSV" wg set bnet0 peer "$PA" allowed-ips 10.66.1.1/32 endpoint 172.31.0.1:5
 ns "$NSV" ip addr add 10.66.2.2/32 dev bnet0
 ns "$NSV" ip link set bnet0 up
 ns "$NSV" ip route add 10.66.1.1/32 dev bnet0
+ns "$NSV" wg set bnet0 peer "$PA" allowed-ips 10.66.1.1/32,fd00:66::1/128
+ns "$NSV" ip -6 addr add fd00:66::2/128 dev bnet0 nodad
+ns "$NSV" ip -6 route add fd00:66::1/128 dev bnet0
 
 HS=0
 for _ in $(seq 1 10); do
@@ -138,6 +147,10 @@ fi
 
 say "victim forwards; the LAN knows a route back"
 ns "$NSV" sysctl -qw net.ipv4.ip_forward=1
+ns "$NSV" sysctl -qw net.ipv6.conf.all.forwarding=1
+ns "$NSV" ip -6 addr add fd00:77::1/64 dev lV nodad
+ns "$NSL" ip -6 addr add fd00:77::10/64 dev lL nodad
+ns "$NSL" ip -6 route add fd00:66::1/128 via fd00:77::1
 ns "$NSL" ip route add 10.66.1.1/32 via 192.168.77.1
 ns "$NSL" ip route add 192.168.88.0/24 via 192.168.77.1
 ns "$NSL2" ip route add 192.168.77.0/24 via 192.168.88.1
@@ -147,6 +160,7 @@ say "services"
 ns "$NSV"  "$TMP/labtool" serve -listen 10.66.2.2:445      -banner "VICTIM-HOST-445"  >/dev/null 2>&1 &
 ns "$NSV"  "$TMP/labtool" serve -listen 10.66.2.2:22       -banner "VICTIM-HOST-22"   >/dev/null 2>&1 &
 ns "$NSL"  "$TMP/labtool" serve -listen 192.168.77.10:8080 -banner "LAN-TARGET-8080"  >/dev/null 2>&1 &
+ns "$NSL"  "$TMP/labtool" serve -listen "[fd00:77::10]:8080" -banner "LAN-TARGET-V6"    >/dev/null 2>&1 &
 ns "$NSL2" "$TMP/labtool" serve -listen 192.168.88.10:8080 -banner "LAN2-TARGET-8080" >/dev/null 2>&1 &
 ns "$NSA"  "$TMP/labtool" serve -listen 10.66.1.1:9100     -banner "BUDDY-9100"       >/dev/null 2>&1 &
 sleep 1
@@ -159,13 +173,21 @@ if out=$(probe "$NSL" 192.168.77.10:8080); then ok "LAN service answers inside t
 if out=$(probe "$NSA" 10.66.2.2:445);      then ok "buddy reaches the victim host port 445: $out"; else bad "tunnel data path broken: $out"; fi
 if out=$(probe "$NSL" 192.168.88.10:8080); then ok "LAN->LAN2 forwarding works (the path BuddyNet must not touch): $out"; else bad "LAN->LAN2 broken before rules: $out"; fi
 if out=$(probe "$NSA" 192.168.77.10:8080); then ok "baseline: buddy->LAN routing works BEFORE rules: $out"; else bad "baseline routing broken, later 'blocked' would be meaningless: $out"; fi
+if out=$(probe "$NSA" "[fd00:77::10]:8080"); then ok "baseline: buddy->LAN over IPv6 works BEFORE rules: $out"; else bad "IPv6 baseline broken, a later 'blocked' would prove nothing: $out"; fi
 
 check_lan_blocked() { # $1 label
   printf '  --- SECURITY CHECK: %s ---\n' "$1"
   if out=$(probe "$NSA" 192.168.77.10:8080); then
     bad "M-1: buddy reached the LAN target through the victim: $out"
   else
-    ok "buddy cannot reach the LAN target: $out"
+    ok "buddy cannot reach the LAN target (IPv4): $out"
+  fi
+  # The rules are an `inet` table matching on iifname, so they must hold for IPv6
+  # too. Checked in every scenario, not once: a v6 hole would be just as open.
+  if out=$(probe "$NSA" "[fd00:77::10]:8080"); then
+    bad "M-1: buddy reached the LAN target over IPv6: $out"
+  else
+    ok "buddy cannot reach the LAN target (IPv6): $out"
   fi
 }
 

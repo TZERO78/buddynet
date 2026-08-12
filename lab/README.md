@@ -172,9 +172,9 @@ scene does not cover this.
 Needs root and the `wireguard` module; no Docker, no `lab/.env`:
 
 ```bash
-sudo -v && ./test-wg-forward.sh          # → 18/18 passed
+sudo -v && ./test-wg-forward.sh          # → 22/22 passed
 
-# A/B control: against a pre-fix rule builder it must FAIL (14 passed / 4 failed).
+# A/B control: against a pre-fix rule builder it must FAIL (15 passed / 7 failed).
 APPLYSCOPE=/path/to/old/applyscope ./test-wg-forward.sh
 ```
 
@@ -184,7 +184,8 @@ real WireGuard tunnel and the real rule builder (`internal/nft.Apply`, via
 victim with ports exposed, with nothing exposed, or under `--expose all`; that
 forwarding which never touches `bnetN` (LAN→LAN2) keeps working; that the victim's
 own outbound connections to the buddy keep working; and that LAN→buddy forwarding
-is blocked — deliberately, until subnet routing exists as its own option.
+is blocked — deliberately, until subnet routing exists as its own option. Every
+LAN check runs over IPv4 and IPv6.
 
 ## Observing the tunnels
 

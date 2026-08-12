@@ -266,8 +266,10 @@ Run as root with the `wireguard` module loaded (netns labs):
   behind the victim with ports exposed, with nothing exposed, or under
   `--expose all`; forwarding that never touches `bnetN` keeps working; the host's
   own outbound connections to the buddy keep working; and LAN→buddy forwarding is
-  blocked (deliberate, until subnet routing exists). Set `APPLYSCOPE=` to a
-  pre-fix build to watch it fail — 18/0 with the fix, 14/4 without.
+  blocked (deliberate, until subnet routing exists). Every LAN check runs over
+  IPv4 **and** IPv6, since the rules are an `inet` table matching on `iifname`.
+  Set `APPLYSCOPE=` to a pre-fix build to watch it fail — 22/0 with the fix,
+  15/7 without.
 - `lab/test-wg-firewalls.sh` — coexistence with the host's own firewall:
   iptables-nft/iptables-legacy ACCEPTs cannot override the buddynet DROP, an
   `iptables-restore` reload leaves the buddynet table alone, a ufw-style
