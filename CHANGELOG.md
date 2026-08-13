@@ -208,6 +208,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The public QUIC port did work before it could refuse anyone.** Two findings
+  from an independent audit pass, both confirmed against the code:
+
+  **QUIC Retry was not enabled.** `quic.Transport` was created without
+  `VerifySourceAddress`, so quic-go built a full connection — including the TLS
+  and Ed25519 handshake — for any peer that sent a well-formed Initial, *including
+  a spoofed one*. BuddyNet's own caps (256 connections, 16 per IPv4/IPv6-/64) only
+  apply once a connection exists, so they never saw that traffic at all. Source
+  validation (RFC 9000 §8.1.2) is now required for every unvalidated source: a
+  spoofed address gets a small stateless Retry token and nothing else. It costs one
+  extra round trip on connection setup, which for a node that dials once per
+  reconnect is nothing. Deliberately unconditional rather than gated on a
+  "suspicious rate" threshold — one less number to tune wrong.
+
+  **`--allow-cidr` was checked too late to do what its help text claimed.** The
+  flag promised sources outside the list are dropped "before any crypto"; in fact
+  the check sat in the REGISTER handler — after TLS and after the connection had
+  taken one of the 256 slots. A refused source could therefore still occupy
+  capacity until the idle timeout, which is most of the value of the flag. The
+  allowlist is now enforced in the listener, before a slot is handed out; the help
+  text says what actually happens (TLS runs first regardless — that is unavoidable
+  with this library — but no BuddyNet capacity is spent).
+
+  Also: a **version mismatch** now closes the whole connection after answering,
+  instead of only the stream. It is a final refusal — that peer cannot become
+  compatible on this connection — so leaving it open only let it hold a slot. Rate
+  limiting and "no partner yet" deliberately do NOT close: both are transient, and
+  a buddy polling for its partner or for an operator's approval must be able to
+  keep polling.
+
+
 - **Log injection through client-supplied fields (regression, v8 only).** The
   removal of the plain-UDP control plane also took out two controls that had been
   added together on `main`: `validField` no longer confined free-form fields to
