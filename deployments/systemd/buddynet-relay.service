@@ -14,12 +14,33 @@ StartLimitBurst=5
 # Listen address/port is configurable without editing this unit:
 #   sudo systemctl edit buddynet-relay
 Environment=BUDDYNET_RELAY_LISTEN=[::]:51821
-ExecStart=/usr/local/bin/buddynet --role=relay --listen ${BUDDYNET_RELAY_LISTEN}
+# AUTHORIZATION POLICY — REQUIRED. A relay refuses to start without one: it
+# carries your bandwidth, and a stranger who hoards its capacity takes away the
+# fallback the two people it was built for need. Set BOTH of these with
+#   sudo systemctl edit buddynet-relay
+# to the handshake server's public key (`buddynet --key ... identity`) and the
+# id you generated once with `buddynet gen-relay-id` — the SAME id the handshake
+# server is started with (--relay-id).
+#
+#   [Service]
+#   Environment=BUDDYNET_RELAY_POLICY=--server-key SERVER_KEY --relay-id RELAY_ID
+#
+# Alternatively, for a relay only fixed networks reach:
+#   Environment=BUDDYNET_RELAY_POLICY=--allow-cidr 203.0.113.0/24
+# (0.0.0.0/0 and ::/0 are refused — an open relay is not a configuration.)
+Environment=BUDDYNET_RELAY_POLICY=
+ExecStart=/usr/local/bin/buddynet --role=relay --listen ${BUDDYNET_RELAY_LISTEN} $BUDDYNET_RELAY_POLICY
 Restart=on-failure
 RestartSec=2
 
 # A relay holds no identity key and no persistent state — it forwards opaque
-# encrypted datagrams between session legs and never sees content.
+# encrypted datagrams between session legs and never sees content. In ticket
+# mode it holds only the handshake server's PUBLIC key: it can verify that a
+# session was authorised, and can never authorise one.
+#
+# Running the relay as its OWN unit (rather than --role=handshake,relay in one
+# process) is what keeps that true: in the combined process the server's signing
+# key sits in the same memory that parses relay packets.
 
 # --- Logging: isolate and cap so a flood cannot fill the disk ---------------
 # SyslogIdentifier distinguishes this role within the namespace

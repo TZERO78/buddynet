@@ -15,6 +15,12 @@
 # can ping B's overlay VIP over bnet0 (data crosses the relayed tunnel). Needs root
 # + wg module.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 BN=/tmp/wgr/bn
 D=/tmp/wgr
@@ -34,9 +40,9 @@ go build -o "$BN" ./cmd/buddynet
 sudo modprobe wireguard
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
 echo "server=$SRVPUB"; echo "A=$APUB"; echo "B=$BPUB"
 
 echo "== bridge topology (ns-srv/a/b on br0 in ns-sw) =="
@@ -64,7 +70,7 @@ sudo ip netns exec ns-b iptables -A OUTPUT -d 10.50.0.20 -j DROP
 sudo ip netns exec ns-b iptables -A INPUT  -s 10.50.0.20 -j DROP
 
 run_buddy() { # $1 ns, $2 keyfile, $3 peerpub, $4 logfile
-	sudo ip netns exec "ns-$1" env BUDDYNET_TOKEN="$TOKEN" "$BN" --role=buddy \
+	sudo ip netns exec "ns-$1" "$BN" --join "$TOKEN" --role=buddy \
 		--server 10.50.0.10:51820 --server-key "$SRVPUB" \
 		--key "$2" --peer-key "$3" --known-peers "$D/$1.kp" --peers "$D/$1.pj" --no-interactive --wireguard >"$4" 2>&1 &
 	PIDS="$PIDS $!"
@@ -73,7 +79,7 @@ run_buddy() { # $1 ns, $2 keyfile, $3 peerpub, $4 logfile
 echo "== handshake+relay server (advertises itself as relay) =="
 sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
 	--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
-	--relay-endpoint 10.50.0.10:51821 \
+	--relay-endpoint 10.50.0.10:51821 --relay-id "$RID" \
 	--key "$D/srv.key" >"$D/srv.log" 2>&1 &
 PIDS="$PIDS $!"
 sleep 1

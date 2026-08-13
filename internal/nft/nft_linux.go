@@ -12,14 +12,35 @@ import (
 
 // This file programs the scoped-exposure rules into the kernel's nftables
 // subsystem over raw NETLINK_NETFILTER — the same no-subprocess posture as
-// internal/wg. Everything lives in the private `table inet buddynet` with one
-// base chain on the input hook (policy accept, so the host's other traffic is
-// never affected); per bnetN the rules are:
+// internal/wg. Everything lives in the private `table inet buddynet` with TWO
+// base chains, both policy accept so the host's other traffic is never affected.
+//
+// Chain "in" (input hook) — what the buddy may reach ON THIS HOST:
 //
 //	iifname "bnetN" ct state established,related accept
 //	iifname "bnetN" <proto> dport <port> accept        (per exposed port)
 //	iifname "bnetN" meta l4proto {icmp,icmpv6} accept  (ping for diagnosis)
 //	iifname "bnetN" drop
+//
+// Chain "fwd" (forward hook) — what the buddy may reach THROUGH this host:
+//
+//	iifname "bnetN" drop
+//
+// The second chain is not an afterthought; without it --expose was only half a
+// control. Its rules match on the INPUT hook, which a packet routed onward never
+// traverses, and WireGuard's AllowedIPs pins only the SOURCE of a decrypted
+// packet, never its destination. So a buddy could send a packet with its own
+// permitted VIP as source and any LAN address behind the host as destination and,
+// on a host that forwards (Docker turns that on), reach it — with `--expose`
+// naming ports, with nothing exposed at all, and under `--expose all`, which means
+// "this host", never "and everything behind it".
+//
+// The forward rule is deliberately an unconditional drop, with no
+// established/related accept and no destination allowlist: either would already be
+// a slice of subnet routing, which is a separate feature with its own threat model
+// and its own explicit opt-in — never something --expose turns on implicitly.
+// Replies to connections THIS host opened are unaffected: they arrive addressed to
+// the host's own VIP and so traverse the input hook, where est/rel already accepts.
 //
 // State is rebuilt atomically on every change with the add-table/del-table/
 // add-table batch idiom, so a stale table from a SIGKILLed run is cleared on
@@ -39,6 +60,7 @@ const (
 
 	nfprotoInet   = 1
 	nfInetLocalIn = 1 // NF_INET_LOCAL_IN hook
+	nfInetForward = 2 // NF_INET_FORWARD hook
 	nfAccept      = 1 // NF_ACCEPT verdict
 	nfDrop        = 0 // NF_DROP verdict
 
@@ -113,6 +135,10 @@ const (
 
 	tableName = "buddynet"
 	chainName = "in"
+	// fwdChainName is the forward-hook chain. Both names are STABLE: operators
+	// grep for them in `nft list table inet buddynet`, and the future
+	// subnet-routing feature extends this chain rather than replacing it.
+	fwdChainName = "fwd"
 )
 
 var nativeEndian = binary.NativeEndian
@@ -259,6 +285,25 @@ func ruleExprs(ifName string, s Scope) [][]byte {
 	return rules
 }
 
+// forwardExprs builds the FORWARD-hook rules for one interface. Deliberately its
+// own builder rather than a mode of ruleExprs: the two chains answer different
+// questions ("what may this buddy reach on the host" vs "may it be routed through
+// the host at all"), and sharing a builder is how the second one would silently
+// inherit the first one's accepts.
+//
+// Exactly one rule, and it does not depend on the Scope: everything arriving on
+// bnetN and destined elsewhere is dropped, whether the operator exposed ports,
+// exposed nothing, or passed `all`. `--expose all` opens THIS HOST by explicit
+// choice; it must never also open every network the host can route to.
+//
+// When subnet routing arrives it extends this function with an explicit
+// destination allowlist. Until then there is deliberately no accept here to
+// inherit — no established/related, no destination match.
+func forwardExprs(ifName string) [][]byte {
+	rule := append(exprsIifname(ifName), exprVerdict(nfDrop)...)
+	return [][]byte{rule}
+}
+
 // --- nftables message framing ------------------------------------------------
 
 // nftMessage frames one nftables message: nlmsghdr + nfgenmsg + attrs. The
@@ -316,24 +361,37 @@ func buildBatch(scopes map[string]Scope, order []string) []byte {
 	if len(scopes) > 0 {
 		out = appendMsg(out, nftMessage(nft(nftMsgNewTable), create, next(), nfprotoInet, tbl))
 
-		hook := nlAttrBE32(nftaHookHooknum, nfInetLocalIn)
-		hook = append(hook, nlAttrBE32(nftaHookPriority, 0)...) // filter priority
-		chain := nlAttrStrZ(nftaChainTable, tableName)
-		chain = append(chain, nlAttrStrZ(nftaChainName, chainName)...)
-		chain = append(chain, nlNested(nftaChainHook, hook)...)
-		// Policy ACCEPT: this chain only ever restricts bnetN traffic; the host's
-		// other interfaces and its own firewall are untouched.
-		chain = append(chain, nlAttrBE32(nftaChainPolicy, nfAccept)...)
-		chain = append(chain, nlAttrStrZ(nftaChainType, "filter")...)
-		out = appendMsg(out, nftMessage(nft(nftMsgNewChain), create, next(), nfprotoInet, chain))
+		// newChain emits one base chain at the given hook, policy ACCEPT: these
+		// chains only ever restrict bnetN traffic; the host's other interfaces and
+		// its own firewall are untouched.
+		newChain := func(name string, hookNum uint32) []byte {
+			hook := nlAttrBE32(nftaHookHooknum, hookNum)
+			hook = append(hook, nlAttrBE32(nftaHookPriority, 0)...) // filter priority
+			chain := nlAttrStrZ(nftaChainTable, tableName)
+			chain = append(chain, nlAttrStrZ(nftaChainName, name)...)
+			chain = append(chain, nlNested(nftaChainHook, hook)...)
+			chain = append(chain, nlAttrBE32(nftaChainPolicy, nfAccept)...)
+			chain = append(chain, nlAttrStrZ(nftaChainType, "filter")...)
+			return nftMessage(nft(nftMsgNewChain), create, next(), nfprotoInet, chain)
+		}
+		out = appendMsg(out, newChain(chainName, nfInetLocalIn))
+		out = appendMsg(out, newChain(fwdChainName, nfInetForward))
 
-		for _, ifName := range order {
-			for _, exprs := range ruleExprs(ifName, scopes[ifName]) {
+		// appendRules emits one rule message per expression list into a chain.
+		appendRules := func(out []byte, chain string, rules [][]byte) []byte {
+			for _, exprs := range rules {
 				rule := nlAttrStrZ(nftaRuleTable, tableName)
-				rule = append(rule, nlAttrStrZ(nftaRuleChain, chainName)...)
+				rule = append(rule, nlAttrStrZ(nftaRuleChain, chain)...)
 				rule = append(rule, nlNested(nftaRuleExpressions, exprs)...)
 				out = appendMsg(out, nftMessage(nft(nftMsgNewRule), create|syscall.NLM_F_APPEND, next(), nfprotoInet, rule))
 			}
+			return out
+		}
+		for _, ifName := range order {
+			out = appendRules(out, chainName, ruleExprs(ifName, scopes[ifName]))
+			// The forward block is emitted for EVERY scoped interface, including
+			// Scope{All: true} — `all` means this host, not the networks behind it.
+			out = appendRules(out, fwdChainName, forwardExprs(ifName))
 		}
 	}
 

@@ -34,7 +34,7 @@ BOB_KEY    shared-token-with-bob
 EOF
 
 buddynet --role=buddy \
-  --server VPS:51820 --server-key SERVER_KEY --quic-handshake \
+  --server VPS:51820 --server-key SERVER_KEY \
   --key /var/lib/buddynet/id.key \
   --peers-file /var/lib/buddynet/peers \
   --name home --dns \
@@ -88,7 +88,7 @@ The file is the same trust domain as `known_peers` — keep it `0600`.
 > ```
 
 `--peers-file` is mutually exclusive with the single-buddy pairing modes
-(`--invite` / `--join` / `--token`) and with `--lazy`. To route to more than one
+(`--invite` / `--join` / `--join`) and with `--lazy`. To route to more than one
 buddy use `--vip-listen` (a single `-L` port can only reach one buddy).
 
 ## Managing your buddies — `peers` subcommands
@@ -158,7 +158,7 @@ a live tunnel. (Windows has no `SIGHUP`; there a restart re-reads the manifest.)
 
 | Flag | Env | Description |
 |------|-----|-------------|
-| `--peers-file PATH` | — | Multi-buddy manifest (`<peer-key> [token]` per line). Maintains a tunnel to every listed buddy plus any previously paired peer. Mutually exclusive with `--invite`/`--join`/`--token`/`--lazy`. |
+| `--peers-file PATH` | — | Multi-buddy manifest (`<peer-key> [token]` per line). Maintains a tunnel to every listed buddy plus any previously paired peer. Mutually exclusive with `--invite`/`--join`/`--join`/`--lazy`. |
 | `--vip-listen PORT` | — | Bind each connected buddy's VIP on `lo` and route `VIP:PORT` (and `name.buddy:PORT`) through that buddy's tunnel. Needs `NET_ADMIN`; degrades gracefully. |
 | `--known-peers PATH` | — | Per-buddy session store (also where `peers remove` revokes the session secret). |
 | `--reauth-interval D` | — | Periodically rebuild tunnels so a revocation takes effect within `D` on a live direct tunnel (off by default). |

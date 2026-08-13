@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
-	"net"
 	"os"
 	"testing"
 	"time"
@@ -145,40 +144,9 @@ func TestEnrollmentCodeIsBoundToTheSigningKey(t *testing.T) {
 	}
 }
 
-// The cookie is attached but NOT signed: it is verified against the server's own
-// HMAC key and the source IP, so it must not disturb the signature — and the
-// post-challenge retry must still be a fresh, independently valid registration.
-func TestCookieRetryIsAFreshSignedRegistration(t *testing.T) {
-	nd, srvPriv := testNode(t)
-	cookieKey = deriveSubkey(srvPriv.Seed(), "buddynet-cookie-v1")
-	ip := net.IPv4(198, 51, 100, 7)
-
-	challenged := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
-	if challenged.Cookie != "" {
-		t.Fatal("the first attempt should carry no cookie")
-	}
-
-	retry := unmarshalRegister(t, mustBuild(t, nd, freshCookie(ip)), srvPriv)
-	if !validCookie(retry.Cookie, ip) {
-		t.Fatal("the retry did not carry a valid address-validation cookie")
-	}
-	if retry.Nonce == challenged.Nonce {
-		t.Fatal("the post-challenge retry reused the challenged attempt's nonce")
-	}
-	if !verifyRegistration(retry, regSkew) {
-		t.Fatal("the post-challenge retry is not validly signed")
-	}
-	// Swapping the cookie must NOT break the signature (it is deliberately outside
-	// the signed payload) — the server checks it against its own key instead.
-	retry.Cookie = freshCookie(net.IPv4(203, 0, 113, 9))
-	if !verifyRegistration(retry, regSkew) {
-		t.Fatal("the cookie must not be part of the signed payload")
-	}
-}
-
-func mustBuild(t *testing.T, nd *node, cookie string) []byte {
+func mustBuild(t *testing.T, nd *node) []byte {
 	t.Helper()
-	raw, err := buildRegister(BuddyConfig{}, nd, "tok", cookie)
+	raw, err := buildRegister(BuddyConfig{}, nd, "tok", "")
 	if err != nil {
 		t.Fatalf("buildRegister: %v", err)
 	}
@@ -194,7 +162,7 @@ func TestApprovalModePollingIsNotAReplay(t *testing.T) {
 
 	var last protocol.Message
 	for i := 0; i < 5; i++ {
-		m := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+		m := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(1000), m); !ok {
 			t.Fatalf("poll %d of an allowlisted buddy was rejected — polling must not look like a replay", i)
 		}
@@ -213,8 +181,8 @@ func TestDualStackAttemptsDoNotCollide(t *testing.T) {
 	authz := newTestAuthorizer(t, srvPriv, nd.pub)
 	reg := newHSRegistry(time.Minute)
 
-	over4 := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
-	over6 := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	over4 := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
+	over6 := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if over4.Nonce == over6.Nonce {
 		t.Fatal("the v4 and v6 datagrams of one tick shared a nonce")
 	}
@@ -236,7 +204,7 @@ func TestServerRejectsInconsistentVirtualIP(t *testing.T) {
 	nd, srvPriv := testNode(t)
 	authz := newTestAuthorizer(t, srvPriv, nd.pub)
 
-	m := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	m := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	m.VirtualIP = "10.66.200.201"
 	// Re-sign so the ONLY thing wrong is the claim itself, not the signature.
 	m.RegSig = base64.StdEncoding.EncodeToString(ed25519.Sign(nd.priv, protocol.RegistrationPayload(m)))
@@ -252,7 +220,7 @@ func TestServerRejectsInconsistentVirtualIP(t *testing.T) {
 // and must NOT be served under the pre-v7 signature rules.
 func TestIncompatibleClientGetsAClearAnswer(t *testing.T) {
 	nd, srvPriv := testNode(t)
-	raw := mustBuild(t, nd, "")
+	raw := mustBuild(t, nd)
 
 	var m protocol.Message
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -284,158 +252,6 @@ func TestIncompatibleClientGetsAClearAnswer(t *testing.T) {
 	}
 }
 
-// A REGISTER from an unvalidated source must be answered with a cookie challenge
-// BEFORE the server spends an X25519 unseal on its sealed token. If the order
-// were reversed, a flood of garbage TokenEnc blobs from spoofed sources would buy
-// an attacker one asymmetric operation per packet — so a packet whose TokenEnc is
-// deliberately undecryptable must still get a challenge, not be dropped.
-func TestCookieIsCheckedBeforeTokenDecryption(t *testing.T) {
-	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srvConn.Close()
-	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
-	cookieKey = deriveSubkey(srvPriv.Seed(), "buddynet-cookie-v1")
-	tokenLogKey = deriveSubkey(srvPriv.Seed(), "buddynet-logtag-v1")
-
-	reg := newHSRegistry(time.Minute)
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, src, rerr := srvConn.ReadFromUDP(buf)
-			if rerr != nil {
-				return
-			}
-			raw := append([]byte(nil), buf[:n]...)
-			handleRegister(srvConn, reg, srvPriv, nil, "", src, raw)
-		}
-	}()
-
-	cli, err := net.DialUDP("udp", nil, srvConn.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cli.Close()
-
-	// A structurally valid REGISTER whose sealed token is pure garbage.
-	nd, _ := testNode(t)
-	m := protocol.Message{
-		Type:     protocol.TypeRegister,
-		Ver:      protocol.Version,
-		Role:     protocol.RoleBuddy,
-		ID:       nd.id,
-		PubKey:   nd.pub,
-		TokenEnc: base64.StdEncoding.EncodeToString([]byte("this will never decrypt")),
-		Ts:       time.Now().Unix(),
-	}
-	raw, _ := json.Marshal(m)
-	if _, err := cli.Write(raw); err != nil {
-		t.Fatal(err)
-	}
-
-	cli.SetReadDeadline(time.Now().Add(2 * time.Second))
-	buf := make([]byte, 1500)
-	n, err := cli.Read(buf)
-	if err != nil {
-		t.Fatal("no cookie challenge: the server decrypted (and dropped on) the token before validating the source")
-	}
-	var reply protocol.Message
-	if err := json.Unmarshal(buf[:n], &reply); err != nil {
-		t.Fatal(err)
-	}
-	if reply.Type != protocol.TypeCookie || reply.Cookie == "" {
-		t.Fatalf("got %+v, want a COOKIE challenge", reply)
-	}
-	if n >= len(raw) {
-		t.Fatalf("the challenge (%d B) must be smaller than the request (%d B) — never an amplifier", n, len(raw))
-	}
-}
-
-// Nothing behind the cookie may run for an unvalidated source — including the
-// approval-mode work: no signature verify, and above all no X25519 open of the
-// sealed ENROLLMENT CODE, which would otherwise let a spoofed source both spend
-// asymmetric crypto and grow the pending database.
-func TestUnvalidatedSourceReachesNoApprovalModeWork(t *testing.T) {
-	srvConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer srvConn.Close()
-
-	nd, srvPriv := testNode(t)
-	authz := newTestAuthorizer(t, srvPriv) // empty allowlist: nd would enroll
-	cookieKey = deriveSubkey(srvPriv.Seed(), "buddynet-cookie-v1")
-	tokenLogKey = deriveSubkey(srvPriv.Seed(), "buddynet-logtag-v1")
-
-	reg := newHSRegistry(time.Minute)
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, src, rerr := srvConn.ReadFromUDP(buf)
-			if rerr != nil {
-				return
-			}
-			handleRegister(srvConn, reg, srvPriv, authz, "", src, append([]byte(nil), buf[:n]...))
-		}
-	}()
-
-	cli, err := net.DialUDP("udp", nil, srvConn.LocalAddr().(*net.UDPAddr))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer cli.Close()
-
-	// A fully valid registration with a real enrollment code — but NO cookie.
-	const code = "WOULD-BE-PENDING"
-	raw, err := buildRegister(BuddyConfig{Code: code}, nd, "tok", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cli.Write(raw); err != nil {
-		t.Fatal(err)
-	}
-
-	cli.SetReadDeadline(time.Now().Add(2 * time.Second))
-	buf := make([]byte, 1500)
-	n, err := cli.Read(buf)
-	if err != nil {
-		t.Fatalf("expected a cookie challenge: %v", err)
-	}
-	var reply protocol.Message
-	if err := json.Unmarshal(buf[:n], &reply); err != nil {
-		t.Fatal(err)
-	}
-	if reply.Type != protocol.TypeCookie {
-		t.Fatalf("got %s, want a COOKIE challenge", reply.Type)
-	}
-	authz.mu.RLock()
-	pending := len(authz.pend)
-	authz.mu.RUnlock()
-	if pending != 0 {
-		t.Fatal("an unvalidated source got its enrollment code decrypted and pended")
-	}
-
-	// With the cookie echoed, the very same client DOES reach the enrollment path —
-	// so the check above failed on validation, not on something incidental.
-	withCookie, err := buildRegister(BuddyConfig{Code: code}, nd, "tok", reply.Cookie)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cli.Write(withCookie); err != nil {
-		t.Fatal(err)
-	}
-	if !waitFor(t, 3*time.Second, func() bool {
-		authz.mu.RLock()
-		defer authz.mu.RUnlock()
-		_, ok := authz.pend[shortHash(code)]
-		return ok
-	}) {
-		t.Fatal("positive control failed: a cookie-validated enrollment never reached the app layer")
-	}
-}
-
-// newTestAuthorizer builds an approval-mode authorizer allowing exactly keys.
 func newTestAuthorizer(t *testing.T, srvPriv ed25519.PrivateKey, keys ...string) *authorizer {
 	t.Helper()
 	path := t.TempDir() + "/authorized"

@@ -75,34 +75,51 @@ keep current.)
 
 ## Quickstart (two sites, one VPS)
 
-**1 — On the VPS,** run the bootstrap server with `--quic-handshake` and grab the
-key to pin:
+**1 — On the VPS,** create the server identity once, then run the bootstrap
+server:
 
 ```bash
+# Once: create the identity and note the key your buddies will pin.
+buddynet --role=handshake --key /var/lib/buddynet/id.key init   # → SERVER_KEY
+
+# Once: mint the relay id (not a secret; the same value on both roles).
+buddynet gen-relay-id                                           # → RELAY_ID
+
+# Then run it (a server never creates its own key — see below):
 buddynet --role=handshake,relay \
     --key /var/lib/buddynet/id.key \
     --relay-endpoint vps.example:51821 \
-    --quic-handshake
-buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
+    --relay-id RELAY_ID
 ```
 
-> **Always use `--quic-handshake`.** Without it the pairing token travels in
-> cleartext over the public internet. Set it identically on the server and on
-> every buddy. See [docs/OPERATIONS.md](docs/OPERATIONS.md#quic-control-plane---quic-handshake).
+> **A relay refuses to start without an authorization policy.** `--relay-id`
+> turns on **relay tickets**: your handshake server hands each paired buddy a
+> short-lived signed permit, and the relay admits only those sessions — while
+> still learning nothing about who is in them. Serving named networks instead
+> (`--allow-cidr`) is the alternative; running a relay open to everyone is not
+> offered. See [docs/OPERATIONS.md](docs/OPERATIONS.md#relay-setup).
+
+> **Why the extra step:** the server refuses to start without its key instead of
+> generating a fresh one. A lost volume or a typo in `--key` would otherwise bring
+> it up as a *different* server, and every buddy that pinned the old key would
+> refuse it as a possible MITM. Back that key file up. Print it again any time
+> with `… --key /var/lib/buddynet/id.key identity`.
+
+> **The control plane is always encrypted.** Matchmaking runs over QUIC/TLS 1.3;
+> the pairing token never travels in the clear and there is nothing to configure.
+> See [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 **2 — Inviter** (e.g. the machine being backed up *to*, running an rsync daemon):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake --invite --forward 127.0.0.1:873
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --invite --forward 127.0.0.1:873
 # prints a one-time TOKEN, then waits for your buddy to join
 ```
 
 **3 — Joiner** (the machine doing the backup):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-    --quic-handshake --join=TOKEN -L 127.0.0.1:9000 &
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=TOKEN -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
@@ -152,13 +169,14 @@ revoke and honest caveats: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md).
 - **Signed matchmaking.** The handshake server learns peers' public endpoints,
   pairs two that share a token, and hands back a **signed** `PEER_LIST`. No
   tunnel data ever flows through it.
-- **Encrypted control plane.** Use `--quic-handshake` (server + every buddy) to
-  run matchmaking over QUIC/TLS 1.3 — the pairing token stays encrypted in
-  transit. Plain UDP is available for constrained environments but sends the token
-  in cleartext. QUIC also validates source addresses structurally (no extra
-  round-trip), so the server is never a reflector.
+- **Encrypted control plane.** Matchmaking runs over QUIC/TLS 1.3, always — the
+  pairing token stays encrypted in transit. QUIC also validates source addresses
+  structurally (no extra round-trip), so the server is never a reflector.
 - **Fallback chain.** Direct P2P → known relay → handshake-as-relay → cached
   peer (works even if the server is offline).
+- **Authorized relay.** A relay admits only sessions your handshake server
+  signed a ticket for (bound to a fresh ephemeral key the binder must prove it
+  holds), or sources inside networks you name. It refuses to start with neither.
 - **Blind relay.** Buddies run their own QUIC/TLS end to end; a relay only
   forwards the encrypted packets, keyed by an opaque session token. It sees
   virtual IPs and ciphertext, never content.
@@ -189,12 +207,12 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   is pinned and checked silently. For daemons set `--no-interactive` and pin with
   `--peer-key` (an unknown key is then refused, never learned blind).
 - The token is a **bearer secret** — keep it off the command line (use a `0600`
-  file or `BUDDYNET_TOKEN`).
+  file or `--join`).
 - Optional allowlist (approval mode) on the handshake server, with sealed
   enrollment codes so a code can't be read off the wire.
 - The bootstrap server is hardened against abuse: source-address validation,
   global + per-source rate limits, bounded in-memory state, and replay rejection
-  in approval mode. `--quic-handshake` (recommended default) encrypts the control
+  in approval mode. (recommended default) encrypts the control
   plane and validates source addresses without a cookie round-trip.
 - Restrict **who** can reach a server role with `--allow-cidr` (comma-separated
   CIDRs; relay **and** handshake). Disallowed sources are dropped before any
@@ -260,7 +278,7 @@ Release binaries are signed with [Sigstore](https://www.sigstore.dev/) (keyless
 
 ```bash
 cosign verify-blob --bundle buddynet-linux-amd64.bundle \
-  --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+  --certificate-identity-regexp '^https://github\.com/TZERO78/buddynet/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   buddynet-linux-amd64
 # -> Verified OK

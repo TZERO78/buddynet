@@ -18,6 +18,7 @@ import (
 	buddydns "github.com/tzero78/buddynet/internal/dns"
 	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/peer"
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/internal/vip"
 )
 
@@ -37,7 +38,7 @@ type BuddyConfig struct {
 	// tunnel to every listed buddy at once (plus any previously paired peers from
 	// the session store). Each buddy is pinned by key (Model A) and pairs via its
 	// own token; once paired, reconnects use a stored per-peer session secret.
-	// Incompatible with the single-peer pairing modes (--invite/--join/--token)
+	// Incompatible with the single-peer pairing modes (--invite/--join)
 	// and --lazy; use --vip-listen (not -L) to route to more than one buddy.
 	PeersFile string
 	Insecure  bool   // disable partner verification (testing only); set only when --lab is passed
@@ -76,7 +77,7 @@ type BuddyConfig struct {
 	// Ephemeral marks an --invite/--join pairing: the Token is a short-lived,
 	// one-time invite. On the first SAS-confirmed pairing a long-lived session
 	// secret is derived from the channel binding and stored, and all later
-	// reconnects use THAT (never the invite again). Plain --token is the legacy
+	// reconnects use THAT (never the invite again). The fixed-token mode is gone
 	// fixed-token mode (Ephemeral=false): no session secret, token reused.
 	Ephemeral     bool
 	InviteTimeout time.Duration // give up first pairing after this long (default 15m)
@@ -85,8 +86,6 @@ type BuddyConfig struct {
 	// UDP. It must match the handshake server's transport. QUIC validates the
 	// source address in its handshake (structural anti-reflection); UDP achieves
 	// the same with the address-validation cookie. Either way the SAME socket is
-	// then reused to hole-punch and run the peer tunnel.
-	QUIC bool
 
 	// Name is this node's self-asserted .buddy hostname (e.g. "alice" → alice.buddy).
 	// It is sent in REGISTER and relayed by the handshake server to the partner,
@@ -151,11 +150,29 @@ type node struct {
 	reg       *peer.Registry     // offline peer cache (peers.json)
 }
 
+// PunchDurMax caps --punch. A relay ticket is issued for at most ticket.MaxTTL
+// and has to cover the punch attempt PLUS the time to bind afterwards, so the
+// punch must leave the bind window intact: with a 100s punch inside a 120s
+// ticket only 20s would remain, i.e. a permit that can expire while the buddy is
+// still waiting for the punch it was issued for.
+//
+// The relay cannot enforce this — it never learns a buddy's punch duration — so
+// it is enforced HERE, where the value is configured, and it is a hard refusal
+// rather than a silent clip: quietly changing a duration an operator asked for
+// is how a setting stops meaning what it says.
+const PunchDurMax = 60 * time.Second
+
 // Buddy runs the peer until ctx is cancelled, reconnecting whenever the tunnel
 // drops.
 func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	if cfg.PunchDur == 0 {
 		cfg.PunchDur = 2 * time.Second
+	}
+	if cfg.PunchDur > PunchDurMax {
+		return fmt.Errorf("--punch %s is over the %s maximum: a relay ticket is valid for at most %s, "+
+			"so a longer punch would leave less than the intended bind window and the ticket could expire "+
+			"while the punch is still running. Refusing rather than silently shortening it",
+			cfg.PunchDur, PunchDurMax, ticket.MaxTTL)
 	}
 	if cfg.IdleTimeout < 10*time.Second {
 		cfg.IdleTimeout = 60 * time.Second
@@ -354,7 +371,7 @@ func nextAttempt(cfg BuddyConfig) (attempt, error) {
 	if cfg.Token != "" {
 		return attempt{rendezvous: cfg.Token, inviteToken: cfg.Token, firstPairing: cfg.Ephemeral}, nil
 	}
-	return attempt{}, errors.New("no saved session and no token — use --invite or --join (or --token for the legacy fixed-token mode)")
+	return attempt{}, errors.New("no saved session and no invite token — use --invite to mint one, or --join <TOKEN> with the one your buddy gave you")
 }
 
 func randomID() string {

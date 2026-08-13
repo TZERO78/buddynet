@@ -10,12 +10,12 @@ pending and silently dropped.
 BuddyNet separates **authentication** ("which key is this?") from
 **authorization** ("may that key pair?"), and they run at different layers:
 
-| Layer | With `--quic-handshake` | On plain UDP |
-|---|---|---|
-| **Authentication** | TLS 1.3 client certificate: every client must present an Ed25519 identity **and prove possession** of its private key in the handshake. `REGISTER.pubkey` must then equal that authenticated key, or the connection is closed and nothing is stored. | The `reg_sig` key-ownership proof on the `REGISTER` itself. |
-| **Authorization** | Application layer, per `REGISTER`: allowlisted → pair; unknown **with** a valid enrollment code → recorded as pending; unknown without one → refused. | Identical. |
+| Layer | How |
+|---|---|
+| **Authentication** | Two independent proofs. TLS 1.3 client certificate: every client must present an Ed25519 identity **and prove possession** of its private key in the handshake; `REGISTER.pubkey` must then equal that authenticated key, or the connection is closed and nothing is stored. On top of that, every `REGISTER` carries the `reg_sig` key-ownership proof, which the server verifies unconditionally. |
+| **Authorization** | Application layer, per `REGISTER`: allowlisted → pair; unknown **with** a valid enrollment code → recorded as pending; unknown without one → refused. |
 
-Either way, **only allowlisted keys can pair.**
+**Only allowlisted keys can pair.**
 
 > **Why authorization is not done at the TLS handshake.** It used to be: the QUIC
 > server refused any client key that was not already on the allowlist. That made
@@ -44,8 +44,7 @@ Start the handshake server with `--authorized`:
 
 ```bash
 buddynet --role=handshake \
-  --key /var/lib/buddynet/id.key \
-  --quic-handshake \
+  --key /var/lib/buddynet/id.key \ \
   --authorized /etc/buddynet/authorized_clients
 ```
 
@@ -102,16 +101,15 @@ approves the code without ever seeing the raw key.
 
    ```bash
    buddynet --role=buddy \
-     --server vps.example:51820 --server-key SERVER_KEY \
-     --quic-handshake \
+     --server vps.example:51820 --server-key SERVER_KEY \ \
      --key /var/lib/buddynet/id.key \
      --code MY_ENROLLMENT_CODE \
      --join=TOKEN -L 127.0.0.1:9000
    ```
 
    The client sends the code (encrypted to the server's public key) along with
-   its registration. The server decrypts it, records the `(code → key)` mapping
-   in `authorized_clients.pending`, and logs:
+   its registration. The server decrypts it, holds the `(code → key)` mapping **in
+   memory only**, and logs:
 
    ```
    AUTHZ: action=pending key=abc12345 code=78c86dc0 — approve with:
@@ -122,19 +120,51 @@ approves the code without ever seeing the raw key.
    itself — it is a bearer secret and logs get shipped off-box. The public key is
    printed in full on purpose: it is not a secret, and it is the command you need.
 
-3. The operator approves the code:
+3. The operator approves the **key** the log line printed:
 
    ```bash
    buddynet --role=handshake \
      --authorized /etc/buddynet/authorized_clients \
-     allowclient MY_ENROLLMENT_CODE
+     approve <CLIENT_KEY>
    ```
 
-   The key that presented the code is moved from `.pending` to the authorized
-   file. The running server hot-reloads within 2 s and the client's **next
-   registration attempt succeeds — no restart on either side.** (Each attempt
-   carries a fresh nonce and signature, so a client polling while it waits for
-   approval is never mistaken for a replay.)
+   The running server hot-reloads within 2 s and the client's **next registration
+   attempt succeeds — no restart on either side.** (Each attempt carries a fresh
+   nonce and signature, so a client polling while it waits for approval is never
+   mistaken for a replay.)
+
+   > **Changed in v5.0.0.** There used to be an `allowclient CODE` subcommand: it
+   > looked the code up in an `authorized_clients.pending` file the server
+   > maintained, and approved whatever key was recorded there. That file is gone,
+   > and with it the subcommand.
+   >
+   > **This is a security improvement, not only a simplification.** The pending
+   > file was a `code → key` mapping sitting on disk for up to 30 minutes and
+   > written by two processes, and `allowclient` *trusted* it: anyone able to write
+   > that file could swap the recorded key, and typing the correct code would then
+   > approve the **wrong** key without anything looking wrong. Approving the key
+   > from the log removes that indirection — you authorise exactly what the server
+   > saw. It also means an enrolment only exists while the client is actually
+   > running and talking to the server, so there is no waiting entry to tamper with.
+   >
+   > The cost is real and worth stating: if the client is no longer running, the
+   > entry is gone and there is nothing to approve — start it again. Previously the
+   > entry survived 30 minutes regardless.
+   >
+   > In practice this lands **once per buddy, ever**. It is the first-contact step:
+   > after the approval the key is on the allowlist (operator configuration, which
+   > does persist) and the pair stores a session secret in `known_peers`.
+   >
+   > Everything after that is unattended. When your buddy's provider hands them a
+   > new IP, the handshake server does exactly what it is for — both ends
+   > re-register, it matches them and returns the new endpoints — and the tunnel
+   > comes back on the stored session secret. No code, no operator, no enrolment:
+   > the server is still in the loop for **matchmaking**, just not for
+   > **authorisation**, because the key is already approved.
+   >
+   > So the live requirement costs you one moment per buddy — the moment you are
+   > already on the phone with them — and it is precisely the moment worth pinning
+   > down, because it is the one where an attacker would want to slip a key in.
 
 ## Subcommands
 
@@ -143,9 +173,6 @@ All subcommands require `--authorized` and exit immediately.
 ```bash
 # Approve a key directly
 buddynet --role=handshake --authorized FILE approve KEY [LABEL]
-
-# Approve via enrollment code (Flow B)
-buddynet --role=handshake --authorized FILE allowclient CODE
 
 # List all approved keys
 buddynet --role=handshake --authorized FILE list
@@ -158,14 +185,12 @@ buddynet --role=handshake --authorized FILE revoke KEY
 
 Adds KEY to the authorized file. KEY must be a base64-encoded Ed25519 public key
 (44 characters). Duplicate approvals are silently ignored. The optional label is
-free-form text stored next to the key; `allowclient` sets it to `code:<CODE>`.
+free-form text stored next to the key. A good label for Flow B is
+`code:<code-hash>`, matching the `code=` field of the server's log line.
 
-### `allowclient CODE`
-
-Looks up CODE in the `.pending` file (written by the running server), moves the
-corresponding key into the authorized file, and removes the pending entry. Fails
-if the code is not in `.pending` (client has not registered yet, or the 30-minute
-pending TTL has elapsed).
+`allowclient CODE` was removed in v5.0.0 (see the note in Flow B). Running it
+prints what to do instead and exits non-zero, so old scripts fail loudly rather
+than silently doing nothing.
 
 ### `list`
 
@@ -191,10 +216,12 @@ BASE64_KEY another-client
 The file is written as `0600` by `approve`; keep it that way. The server reads
 it with the same permissions check it applies to identity key files.
 
-A companion file `<authorized>.pending` is maintained automatically — do not
-edit it by hand. It holds `(code-hash → key)` entries for clients that have
-registered with a `--code` but have not been approved yet. Entries older than
-30 minutes are pruned automatically.
+This is the **only** file the control server needs across restarts, alongside its
+identity key — and both are operator configuration, not runtime state. Since
+v5.0.0 the server writes nothing else: pending enrolments are held in memory,
+bounded and pruned after 30 minutes, and are gone when the process stops. A
+leftover `<authorized>.pending` from an older version is simply ignored and can be
+deleted.
 
 ## Two things to know about the enrollment code
 
@@ -203,7 +230,7 @@ valid code first is the key that gets recorded as pending under it — the serve
 cannot tell your buddy's key from anyone else's, only that both sealed the same
 code. So send the code over a channel you trust (the same one you would use for
 the SAS), and check the key tag in the log line against what your buddy sees
-before you run `allowclient`:
+before you approve it:
 
 ```
 AUTHZ: action=pending key=Ab3dEf9k code=1a2b3c4d — approve with: …
@@ -253,14 +280,18 @@ in the same two minutes is worth avoiding; there is no reason to do both at once
   (pre-parse) applies first.
 
 - **No oracle.** Enrollment codes are encrypted to the server's public key before
-  being sent on the wire, so a passive observer cannot read them. The server
-  never sends the code back; the operator approves by code, and only the
-  server learns which key presented it.
+  being sent on the wire, so a passive observer cannot read them. The server never
+  sends the code back, and only the server learns which key presented it.
 
 - **Key-change detection.** If a different key re-registers with a code that
-  already has an approved entry in `.pending`, the second key is silently dropped
-  (the approved key wins). This prevents a race where an attacker re-uses a
-  captured code before the operator approves it.
+  already has an approved entry, the second key is silently dropped (the approved
+  key wins). This prevents a race where an attacker re-uses a captured code before
+  the operator approves it.
+
+- **Nothing waits on disk.** The enrolment exists only while the client is running
+  and talking to the server, so there is no `code → key` record for anyone to read
+  or alter between registration and approval — and you approve the key the server
+  reports, not one looked up in a file (see the v5.0.0 note in Flow B).
 
 ## Combining with `--allow-cidr`
 
@@ -269,8 +300,7 @@ For a private fleet you can add a network-level pre-filter on top of the allowli
 ```bash
 buddynet --role=handshake \
   --authorized /etc/buddynet/authorized_clients \
-  --allow-cidr 10.0.0.0/8,192.168.0.0/16 \
-  --quic-handshake \
+  --allow-cidr 10.0.0.0/8,192.168.0.0/16 \ \
   --key /var/lib/buddynet/id.key
 ```
 

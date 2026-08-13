@@ -39,15 +39,6 @@ const (
 	// NAT mappings and registrations fresh.
 	TypePing Type = "PING"
 	TypePong Type = "PONG"
-
-	// TypeCookie is the handshake server's address-validation challenge on the
-	// UDP transport: when a REGISTER arrives without a valid Cookie, the server
-	// replies with one (smaller than the request, so never an amplifier) and does
-	// no further work. The client echoes it in Cookie on its next REGISTER. A
-	// spoofed source never receives the challenge, so it can never be answered —
-	// this is QUIC's Retry-token idea at the application layer, and it structurally
-	// removes the reflection vector on the plain-UDP transport.
-	TypeCookie Type = "COOKIE"
 )
 
 // Role is the explicit role a node runs as. BuddyNet never auto-detects a role;
@@ -89,8 +80,12 @@ type Message struct {
 	Ver  int  `json:"ver"` // sender's protocol Version; mismatch is reported clearly
 
 	// Identity / pairing (REGISTER).
-	Token     string `json:"token,omitempty"`      // shared secret pairing two buddies (cleartext; legacy/fallback)
-	TokenEnc  string `json:"token_enc,omitempty"`  // the pairing token SEALED to the server's pinned key (preferred; keeps it off the wire on plain UDP). The server unseals it to the same value Token would carry.
+	// Token is the pairing rendezvous in CLEARTEXT. It is deliberately NOT
+	// serialised (`json:"-"`): it never travels, it only carries the value the
+	// signature is computed over — the client sets it before sealing, the server
+	// after unsealing. TokenEnc is the one form that goes on the wire.
+	Token     string `json:"-"`
+	TokenEnc  string `json:"token_enc,omitempty"`  // the pairing token SEALED to the server's pinned key
 	Role      Role   `json:"role,omitempty"`       // sender's role
 	ID        string `json:"id,omitempty"`         // ephemeral per-run id
 	PubKey    string `json:"pubkey,omitempty"`     // base64 Ed25519 identity
@@ -109,16 +104,33 @@ type Message struct {
 	// operator can approve by a short code instead of the long public key.
 	CodeEnc string `json:"code_enc,omitempty"`
 
-	// Cookie is the server's address-validation token (UDP transport). The server
-	// sends it in a TypeCookie reply; the client echoes it on its next REGISTER.
-	// It binds to the source address and a short epoch, so it proves return-
-	// routability without the server holding per-source state.
-	Cookie string `json:"cookie,omitempty"`
+	// EphPub is the buddy's EPHEMERAL relay-session public key (base64url,
+	// Ed25519), fresh per attempt and unrelated to its identity. The server puts
+	// it in the relay ticket it issues, so the ticket is worthless to anyone who
+	// captures it: using it requires the matching private key, which never leaves
+	// the buddy. Covered by RegistrationPayload, so it cannot be swapped in
+	// flight — a swapped epk would hand the attacker a usable ticket.
+	//
+	// Optional: a buddy that will never use a relay may omit it, and a server with
+	// no relay configured ignores it.
+	EphPub string `json:"epk,omitempty"`
 
 	// PEER_LIST payload (server -> peer). Peers is the roster; Sig is the
 	// server's signature over PeerListPayload(token, ts, peers).
 	Peers []Peer `json:"peers,omitempty"`
 	Sig   string `json:"sig,omitempty"`
+
+	// Ticket is the relay authorization the server issues to THIS recipient with
+	// its PEER_LIST (never to the partner: it is bound to this buddy's EphPub).
+	// Present only when the server has a relay configured and the pair is matched.
+	//
+	// It carries its OWN signature by the same server key and is bound to the
+	// recipient's epk, so it is deliberately NOT covered by PeerListPayload:
+	// stripping it can only cost the relay fallback, and swapping in another
+	// ticket gains nothing, because the swapped-in one names an epk the recipient
+	// cannot prove. Leaving the roster signature untouched keeps one signed
+	// payload definition rather than two that must agree.
+	Ticket *RelayTicket `json:"ticket,omitempty"`
 
 	// RELAY_OFFER payload.
 	From          string `json:"from,omitempty"`           // virtual IP
@@ -130,6 +142,18 @@ type Message struct {
 	FromPubKey   string `json:"from_pubkey,omitempty"`
 	ToPubKey     string `json:"to_pubkey,omitempty"`
 	SessionToken string `json:"session_token,omitempty"`
+}
+
+// RelayTicket is a server-signed relay permit as it travels on the control
+// plane: the ticket payload and the signature over it, both base64url.
+//
+// Payload is an OPAQUE byte string here on purpose. The relay verifies the
+// signature over exactly the bytes it received and only then parses them (see
+// internal/ticket), so this package deliberately does not describe the fields:
+// a second definition of the signed structure is a second thing that can drift.
+type RelayTicket struct {
+	Payload string `json:"p"`
+	Sig     string `json:"s"`
 }
 
 // PeerListPayload is the exact byte string the handshake server signs and a
@@ -155,18 +179,19 @@ func PeerListPayload(token string, ts int64, peers []Peer) []byte {
 // flight: the protocol version and role (a downgrade or role swap is a different
 // message), the pairing token, the identity triple (id/pubkey/virtual IP), the
 // self-asserted name the server relays to the partner, the freshness timestamp,
-// the per-attempt nonce, and the sealed enrollment code (so a code cannot be
-// lifted off one registration and pasted onto another key's).
+// the per-attempt nonce, the sealed enrollment code (so a code cannot be lifted
+// off one registration and pasted onto another key's), and the ephemeral
+// relay-session key.
 //
-// Two fields are deliberately NOT covered:
+// The ephemeral key is covered for the same reason as everything else, and the
+// consequence is worth stating: the server signs it into a relay ticket, so an
+// on-path party that could swap it would receive a ticket bound to a key IT
+// holds — a usable relay permit for someone else's session. Signed, the swap
+// invalidates the registration instead.
 //
-//   - Cookie — the UDP address-validation token. It is minted by the server and
-//     verified against the server's own HMAC key and the packet's source IP, so
-//     a signature over it would add nothing; and the client must be able to
-//     attach a freshly challenged cookie without re-deriving anything else.
-//   - TokenEnc — the sealed form of the token. It must first decrypt under the
-//     server's identity key; what gets signed is the recovered plaintext Token,
-//     which is the value every downstream check actually uses.
+// One field is deliberately NOT covered: TokenEnc, the sealed form of the token.
+// It must first decrypt under the server's identity key; what gets signed is the
+// recovered plaintext Token, which is the value every downstream check uses.
 //
 // The caller passes the message with Token already holding the PLAINTEXT token
 // (the client sets it before sealing; the server sets it after unsealing).
@@ -182,7 +207,8 @@ func RegistrationPayload(m Message) []byte {
 		Ts        int64  `json:"ts"`
 		Nonce     string `json:"nonce"`
 		CodeEnc   string `json:"code_enc"`
-	}{m.Ver, m.Role, m.Token, m.ID, m.PubKey, m.VirtualIP, m.Name, m.Ts, m.Nonce, m.CodeEnc})
+		EphPub    string `json:"epk"`
+	}{m.Ver, m.Role, m.Token, m.ID, m.PubKey, m.VirtualIP, m.Name, m.Ts, m.Nonce, m.CodeEnc, m.EphPub})
 	return b
 }
 

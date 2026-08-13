@@ -49,6 +49,11 @@ waitlog() {
 }
 
 step "handshake server, approval mode, NO allowlist file yet"
+# The identity is created EXPLICITLY before the server runs: a server never mints
+# one, so that a lost key surfaces as a refusal instead of a new identity nobody
+# has pinned.
+SRVKEY=$("$BIN" --role=handshake --key "$DIR/srv.key" init | tr -d '[:space:]')
+[ -n "$SRVKEY" ] && ok "server identity created explicitly with init" || bad "init produced no identity"
 "$BIN" --role=handshake --key "$DIR/srv.key" --listen "127.0.0.1:$PORT" \
 	--authorized "$ALLOW" >"$DIR/srv.log" 2>&1 &
 PIDS+=($!)
@@ -67,8 +72,20 @@ else
 	ok "a missing allowlist did not enable open mode"
 fi
 
-SRVKEY=$("$BIN" --role=handshake --key "$DIR/srv.key" identity | tr -d '[:space:]')
-[ -n "$SRVKEY" ] && ok "server identity printed" || bad "no server identity"
+# A server must never invent an identity: with the key removed it refuses to
+# start rather than coming up as a DIFFERENT server to every buddy that pinned it.
+mv "$DIR/srv.key" "$DIR/srv.key.bak"
+if "$BIN" --role=handshake --key "$DIR/srv.key" --listen "127.0.0.1:$((PORT+9))" >"$DIR/nokey.log" 2>&1; then
+	bad "the server started WITHOUT an identity key"
+else
+	if grep -q "init" "$DIR/nokey.log"; then
+		ok "a missing identity refuses to start and names the init command"
+	else
+		bad "the refusal does not tell the operator what to do: $(head -1 "$DIR/nokey.log")"
+	fi
+fi
+[ -e "$DIR/srv.key" ] && bad "the refused start created a key anyway" || ok "the refused start created no identity"
+mv "$DIR/srv.key.bak" "$DIR/srv.key"
 
 # --- two buddies enroll with a code -----------------------------------------
 ECHO_PORT=$(( PORT + 1 ))
@@ -87,8 +104,8 @@ PIDS+=($!)
 # Create both buddy identities up front so each can PIN the other with
 # --peer-key: this test is about the control plane, and pinning keeps the SAS
 # (which needs a human) out of the picture without resorting to --lab.
-KEY_A=$("$BIN" --role=buddy --key "$DIR/a.key" identity | tr -d '[:space:]')
-KEY_B=$("$BIN" --role=buddy --key "$DIR/b.key" identity | tr -d '[:space:]')
+KEY_A=$("$BIN" --role=buddy --key "$DIR/a.key" init | tr -d '[:space:]')
+KEY_B=$("$BIN" --role=buddy --key "$DIR/b.key" init | tr -d '[:space:]')
 if [ -n "$KEY_A" ] && [ -n "$KEY_B" ] && [ "$KEY_A" != "$KEY_B" ]; then
 	ok "both buddy identities created"
 else
@@ -99,7 +116,7 @@ fi
 start_buddy() { # name code peer-key extra-args...
 	local name=$1 code=$2 peerkey=$3; shift 3
 	"$BIN" --role=buddy --server "127.0.0.1:$PORT" --server-key "$SRVKEY" \
-		--key "$DIR/$name.key" --token "$TOKEN" --code "$code" \
+		--key "$DIR/$name.key" --join "$TOKEN" --code "$code" \
 		--peer-key "$peerkey" --peers "$DIR/$name-peers.json" \
 		--known-peers "$DIR/$name-known_peers" \
 		--reauth-interval 10s "$@" >"$DIR/$name.log" 2>&1 &
@@ -132,9 +149,34 @@ else
 	ok "un-approved clients did not pair"
 fi
 
-step "operator approves both codes (server keeps running)"
-"$BIN" --authorized "$ALLOW" allowclient "$CODE_A" >>"$DIR/admin.log" 2>&1 || bad "allowclient A failed"
-"$BIN" --authorized "$ALLOW" allowclient "$CODE_B" >>"$DIR/admin.log" 2>&1 || bad "allowclient B failed"
+step "the server keeps NO runtime state on disk (v5.0.0)"
+if [ -e "$ALLOW.pending" ]; then
+	bad "the server wrote $ALLOW.pending — pending enrolments must live in memory only"
+else
+	ok "no pending file: the control server keeps no runtime database"
+fi
+if "$BIN" --authorized "$ALLOW" allowclient "$CODE_A" >>"$DIR/admin.log" 2>&1; then
+	bad "allowclient still succeeds — it was removed in v5.0.0"
+else
+	if grep -q "approve <CLIENT-PUBKEY>" "$DIR/admin.log"; then
+		ok "allowclient refuses with an actionable message pointing at approve"
+	else
+		bad "allowclient failed without telling the operator what to do instead"
+	fi
+fi
+
+step "operator approves both KEYS from the log line (server keeps running)"
+# The log line is the only route now, so take the keys from it exactly as an
+# operator would: AUTHZ: action=pending key=… — approve with: … approve <KEY>
+PKEY_A=$(grep -o "approve [A-Za-z0-9+/=]\{40,\}" "$DIR/srv.log" | awk '{print $2}' | sed -n 1p)
+PKEY_B=$(grep -o "approve [A-Za-z0-9+/=]\{40,\}" "$DIR/srv.log" | awk '{print $2}' | sed -n 2p)
+if [ -z "$PKEY_A" ] || [ -z "$PKEY_B" ]; then
+	bad "could not read the client keys from the server log — the approve hint is unusable"
+else
+	ok "the log line carries a ready-to-run approve command for each client"
+fi
+"$BIN" --authorized "$ALLOW" approve "$PKEY_A" >>"$DIR/admin.log" 2>&1 || bad "approve A failed"
+"$BIN" --authorized "$ALLOW" approve "$PKEY_B" >>"$DIR/admin.log" 2>&1 || bad "approve B failed"
 if [ "$(grep -c . "$ALLOW")" = "2" ]; then
 	ok "both keys are on the allowlist"
 else
@@ -143,7 +185,7 @@ fi
 if grep -qE "$CODE_A|$CODE_B" "$ALLOW"; then
 	bad "the cleartext code was written into the allowlist"
 else
-	ok "the allowlist stores a hashed code label, not the code"
+	ok "the allowlist holds no cleartext enrollment code"
 fi
 
 step "the SAME running clients now pair — no restart"

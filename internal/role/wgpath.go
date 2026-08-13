@@ -118,24 +118,43 @@ func effectiveScopeOf(cfg BuddyConfig, perBuddy *nft.Scope) nft.Scope {
 // applyScope enforces scope on ifName BEFORE the interface carries traffic, and
 // returns the teardown counterpart. Fail-closed: if the kernel cannot program
 // the rules (no nftables support, missing CAP_NET_ADMIN), the tunnel must NOT
-// come up — never silently expose the whole host. The explicit `all` scope is
-// the one case that installs nothing (the operator opted out of scoping; this
-// also keeps `--expose all` working on kernels without nftables).
+// come up — never silently expose the whole host.
+//
+// `all` goes through nft.Apply like every other scope. It used to return early
+// here, on the reasoning that "whole host" means "no rules to install" — which
+// stopped being true when the forward-hook chain arrived: `all` opens this HOST,
+// never the networks behind it, and that drop is a rule like any other. Skipping
+// Apply meant the ruleset was correct in nft.buildBatch and simply never reached
+// the kernel, so a buddy on an `--expose all` node could still be routed into the
+// LAN. Every test and lab that only exercises buildBatch or nft.Apply directly
+// stays green through that gap; this function is the one place that closes it.
+//
+// The cost is that `--expose all` now also requires kernel nftables support,
+// where it used to work without. That is the right trade: without nftables the
+// forward drop cannot exist, and coming up anyway would mean routing into the
+// LAN with no way to say so.
+// applyNFT / removeNFT are indirections purely so a test can observe that this
+// function really programs the ruleset for EVERY scope. The gap this closes was
+// invisible to unit tests and to the netns lab alike, because both drove
+// nft.Apply (or buildBatch) directly and never came through here.
+var (
+	applyNFT  = nft.Apply
+	removeNFT = nft.Remove
+)
+
 func applyScope(ifName string, scope nft.Scope) (func(), error) {
+	if err := applyNFT(ifName, scope); err != nil {
+		return nil, fmt.Errorf("cannot enforce the exposure scope on %s (%w) — refusing to bring the tunnel up rather than exposing the whole host; needs kernel nftables support + CAP_NET_ADMIN (required for every scope, including --expose all, which still has to install the rule that stops a buddy being routed onward)", ifName, err)
+	}
 	if scope.All {
-		log.Printf("EXPOSE: action=whole-host iface=%s detail=%q", ifName, "explicit whole-host access (--expose all)")
-		return func() {}, nil
-	}
-	if err := nft.Apply(ifName, scope); err != nil {
-		return nil, fmt.Errorf("cannot enforce the exposure scope on %s (%w) — refusing to bring the tunnel up rather than exposing the whole host; needs kernel nftables support + CAP_NET_ADMIN, or pass --expose all for explicit whole-host access", ifName, err)
-	}
-	if len(scope.Ports) == 0 {
+		log.Printf("EXPOSE: action=whole-host iface=%s detail=%q", ifName, "explicit whole-host access (--expose all) — this host only, never routed onward")
+	} else if len(scope.Ports) == 0 {
 		log.Printf("EXPOSE: action=fail-closed iface=%s detail=%q", ifName, "the buddy reaches nothing here — add --expose <port> (or expose: in the manifest) to share a service")
 	} else {
 		log.Printf("EXPOSE: action=scoped iface=%s ports=%s", ifName, scope)
 	}
 	return func() {
-		if err := nft.Remove(ifName); err != nil {
+		if err := removeNFT(ifName); err != nil {
 			log.Printf("EXPOSE: action=remove-failed iface=%s detail=%q", ifName, err.Error())
 		}
 	}, nil
@@ -149,10 +168,10 @@ func applyScope(ifName string, scope nft.Scope) (func(), error) {
 // relay forwards the encrypted WG packets to the partner's leg, exactly as it does
 // QUIC — it is never a WG peer and holds no key). conn keeps the NAT mapping the
 // bind/punch opened, so the socket handoff to kernel WG reuses it.
-func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration) (*net.UDPAddr, relay.Path, error) {
+func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration, cred *relayCred) (*net.UDPAddr, relay.Path, error) {
 	var lastErr error
 	for _, p := range chain {
-		addr, err := primeOne(conn, myID, p, session, punchDur)
+		addr, err := primeOne(conn, myID, p, session, punchDur, cred)
 		if err != nil {
 			log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, err.Error())
 			lastErr = err
@@ -174,11 +193,11 @@ func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session str
 // bnet0 (no -L/-forward). It fails closed: if WG is unavailable, no path works, or
 // the SAS is rejected, it returns an error rather than silently using another plane.
 // MultiPeer-over-bnet0 is a later step.
-func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, att attempt, partner protocol.Peer, partnerPub ed25519.PublicKey, needSAS bool, chain []relay.Path, session string) error {
+func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, att attempt, partner protocol.Peer, partnerPub ed25519.PublicKey, needSAS bool, chain []relay.Path, session string, cred *relayCred) error {
 	if !wg.Available() {
 		return errors.New("--wireguard set but kernel WireGuard is unavailable here (need Linux + NET_ADMIN + the wireguard module)")
 	}
-	remote, used, err := primeWGPath(conn, nd.id, chain, session, cfg.PunchDur)
+	remote, used, err := primeWGPath(conn, nd.id, chain, session, cfg.PunchDur, cred)
 	if err != nil {
 		return fmt.Errorf("--wireguard: %w", err)
 	}

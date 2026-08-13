@@ -16,6 +16,12 @@
 #      restart. This is the case that previously only healed on reconnect.
 # Needs root + wireguard module + kernel nftables.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 BN=/tmp/wgexpr/bn
 D=/tmp/wgexpr
@@ -35,9 +41,9 @@ echo "== build =="
 go build -o "$BN" ./cmd/buddynet
 sudo modprobe wireguard
 
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
 
 echo "== topology =="
 sudo ip netns add ns-sw; sudo ip netns add ns-srv; sudo ip netns add ns-a; sudo ip netns add ns-b
@@ -64,7 +70,7 @@ buddies:
     expose: [873]
 EOF
 
-sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
+sudo ip netns exec ns-srv "$BN" --role=handshake,relay --relay-id "$RID" \
 	--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
 	--key "$D/srv.key" --relay-endpoint 10.50.0.10:51821 >"$D/srv.log" 2>&1 &
 PIDS="$PIDS $!"
@@ -84,7 +90,7 @@ sudo ip netns exec ns-a "$BN" --role=buddy \
 A_PID=$!; PIDS="$PIDS $A_PID"
 
 # B pins A and probes.
-sudo ip netns exec ns-b env BUDDYNET_TOKEN="$TOKEN" "$BN" --role=buddy \
+sudo ip netns exec ns-b "$BN" --join "$TOKEN" --role=buddy \
 	--server 10.50.0.10:51820 --server-key "$SRVPUB" --key "$D/b.key" \
 	--peer-key "$APUB" --known-peers "$D/b.kp" --peers "$D/b.pj" \
 	--no-interactive --wireguard --expose all >"$D/b.log" 2>&1 &

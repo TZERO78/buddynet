@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"github.com/tzero78/buddynet/internal/ratelimit"
 	"io"
 	"net"
 	"testing"
@@ -12,7 +13,7 @@ import (
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 )
 
-// inProcHandshake runs a real matchmaking server (the production handleRegister
+// inProcHandshake runs a real matchmaking server (the production QUIC control plane
 // path) on loopback and returns its address and the base64 server key to pin.
 func inProcHandshake(t *testing.T) (addr, serverKeyB64 string) {
 	t.Helper()
@@ -25,19 +26,10 @@ func inProcHandshake(t *testing.T) (addr, serverKeyB64 string) {
 		t.Fatalf("server key: %v", err)
 	}
 	reg := newHSRegistry(time.Minute)
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, src, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				return
-			}
-			raw := make([]byte, n)
-			copy(raw, buf[:n])
-			handleRegister(conn, reg, priv, nil, "", src, raw)
-		}
-	}()
-	t.Cleanup(func() { conn.Close() })
+	ctx, cancel := context.WithCancel(context.Background())
+	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
+	go serveControlQUIC(ctx, conn, reg, priv, nil, relayAdvert{}, rl, nil)
+	t.Cleanup(func() { cancel(); conn.Close() })
 	return conn.LocalAddr().String(), bcrypto.PubKeyB64(pub)
 }
 

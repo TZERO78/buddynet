@@ -68,32 +68,58 @@ func TestEnrollByCodeFlow(t *testing.T) {
 		t.Fatalf("seal: %v", err)
 	}
 	a.recordPending(enc, clientKey)
-	// The pending DB must store a HASH of the code, never the plaintext.
-	if data, _ := os.ReadFile(path + ".pending"); strings.Contains(string(data), "ab56fe2") {
-		t.Fatal("pending DB leaks the plaintext enrollment code")
-	} else if !strings.Contains(string(data), shortHash("ab56fe2")) {
-		t.Fatal("pending DB does not contain the code hash")
+
+	// The pending set is keyed by a HASH of the code, never the plaintext — the
+	// code is a bearer secret and must not survive anywhere in recoverable form.
+	a.mu.RLock()
+	_, hashed := a.pend[shortHash("ab56fe2")]
+	_, plain := a.pend["ab56fe2"]
+	a.mu.RUnlock()
+	if !hashed {
+		t.Fatal("pending set does not contain the code hash")
 	}
+	if plain {
+		t.Fatal("pending set is keyed by the plaintext enrollment code")
+	}
+
+	// v5.0.0: the pending set lives in MEMORY ONLY. The server must not create a
+	// runtime database — that file, written by two processes, was the single cause
+	// of every persistence bug this store ever had.
+	if _, err := os.Stat(path + ".pending"); !os.IsNotExist(err) {
+		t.Fatalf("the server wrote a pending file (%v) — it must keep no runtime state on disk", err)
+	}
+
 	// First-come-wins: a different key with the same code is ignored.
 	otherPub, _, _ := ed25519.GenerateKey(rand.Reader)
-	a.recordPending(enc, base64.StdEncoding.EncodeToString(otherPub))
+	otherKey := base64.StdEncoding.EncodeToString(otherPub)
+	a.recordPending(enc, otherKey)
+	a.mu.RLock()
+	got := a.pend[shortHash("ab56fe2")].Key
+	a.mu.RUnlock()
+	if got != clientKey {
+		t.Fatalf("a second key hijacked the code: %s", keyTag(got))
+	}
 
 	if a.allowed(clientKey) {
 		t.Fatal("client allowed before approval")
 	}
-	// Operator approves by the short code.
-	if err := AllowClient(path, "ab56fe2"); err != nil {
-		t.Fatalf("allowClient: %v", err)
+	// The operator approves BY KEY, from the log line the server printed.
+	if err := ApproveKey(path, clientKey, "code:"+shortHash("ab56fe2")); err != nil {
+		t.Fatalf("ApproveKey: %v", err)
 	}
 	if err := a.reload(); err != nil {
 		t.Fatalf("reload: %v", err)
 	}
 	if !a.allowed(clientKey) {
-		t.Fatal("client not allowed after allowClient")
+		t.Fatal("client not allowed after approval")
 	}
-	// Wrong code approves nobody.
-	if err := AllowClient(path, "nope12"); err == nil {
-		t.Fatal("allowClient with unknown code should error")
+	// The approval label must carry the code HASH, never the cleartext code.
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "ab56fe2") {
+		t.Fatalf("cleartext enrollment code leaked into the allowlist: %q", data)
+	}
+	if !strings.Contains(string(data), "code:"+shortHash("ab56fe2")) {
+		t.Fatalf("expected a hashed code label, got: %q", data)
 	}
 }
 

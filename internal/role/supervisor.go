@@ -37,17 +37,17 @@ func (c *scopeCell) set(s *nft.Scope) {
 }
 
 // reprogramScope re-applies a per-buddy exposure scope to a LIVE bnetN without
-// dropping the tunnel — the SIGHUP path. It mirrors applyScope's Apply/Remove
-// split: whole-host removes any prior scoping rules, anything else (including
-// fail-closed with no ports) installs the drop-by-default chain. If the interface
-// is not currently up the rules simply match nothing until the next bring-up,
-// which re-applies from the worker's cell anyway.
+// dropping the tunnel — the SIGHUP path. EVERY scope is programmed, `all`
+// included: it used to call nft.Remove for whole-host, on the same reasoning
+// applyScope used ("whole host means no rules"), and that stopped being true when
+// the forward-hook drop arrived. Removing the table on a live reload would have
+// taken the forward drop with it, so editing a manifest entry to `expose: all`
+// and sending SIGHUP silently turned that buddy into a route into the LAN — with
+// the tunnel up and nothing in the log to say so. If the interface is not
+// currently up the rules simply match nothing until the next bring-up, which
+// re-applies from the worker's cell anyway.
 func reprogramScope(cfg BuddyConfig, ifName string, perBuddy *nft.Scope) error {
-	scope := effectiveScopeOf(cfg, perBuddy)
-	if scope.All {
-		return nft.Remove(ifName)
-	}
-	return nft.Apply(ifName, scope)
+	return applyNFT(ifName, effectiveScopeOf(cfg, perBuddy))
 }
 
 // nextAttemptFn yields the connection plan for the next reconnect round. The

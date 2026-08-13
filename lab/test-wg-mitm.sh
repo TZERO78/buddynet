@@ -23,6 +23,12 @@
 # needs a TTY), so each runs under `script` which allocates a pty; the SAS the
 # buddy prints to that pty is captured and scraped. Needs root + the wg module.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 D=/tmp/wgmitm
 BN="$D/bn"
@@ -50,9 +56,9 @@ go build -o "$MITM" ./lab/wg-mitm
 sudo modprobe wireguard
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
 echo "server=$SRVPUB"; echo "A=$APUB"; echo "B=$BPUB"
 
 echo "== bridge topology =="
@@ -83,7 +89,7 @@ sudo ip netns exec ns-b iptables -A INPUT  -s 10.50.0.20 -j DROP
 # first-contact SAS is computed and printed; we scrape it, then kill the buddy.
 run_buddy_tofu() { # $1 ns, $2 keyfile, $3 logfile, $4 store-suffix
 	sudo ip netns exec "ns-$1" script -qec \
-		"env BUDDYNET_TOKEN=$TOKEN $BN --role=buddy --server 10.50.0.10:51820 \
+		"$BN --role=buddy --join $TOKEN --server 10.50.0.10:51820 \
 		 --server-key $SRVPUB --key $2 --known-peers $D/$4.kp --peers $D/$4.pj \
 		 --sas-timeout 25s --wireguard" "$3" </dev/null >/dev/null 2>&1 &
 	PIDS="$PIDS $!"
@@ -101,7 +107,11 @@ scrape_sas() { # $1 logfile
 start_server() { # $1 roles, $2 relay-endpoint, [relay-listen]
 	local extra=""
 	[ -n "${3:-}" ] && extra="--relay-listen $3"
-	sudo ip netns exec ns-srv "$BN" --role="$1" \
+	# --relay-id is passed in both phases: in phase 2 it is what lets the honest
+	# relay in this same process accept the pairing at all, and in phase 1 it
+	# changes nothing — the attacker's fake relay never checks a ticket, which is
+	# the point of the phase (a relay cannot be trusted, so nothing rests on it).
+	sudo ip netns exec ns-srv "$BN" --role="$1" --relay-id "$RID" \
 		--listen 0.0.0.0:51820 --relay-endpoint "$2" $extra \
 		--key "$D/srv.key" >"$D/srv.log" 2>&1 &
 	SRVPID=$!

@@ -28,6 +28,12 @@ services:
     image: buddynet-lab-server
     command:
       - --role=handshake,relay
+      # Relay tickets, on both roles at once: this is one process, so the relay
+      # derives the server key it trusts from --key and only needs the id. Fixed
+      # here so a lab run is reproducible; production mints one with
+      # `buddynet gen-relay-id`.
+      - --relay-id
+      - YnVkZHluZXQtbGFiLXJpZA
       - --listen
       - "[::]:51820"
       - --relay-listen
@@ -61,6 +67,8 @@ services:
     entrypoint: ["/entrypoint-a.sh"]
     command:
       - --role=buddy
+      - --join
+      - "lab-test-token-42"
       - --key
       - /var/lib/buddynet/id.key
       - --forward
@@ -74,7 +82,6 @@ services:
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
       BUDDYNET_LAB: "1"
       # Shared pairing token — same on both buddies
-      BUDDYNET_TOKEN: "lab-test-token-42"
     depends_on:
       - server
     volumes:
@@ -92,6 +99,8 @@ services:
     image: buddynet-lab-buddy
     command:
       - --role=buddy
+      - --join
+      - "lab-test-token-42"
       - --key
       - /var/lib/buddynet/id.key
       - --L
@@ -102,7 +111,6 @@ services:
       BUDDYNET_SERVER: "server:51820"
       BUDDYNET_SERVER_KEY: "${BUDDYNET_SERVER_KEY}"
       BUDDYNET_LAB: "1"
-      BUDDYNET_TOKEN: "lab-test-token-42"
     depends_on:
       - server
     ports:

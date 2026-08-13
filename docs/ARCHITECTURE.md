@@ -31,7 +31,7 @@ three roles; in a buddy the relay and handshake code sit dormant as fallback.
 | Role | Needs | Job |
 |---|---|---|
 | `buddy` | nothing (NAT is fine) | Find each partner, bring up a tunnel along the fallback chain (one per buddy), forward TCP. |
-| `relay` | public IP | Blindly forward encrypted datagrams between two session legs. |
+| `relay` | public IP | Blindly forward encrypted datagrams between two session legs, for sessions a named handshake server authorised. |
 | `handshake` | public IP | Learn peer endpoints, pair peers by token, hand back a **signed** `PEER_LIST`. No data flows through it. |
 
 A node may run **several roles at once**, comma-separated:
@@ -118,6 +118,25 @@ type Transport interface {
   [`internal/role/wgpath.go`](../internal/role/wgpath.go). See
   **[WIREGUARD.md](WIREGUARD.md)**.
 
+## Why a relay is authorized but still blind
+
+Two requirements that sound opposed: a relay must not serve strangers (it carries
+the operator's bandwidth, and a stranger can hoard the capacity the pair needs),
+and it must not learn who talks to whom.
+
+A **ticket** satisfies both. The handshake server signs a short-lived permit for
+each paired buddy; the relay verifies it with the server's public key. It learns
+*that* the session was authorised — not who is in it. The alternative designs were
+rejected for exactly this reason: a buddy list on the relay would need durable
+identities in the bind (and would put runtime state on a server), and an
+`--relay-open` switch would end up in production.
+
+The permit is bound to an ephemeral key the buddy mints per attempt and must sign
+with, so it is not a bearer token: capturing it, or the whole bind, gains nothing.
+The relay holds only a **public** key — it can withhold service, never authorise a
+session. Full format in [PROTOCOL.md](PROTOCOL.md), operator setup in
+[OPERATIONS.md](OPERATIONS.md).
+
 ## Why the relay stays blind
 
 The buddies run **their own** end-to-end QUIC/TLS between each other. A relay
@@ -129,7 +148,7 @@ handshake.
 ## Handshake transport (UDP or QUIC)
 
 The matchmaking control plane (`REGISTER` → `PEER_LIST`) runs over one of two
-transports, chosen with `--quic-handshake` and set the **same** on the server and
+transports, chosen with and set the **same** on the server and
 every buddy. Both validate the source address before the server does any work, so
 neither can be turned into a reflector; they differ only in how:
 
@@ -139,7 +158,7 @@ neither can be turned into a reflector; they differ only in how:
   spoofed source never receives the challenge, so it can never be answered. No
   TLS certificate, and the buddy's single UDP socket is untouched — so hole
   punching and the peer tunnel are unaffected.
-- **QUIC (`--quic-handshake`).** The exchange rides QUIC, whose handshake
+- **QUIC.** The exchange rides QUIC, whose handshake
   validates the address itself (no cookie needed). The server presents its
   identity cert; the buddy pins it by `--server-key`. The buddy runs the QUIC
   control connection on its **shared** socket and closes it before punching, so
@@ -159,8 +178,10 @@ See the `REGISTER` section of [PROTOCOL.md](PROTOCOL.md) for the wire details.
   before the key is trusted.
 - **Ephemeral pairing secret.** `--invite`/`--join` use a one-time invite token;
   after first pairing both ends derive a long-lived rendezvous **session secret**
-  from the channel binding (never transmitted) and reconnect with that. See
-  [SECURITY.md](../SECURITY.md) for the full threat model.
+  from the channel binding — computed locally, never derived from anything on the
+  wire — and reconnect with that. It travels sealed to the server's pinned key,
+  which the server unseals to match the pair: never in the clear, but not a secret
+  from the server. See [SECURITY.md](../SECURITY.md) for the full threat model.
 - **Bounded server memory.** Hard caps (`maxTokens`, two ids per token,
   capped candidates) bound memory even under spoofed source addresses; the
   attacker-growable approval-mode maps are capped and pruned.

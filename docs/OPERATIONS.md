@@ -11,24 +11,22 @@ and the `--status` probe.
 
 ---
 
-## QUIC control plane (`--quic-handshake`, the secure default)
+## QUIC control plane, the secure default)
 
 **The control plane is encrypted with QUIC/TLS 1.3 by default** — security by
 default. You do not need to pass anything; it is on unless you explicitly opt out
-with `--quic-handshake=false` (or `BUDDYNET_QUIC=0`) on the handshake server **and**
-every buddy. Keep it on. The examples below pass `--quic-handshake` explicitly,
+with (or on the handshake server **and**
+every buddy. Keep it on. The examples below explicitly,
 which is fine (it just confirms the default).
 
 ```bash
 # Server
 buddynet --role=handshake \
   --key /var/lib/buddynet/id.key \
-  --quic-handshake
 
 # Every buddy
 buddynet --role=buddy \
-  --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake \
+  --server vps.example:51820 --server-key SERVER_KEY \ \
   ...
 ```
 
@@ -37,22 +35,16 @@ buddynet --role=buddy \
 | Property | Plain UDP | QUIC |
 |---|---|---|
 | REGISTER confidentiality | **Cleartext** — token travels in the clear | Encrypted (TLS 1.3) |
-| Source-address validation | Cookie round-trip (UDP overhead) | Built into QUIC handshake |
-| Reflection/amplification | Cookie mitigates, still needs a round-trip | Prevented structurally |
-| Connection overhead | One RTT for cookie + one for REGISTER | ~1 RTT amortised |
+The control plane is QUIC/TLS 1.3, and there is no alternative to choose: the
+whole `REGISTER` exchange — pairing token included — is inside TLS, and only the
+server can read it. Source addresses are validated by the QUIC handshake itself,
+so the server can never be turned into a reflector and no extra round-trip is
+needed for it.
 
-On plain UDP the `REGISTER` message — including the pairing token — travels
-**in cleartext** over the public internet. A passive observer on your path to
-the VPS can read the token. With `--quic-handshake` the entire control
-exchange is inside TLS 1.3; only the server can read the token.
-
-The server logs a `WARNING` when plain UDP is used:
-
-```
-WARNING: on plain UDP the REGISTER (incl. the pairing token) travels in
-CLEARTEXT — use --quic-handshake on the server and every buddy to encrypt
-the control plane.
-```
+Until v5 a plain-UDP transport existed alongside it, with an application-layer
+cookie for source validation and the `REGISTER` in cleartext. It is removed: the
+cookie only reproduced what QUIC does anyway, while the cleartext token was what
+made an on-path pairing squat possible in the first place.
 
 ### Locking the control plane to known buddies (`--authorized`)
 
@@ -69,11 +61,11 @@ approval mode: QUIC control pins clients to the allowlist at the TLS handshake
 
 ```bash
 # Server: only allowlisted buddy keys may even open a control connection
-buddynet --role=handshake --quic-handshake \
+buddynet --role=handshake \
   --authorized /var/lib/buddynet/clients.txt --key /var/lib/buddynet/id.key
 
 # Approve a buddy (get its key with `buddynet identity` on that node):
-buddynet --authorized /var/lib/buddynet/clients.txt allowclient <buddy-key>
+buddynet --authorized /var/lib/buddynet/clients.txt approve <buddy-key>
 ```
 
 Without `--authorized` (open mode) the QUIC handshake still encrypts the exchange
@@ -88,7 +80,7 @@ the secret token at the application layer. See [APPROVAL.md](APPROVAL.md).
 ### Environment variable
 
 ```bash
-export BUDDYNET_QUIC=1   # equivalent to --quic-handshake
+export   # equivalent to
 ```
 
 ---
@@ -102,8 +94,7 @@ deployments.
 
 ```bash
 buddynet --role=handshake,relay \
-  --allow-cidr 203.0.113.0/24,198.51.100.0/24 \
-  --quic-handshake \
+  --allow-cidr 203.0.113.0/24,198.51.100.0/24 \ \
   --key /var/lib/buddynet/id.key
 ```
 
@@ -126,41 +117,118 @@ The relay blindly forwards encrypted QUIC datagrams between two buddies when a
 direct hole-punch has failed. It sees only ciphertext — never plaintext or
 virtual IPs.
 
-### Standalone relay
+> **A relay refuses to start without an authorization policy (v5.0.0).** It
+> carries your bandwidth, and a stranger who hoards its capacity takes away the
+> fallback the two people it was built for need. Give it one of:
+>
+> - **`--server-key` + `--relay-id`** — verify **relay tickets** from your own
+>   handshake server. Recommended: a ticket follows a buddy whose address
+>   changes, which is exactly the buddy that needs a relay.
+> - **`--allow-cidr`** — serve named networks only. Supported, but a CIDR list
+>   cannot follow a residential address that moves.
+>
+> Both together are an **AND**, never an either/or. `--allow-cidr 0.0.0.0/0` and
+> `::/0` are refused with their own message: an open relay is not a supported
+> configuration, and there is no `--relay-open` switch.
+
+### Relay tickets in one minute
+
+Mint the id **once** and use the SAME value on both sides:
 
 ```bash
-buddynet --role=relay \
-  --listen [::]:51821 \
-  --key /var/lib/buddynet/id.key
+buddynet gen-relay-id            # e.g. aN_ckZY_txk-nL6BNLTKTg
 ```
+
+The handshake server then issues every paired buddy a short-lived signed permit
+for that relay, and the relay verifies it with the server's **public** key. The
+relay learns *that* a session was authorised — never who is in it. It holds no
+buddy list and no signing key.
+
+Both sides print the id they are using at startup, because a mismatch otherwise
+shows up only as "every ticket rejected" with nothing naming the cause.
 
 ### Combined handshake + relay (typical VPS setup)
 
-Run both roles on one node. Use `--relay-listen` to bind the relay on a
-different port from the handshake, and `--relay-endpoint` to advertise it to
-buddies:
+One process, one command. The relay derives the key it trusts from the handshake
+server in its own process, so the only new flag is the id:
 
 ```bash
 buddynet --role=handshake,relay \
   --listen [::]:51820 \
   --relay-listen [::]:51821 \
   --relay-endpoint vps.example:51821 \
-  --key /var/lib/buddynet/id.key \
-  --quic-handshake
+  --relay-id aN_ckZY_txk-nL6BNLTKTg \
+  --key /var/lib/buddynet/id.key
 ```
 
 When `--relay-endpoint` is set, every `PEER_LIST` sent to buddies includes the
 relay address. Buddies try direct hole-punch first; if that fails within
-`--punch` (default 2 s), they fall back to the relay automatically.
+`--punch` (default 2 s, max 60 s), they fall back to the relay automatically.
+
+### Standalone relay (separated — recommended when the relay is exposed)
+
+```bash
+buddynet --role=relay \
+  --listen [::]:51821 \
+  --server-key <SERVER_KEY> \
+  --relay-id aN_ckZY_txk-nL6BNLTKTg
+```
+
+`<SERVER_KEY>` is what `buddynet --key ... identity` prints on the handshake
+server. The relay needs **no identity key of its own** and writes nothing.
+
+> **Combined and separated are not equivalent, and the difference is a security
+> one.** `--role=handshake,relay` is one process, so the server's **signing key
+> sits in the same memory that parses relay packets**: code execution reached
+> through the relay could then mint tickets — worse than abusing a relay, because
+> it forges authorisation for every relay that trusts that key. In the separated
+> setup (two processes, ideally two users, ideally two hosts) the relay holds no
+> signing key at all, and compromising it yields no ability to authorise
+> anything. Combined stays first-class and is what most small VPS setups will
+> run; choose it knowing what it costs.
+
+### Rotating the handshake server key
+
+Pass **two** keys to the relay (`--server-key OLD,NEW`) while buddies move over,
+then drop the retired one. The relay accepts tickets signed by either during the
+window.
+
+### Clocks
+
+Relay and handshake server must agree on the time within **10 s**. NTP handles
+it; when it breaks, *every* ticket is refused and the relay logs a line naming
+both possible causes — the clock, or a wrongly-issued ticket. It genuinely cannot
+tell them apart, so it does not claim to.
+
+### What the relay logs
+
+A shortened session id, the leg, and a reason. That is enough to correlate the
+two legs of one session in one log and deliberately not enough to link a session
+to a buddy. Tickets, signatures, cookies and ephemeral keys are never logged, and
+**source addresses only under `--debug`** — a relay that prints who talks to whom
+has given up the property this design exists to protect. Debugging is harder for
+it; that is the trade.
 
 ### Relay flags
 
 | Flag | Description |
 |------|-------------|
+| `--server-key KEY[,KEY2]` | Handshake server(s) whose relay tickets this relay accepts. Two during a key rotation. One of the two authorization policies. |
+| `--relay-id ID` | This relay's id, the SAME value on the handshake server (`buddynet gen-relay-id`). Required with `--server-key`. |
+| `--allow-cidr CIDRS` | Only these source networks may bind a leg. The other authorization policy; ANDed with tickets when both are set. `0.0.0.0/0`, `::/0` refused. |
 | `--relay-listen ADDR` | Relay listen address when combined with another role. Default `[::]:51821`. |
-| `--relay-endpoint HOST:PORT` | Advertised to buddies as the relay-of-last-resort. Set when the handshake server also runs relay. |
-| `--allow-cidr CIDRS` | Drop relay datagrams from sources outside these networks (same syntax as above). |
-| `--ttl DURATION` | Idle timeout for relay sessions. Default 60 s. |
+| `--relay-endpoint HOST:PORT` | (handshake) Advertised to buddies as the relay-of-last-resort. |
+| `--ttl DURATION` | Idle timeout for relay sessions. Default 60 s. A session holding only one leg expires after an absolute 60 s regardless. |
+| `--relay-max-sessions N` | Concurrent session ceiling (default 4096). |
+| `--relay-max-legs-per-ip N` | Legs one source may hold (default 64; a source is one IPv4 address or one IPv6 /64). |
+| `--debug` | Also log source addresses on rejections. Not for production. |
+
+### No relay at all is a supported setup
+
+BuddyNet works P2P-only: a handshake server with no relay configuration is fully
+functional, and no relay port needs to be open anywhere. When the direct path
+fails and no relay is configured, the buddy says exactly that instead of timing
+out silently.
 
 ---
 
@@ -186,6 +254,16 @@ partner is reachable natively at its VIP. Full design and security notes in
   manifest); without it, nothing is reachable (fail-closed). `--expose all` restores
   whole-host access explicitly. Only the partner's VIP `/32` is routed; LANs/VLANs
   behind the buddy are not. See [WIREGUARD.md](WIREGUARD.md).
+- **`--expose` covers this host only — a buddy is never routed THROUGH it.**
+  BuddyNet drops everything that arrives on `bnetN` and is destined elsewhere
+  (a `fwd` chain next to the `in` chain in `table inet buddynet`). This matters on
+  any host that forwards, which includes anything running Docker: without it, a
+  buddy could address a machine on your LAN directly and bypass `--expose`
+  entirely, since WireGuard's AllowedIPs constrains only the packet's *source*.
+  **Behaviour change in v5.0.0:** if you were routing a LAN host to a buddy through
+  this node — or a buddy into your LAN — that stops. Subnet routing returns as its
+  own explicit option with the destinations named by you; it will never be implied
+  by `--expose all`.
 - **Changing a scope at runtime.** A per-buddy `expose:` edit in the `--peers-file`
   manifest takes effect on `SIGHUP`: the supervisor reprograms that buddy's `bnetN`
   firewall scope **in place** — the tunnel stays up, no reconnect, the partner is
@@ -227,7 +305,7 @@ TRUST: action=insecure    key=… token=… detail=…           # --lab, no ver
 
 ```
 AUTHZ: action=pending key=… token=…   — approve with: buddynet … approve KEY
-AUTHZ: action=pending key=… code=…    — approve with: buddynet … allowclient CODE
+AUTHZ: action=pending key=… code=…    — approve with: buddynet … approve KEY
 AUTHZ: action=reload  count=N         # authorized file was hot-reloaded
 ```
 
@@ -326,9 +404,8 @@ The `via=` field in `CONNECTED` tells you which path the tunnel used:
 ### Operational warnings — `WARNING:` and `NOTE:`
 
 ```
-WARNING: on plain UDP the REGISTER … travels in CLEARTEXT — use --quic-handshake
 WARNING: key file PATH has permissions MODE, expected 0600
-WARNING: generated a NEW identity at PATH — buddies must pin the new key
+WARNING: ephemeral identity KEY — pass --key to persist it (buddies pin this)
 NOTE: --reauth-interval is 0 (off): a server-side revocation will NOT tear down a direct tunnel
 NOTE: BuddyDNS: could not register .buddy with systemd-resolved (…)
 NOTE: server roster is signed but N out of date — check NTP/time-sync
@@ -379,7 +456,7 @@ is never opened — the caller sees `connection refused`.
 ```bash
 buddynet --role=buddy \
   --server vps.example:51820 --server-key KEY \
-  --join=TOKEN --quic-handshake \
+  --join=TOKEN \
   -L 127.0.0.1:5432 --forward 10.66.0.2:5432 \
   --lazy
 ```

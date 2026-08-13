@@ -15,6 +15,12 @@
 #   6. fail-closed default: buddy WITHOUT --expose exposes NOTHING (port blocked)
 # Needs root + wireguard module + kernel nftables.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 BN=/tmp/wgexp/bn
 D=/tmp/wgexp
@@ -37,9 +43,9 @@ echo "== unit smoke (kernel nftables reachable as root) =="
 sudo go test ./internal/nft/ -run TestKernelSmoke -count=1 >/dev/null
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
 
 echo "== bridge topology (ns-srv/a/b on br0 in ns-sw) =="
 sudo ip netns add ns-sw; sudo ip netns add ns-srv; sudo ip netns add ns-a; sudo ip netns add ns-b
@@ -58,14 +64,14 @@ add_node a 10.50.0.20
 add_node b 10.50.0.30
 
 start_server() {
-	sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
+	sudo ip netns exec ns-srv "$BN" --role=handshake,relay --relay-id "$RID" \
 		--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
 		--key "$D/srv.key" --relay-endpoint 10.50.0.10:51821 >"$D/srv.log" 2>&1 &
 	PIDS="$PIDS $!"
 }
 
 run_buddy() { # $1 ns, $2 keyfile, $3 peerpub, $4 extra-flags, $5 logfile
-	sudo ip netns exec "ns-$1" env BUDDYNET_TOKEN="$TOKEN" "$BN" --role=buddy \
+	sudo ip netns exec "ns-$1" "$BN" --join "$TOKEN" --role=buddy \
 		--server 10.50.0.10:51820 --server-key "$SRVPUB" \
 		--key "$2" --peer-key "$3" --known-peers "$D/$1.kp" --peers "$D/$1.pj" --no-interactive $4 >"$5" 2>&1 &
 	PIDS="$PIDS $!"

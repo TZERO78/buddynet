@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -19,12 +20,25 @@ import (
 	"github.com/tzero78/buddynet/internal/safe"
 )
 
-// The relay is intentionally UNAUTHENTICATED: anyone who can reach it may pair
-// two legs under a shared session token (that is what makes it a drop-in
-// fallback for any buddy). It can never be turned into a reflector — forward
-// only ever writes to an address a bind was already heard from — but it is open
-// bandwidth, so the caps below are abuse ceilings, not access control. Operators
-// who want a private relay should firewall it or run it only for known buddies.
+// A relay runs in one of two authorization modes, and refuses to start without
+// one (see role.Relay):
+//
+//   - TICKET MODE (Config.ServerKeys + RelayID). A bind must carry a permit
+//     signed by a handshake server the operator named, bound to an ephemeral key
+//     the binder must prove it holds. The relay learns THAT a session was
+//     authorised, never who is in it: no buddy list, no identity in the bind, no
+//     picture of who talks to whom.
+//   - NETWORK MODE (Config.AllowCIDRs alone). Any source inside the listed
+//     networks may bind, as before. Supported but not recommended — the buddies
+//     who need a relay are precisely those behind changing residential
+//     addresses, which a CIDR list cannot follow.
+//
+// Both may be set, and then both must pass: the CIDR list is hardening on top of
+// tickets, never an alternative one can bypass.
+//
+// The relay can never be turned into a reflector — forward only ever writes to
+// an address a bind was already heard from — and the caps below remain abuse
+// ceilings on top of whichever mode is in force.
 //
 // The session/leg ceilings default high for an open/public relay. For a private
 // BuddyNet relay serving a small group (BuddyNet caps a node at 48 buddies), an
@@ -52,6 +66,35 @@ const (
 	rlMaxSources = 8192
 )
 
+// Ticket-mode work ceilings. A bind used to be nearly free; with tickets it costs
+// TWO Ed25519 verifications, so the per-source limiter above is no longer
+// sufficient on its own — an attacker with many real addresses stays under every
+// per-source budget while driving the total up. These bound the total.
+const (
+	// sigGlobalRate is the ceiling on ticket verifications per second across ALL
+	// sources. At ~50us per verification this is a low-single-digit percent of one
+	// core; a real pair binds about five times a second for a few seconds, so it
+	// leaves room for many simultaneous pairings.
+	sigGlobalRate = 200
+	// maxSigInFlight caps concurrent verifications, so a burst inside the rate
+	// still cannot pile up goroutines. Verification happens off the read loop for
+	// exactly this reason: two signature checks inline would let a flood stall the
+	// data path the relay exists to carry.
+	maxSigInFlight = 32
+	// The reserve: a small fixed budget for binds whose session already holds one
+	// leg, metered separately from sigGlobalRate so the two cannot be summed. Keyed
+	// by sid, which bounds what one sid — real or guessed — can consume.
+	reserveRate       = 20
+	reservePerSIDRate = 4
+	reserveMaxSIDs    = 1024
+)
+
+// pendingPairTimeout is how long a session may hold ONE leg before it is dropped,
+// measured from creation and not extendable. A leg's idle timer is refreshed by
+// any packet from a bound source, so without an absolute bound one leg plus a
+// trickle of traffic holds a session slot forever.
+const pendingPairTimeout = 60 * time.Second
+
 // leg is one bound end of a session: the source address a buddy's datagrams
 // arrive from, plus its lock-free forwarding record.
 type leg struct {
@@ -62,6 +105,12 @@ type leg struct {
 	// reap, so releasing can never credit a different key than binding charged —
 	// the two would drift apart the moment the rule changes again.
 	acctKey string
+	// name and epk are set in TICKET MODE only. name is the "a"/"b" the server
+	// assigned, so a session holds exactly one of each; epk is the ephemeral public
+	// key that owns this leg, which is what lets a legitimate buddy move to a new
+	// address (NAT rebind) while a third party with a copied ticket cannot.
+	name string
+	epk  string
 }
 
 // fwd is a leg's forwarding state, read on the data HOT PATH without taking
@@ -81,6 +130,11 @@ type session struct {
 	token  string
 	legs   []*leg
 	paired bool // reached two legs at some point (for the close log)
+	// created is when this session first appeared, used for the ABSOLUTE
+	// half-open timeout. A leg's idle timer is refreshed by any packet from a
+	// bound source, so one leg plus a trickle of traffic would otherwise hold a
+	// session slot forever without a partner ever arriving.
+	created time.Time
 }
 
 // Server is the blind UDP relay. It forwards datagrams between the two legs of a
@@ -93,6 +147,36 @@ type Server struct {
 	cookieKey    []byte         // keys the address-validation HMAC (random per process)
 	maxSessions  int            // concurrent session ceiling (abuse bound)
 	maxLegsPerIP int            // per-source leg ceiling (session-hoarding bound)
+	// pendingPair is the absolute half-open timeout (pendingPairTimeout). A field
+	// rather than the constant so a test can drive it in milliseconds instead of
+	// sleeping for a minute; nothing in production ever changes it.
+	pendingPair time.Duration
+
+	// Ticket mode (empty serverKeys = network mode). serverKeys may hold two so a
+	// server key rotation can be made before-break; the relay never holds a private
+	// key of its own, so a compromised relay can withhold service but never
+	// authorise a session.
+	serverKeys []ed25519.PublicKey
+	relayID    string
+	debug      bool // log source addresses too (off by default, see the note in reject)
+
+	// sigRL is the GLOBAL ceiling on ticket verifications per second. The cookie
+	// stops spoofing, not an attacker with many real addresses: they can collect
+	// valid cookies and force two Ed25519 verifications per bind from each address,
+	// all of it under the per-source budget. This bounds the total regardless of
+	// how the load is spread.
+	sigRL *ratelimit.Limiter
+	// reserveRL is a small, SEPARATELY metered budget for binds naming a session
+	// that already holds one leg, so a flood cannot take the last capacity from a
+	// pairing that is one bind away from completing. Keyed by sid, which gives it
+	// the required per-sid limit for free: the sid arrives in an unverified packet
+	// and is never an authenticator, so one sid — real or guessed — must not be
+	// able to consume the whole reserve. A bind draws from the reserve OR from the
+	// global budget, never both, so the two cannot be summed by an attacker.
+	reserveRL *ratelimit.Limiter
+	// inFlight caps concurrent signature verifications, so a burst that is inside
+	// the rate still cannot pile up goroutines.
+	inFlight chan struct{}
 
 	mu       sync.Mutex
 	sessions map[string]*session // token -> session (under mu)
@@ -117,6 +201,12 @@ type Server struct {
 	statChallenged atomic.Int64
 	statRejected   atomic.Int64 // over-cap / outside allowlist / rate-limited
 	statHoard      atomic.Int64 // per-source leg cap hit (possible session hoarding)
+	statTicket     atomic.Int64 // binds refused by a ticket check (any reason)
+	// statVerify counts binds that reached the SIGNATURE VERIFICATIONS. It is the
+	// number that shows how much crypto work the relay is being made to do, and the
+	// one the check-order tests assert on: "an invalid cookie costs no Ed25519" is
+	// only a claim until something counts it.
+	statVerify atomic.Int64
 
 	// lastPanic is the process-wide recovered-panic total at the previous stats
 	// tick, so statsLoop can report the per-interval delta. Touched only by the
@@ -127,6 +217,10 @@ type Server struct {
 	// a source hammering the cap cannot turn each packet into a log line. Bounded
 	// and pruned; the counter carries the volume into the stats line.
 	hoardWarned map[string]time.Time
+	// rejectWarned throttles ticket-rejection lines the same way, one per REASON
+	// per interval: a flood of refusals must not be a way to fill the operator's
+	// disk. The per-interval counter carries the volume.
+	rejectWarned map[string]time.Time
 }
 
 const statsInterval = 60 * time.Second
@@ -142,16 +236,20 @@ func (s *Server) statsLoop() {
 		}
 		pa, ch := s.statPaired.Swap(0), s.statChallenged.Swap(0)
 		rj, ho := s.statRejected.Swap(0), s.statHoard.Swap(0)
+		tk, vf := s.statTicket.Swap(0), s.statVerify.Swap(0)
 		// Per-interval count of panics recovered by safe.Do across the process: a
 		// non-zero delta means a crafted datagram reliably trips a parser, which is
 		// otherwise invisible (each panic is logged only once per throttle window).
 		total := safe.PanicCount()
 		pan := total - s.lastPanic
 		s.lastPanic = total
-		if pa|ch|rj|ho == 0 && pan == 0 {
+		if pa|ch|rj|ho|tk|vf == 0 && pan == 0 {
 			continue
 		}
 		line := fmt.Sprintf("stats (last %s): role=relay paired=%d challenged=%d rejected=%d", statsInterval, pa, ch, rj)
+		if vf > 0 || tk > 0 {
+			line += fmt.Sprintf(" tickets-verified=%d ticket-refused=%d", vf, tk)
+		}
 		if ho > 0 || pan > 0 {
 			line += fmt.Sprintf(" ALERT: leg-cap=%d panics=%d", ho, pan)
 		}
@@ -183,13 +281,39 @@ func (s *Server) warnHoardLocked(acct string) {
 	log.Printf("SECURITY: event=leg-cap-hit src=%s detail=%q", acct, "one source holds the max legs; possible session hoarding")
 }
 
-// NewServer returns a relay whose bindings expire after ttl with no traffic. If
-// allowed is non-empty the relay is no longer open: only sources inside one of
-// those CIDRs may bind a leg (optional access control for a private relay); an
-// empty allowed keeps the default open-to-all behaviour. maxSessions and
-// maxLegsPerIP are the abuse ceilings; pass 0 for either to use the defaults
-// (defaultMaxSessions / defaultMaxLegsPerIP).
-func NewServer(ttl time.Duration, allowed []netip.Prefix, maxSessions, maxLegsPerIP int) *Server {
+// Config is a relay's authorization policy and abuse ceilings. The zero value is
+// deliberately NOT a usable relay: role.Relay refuses to start without either
+// ServerKeys (ticket mode) or AllowCIDRs (network mode), so "open to everyone"
+// cannot be reached by leaving something out.
+type Config struct {
+	TTL time.Duration // drop a leg after this long with no traffic
+	// ServerKeys are the handshake server identity keys whose tickets this relay
+	// accepts. Non-empty turns on ticket mode. Two keys are allowed so a server
+	// key rotation has a grace window; they are PUBLIC keys — a relay holds no
+	// signing key and therefore cannot mint a permit for itself or anyone else.
+	ServerKeys []ed25519.PublicKey
+	// RelayID is this relay's non-secret id, configured identically on the
+	// handshake server. Required in ticket mode: it is what stops a ticket minted
+	// for another relay from being replayed here.
+	RelayID string
+	// AllowCIDRs, if non-empty, restricts which source networks may bind. Combined
+	// with ticket mode it is an AND: a bind needs a valid ticket AND an allowed
+	// source address.
+	AllowCIDRs []netip.Prefix
+	// MaxSessions / MaxLegsPerIP override the abuse ceilings; 0 uses the defaults.
+	MaxSessions  int
+	MaxLegsPerIP int
+	// Debug adds source addresses to rejection logs. Off by default on purpose:
+	// the relay's whole claim is that it does not build a picture of who talks to
+	// whom, and an address next to a session id in a shipped log undermines it.
+	Debug bool
+}
+
+// New returns a relay whose bindings expire after cfg.TTL with no traffic.
+func New(cfg Config) *Server {
+	ttl := cfg.TTL
+	maxSessions, maxLegsPerIP := cfg.MaxSessions, cfg.MaxLegsPerIP
+	allowed := cfg.AllowCIDRs
 	if maxSessions <= 0 {
 		maxSessions = defaultMaxSessions
 	}
@@ -217,12 +341,25 @@ func NewServer(ttl time.Duration, allowed []netip.Prefix, maxSessions, maxLegsPe
 		cookieKey:    key,
 		maxSessions:  maxSessions,
 		maxLegsPerIP: maxLegsPerIP,
+		pendingPair:  pendingPairTimeout,
+		serverKeys:   cfg.ServerKeys,
+		relayID:      cfg.RelayID,
+		debug:        cfg.Debug,
+		sigRL:        ratelimit.NewGlobal(sigGlobalRate),
+		reserveRL:    ratelimit.New(reserveRate, reservePerSIDRate, reserveMaxSIDs),
+		inFlight:     make(chan struct{}, maxSigInFlight),
 		sessions:     map[string]*session{},
 		legsPerIP:    map[string]int{},
 		hoardWarned:  map[string]time.Time{},
+		rejectWarned: map[string]time.Time{},
 		done:         make(chan struct{}),
 	}
 }
+
+// ticketMode reports whether this relay verifies tickets. It is decided once at
+// construction: there is no per-bind fallback to "no ticket needed", because a
+// fallback is exactly what an attacker would aim for.
+func (s *Server) ticketMode() bool { return len(s.serverKeys) > 0 }
 
 // cookieEpoch is the validity granularity of a bind address-validation cookie. A
 // cookie is accepted for the current and previous epoch, so it lives 30..60s —
@@ -248,17 +385,26 @@ func (s *Server) freshCookie(ip net.IP) []byte {
 }
 
 // validCookie accepts a base64 cookie matching the current or previous epoch for
-// ip, compared in constant time. An empty/garbage cookie is rejected.
-func (s *Server) validCookie(b64 string, ip net.IP) bool {
+// ip, compared in constant time, and returns the RAW cookie bytes. An
+// empty/garbage cookie is rejected.
+//
+// The bytes are returned because the ticket-mode proof of possession is signed
+// over exactly this value: it is the only thing in a bind that is fresh,
+// relay-chosen and bound to the source address, which is what makes a captured
+// bind worthless from anywhere else or after the epoch turns.
+func (s *Server) validCookie(b64 string, ip net.IP) ([]byte, bool) {
 	if b64 == "" {
-		return false
+		return nil, false
 	}
 	got, err := base64.RawURLEncoding.DecodeString(b64)
 	if err != nil || len(got) != CookieLen {
-		return false
+		return nil, false
 	}
 	now := time.Now().UnixNano() / int64(cookieEpoch)
-	return hmac.Equal(got, s.computeCookie(ip, now)) || hmac.Equal(got, s.computeCookie(ip, now-1))
+	if hmac.Equal(got, s.computeCookie(ip, now)) || hmac.Equal(got, s.computeCookie(ip, now-1)) {
+		return got, true
+	}
+	return nil, false
 }
 
 // cidrAllowed reports whether a source IP may bind. With no allowlist the relay
@@ -306,16 +452,29 @@ func (s *Server) Run(conn *net.UDPConn) {
 	}
 }
 
-// bind claims src as a leg of token's session and acks. The third distinct leg
-// for a token is rejected (cap), so a stranger cannot hijack a pairing. A bind
-// without a valid address-validation cookie is answered with a challenge and
-// creates NO state, so a spoofed source can never have a leg bound for it (the
-// relay's anti-reflection / anti-laundering guarantee).
+// bind runs the relay's FIXED check order, cheapest and most spoof-resistant
+// first; nothing below the cookie runs for a packet that fails it:
+//
+//  1. size cap        — in ParseBind, before any field is looked at
+//  2. CIDR            — before any crypto
+//  3. per-source rate — a cheap map lookup
+//  4. cookie          — no valid cookie: answer a challenge, create NO state
+//  5. everything expensive (ticket parse, two signature verifications) and
+//     only then any state allocation — see admitTicketBind
+//
+// The point of the order is that an unvalidated source can never make the relay
+// perform an Ed25519 verification or allocate a session. The cookie already
+// proves return-routability; everything costly sits behind it.
+//
+// A bind without a valid cookie is answered with a challenge and creates NO
+// state, so a spoofed source can never have a leg bound for it (the relay's
+// anti-reflection / anti-laundering guarantee).
 func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 	token := b.SessionToken
-	// Access control (optional): a source outside the allowlist may not bind a
-	// leg, so it cannot use the relay at all. Checked before the rate limiter so a
-	// disallowed source consumes no budget.
+	// Access control: a source outside the allowlist may not bind a leg, so it
+	// cannot use the relay at all. Checked before the rate limiter so a disallowed
+	// source consumes no budget — and it is an AND with ticket mode, never an
+	// either/or: a valid ticket does not buy admission from a refused network.
 	if !s.cidrAllowed(src.IP) {
 		s.statRejected.Add(1)
 		return
@@ -334,7 +493,8 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 	// Return-routability: an unvalidated bind only ever draws a (smaller-than-the-
 	// bind) challenge, never state. A spoofed source never receives the challenge,
 	// so it can never echo a valid cookie — closing reflection before any binding.
-	if !s.validCookie(b.Cookie, src.IP) {
+	cookie, ok := s.validCookie(b.Cookie, src.IP)
+	if !ok {
 		s.statChallenged.Add(1)
 		// Answer only when the challenge is STRICTLY SMALLER than the bind that
 		// triggered it. The parser accepts a 17-byte bind (a one-character session
@@ -347,6 +507,20 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 		}
 		return
 	}
+	if s.ticketMode() {
+		// Everything from here is expensive, so it happens off the read loop and
+		// under its own budgets. The session is named by the SERVER in the ticket,
+		// so nothing a client chose reaches the map below.
+		s.admitTicketBind(conn, b, src, acct, cookie)
+		return
+	}
+	s.bindNetworkMode(conn, b, src, acct, token)
+}
+
+// bindNetworkMode is the pre-ticket behaviour, still used when the relay is
+// restricted by --allow-cidr alone: legs are keyed by source address and any
+// source inside the allowlist may claim one.
+func (s *Server) bindNetworkMode(conn *net.UDPConn, b Bind, src *net.UDPAddr, acct, token string) {
 	s.mu.Lock()
 	ses := s.sessions[token]
 	// created tracks whether THIS call put the session in the map. Every path that
@@ -361,7 +535,7 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 			s.mu.Unlock()
 			return // global capacity reached: drop silently
 		}
-		ses = &session{token: token}
+		ses = &session{token: token, created: time.Now()}
 		s.sessions[token] = ses
 		created = true
 	}
@@ -466,6 +640,18 @@ func (s *Server) reap() {
 		now := time.Now()
 		s.mu.Lock()
 		for token, ses := range s.sessions {
+			// A session that has NEVER reached two legs expires an absolute
+			// pendingPairTimeout after creation, whatever its traffic. Refreshing on
+			// activity — which the idle timer below does — would let one leg plus a
+			// trickle hold a slot indefinitely without a partner ever arriving.
+			if !ses.paired && now.Sub(ses.created) > s.pendingPair {
+				for _, l := range ses.legs {
+					s.byAddr.Delete(l.addr.String())
+					s.releaseIPLocked(l.acctKey)
+				}
+				delete(s.sessions, token)
+				continue
+			}
 			kept := ses.legs[:0]
 			for _, l := range ses.legs {
 				if now.UnixNano()-l.fwd.seen.Load() > int64(s.ttl) {
@@ -494,6 +680,11 @@ func (s *Server) reap() {
 		for ip, t := range s.hoardWarned {
 			if now.Sub(t) >= statsInterval {
 				delete(s.hoardWarned, ip)
+			}
+		}
+		for reason, t := range s.rejectWarned {
+			if now.Sub(t) >= statsInterval {
+				delete(s.rejectWarned, reason)
 			}
 		}
 		s.mu.Unlock()

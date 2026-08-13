@@ -7,7 +7,7 @@ channel and stored; all later reconnects use that secret — the invite token is
 never seen again. This is stronger than a fixed shared token because the
 long-lived secret is never transmitted in the clear and is unique to each pair.
 
-The older `--token` flag (a fixed string, reused on every reconnect) is still
+The older `--join` flag (a fixed string, reused on every reconnect) is still
 supported for backwards compatibility but is the weaker option.
 
 ## Quick start
@@ -16,8 +16,7 @@ supported for backwards compatibility but is the weaker option.
 
 ```bash
 buddynet --role=buddy \
-  --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake \
+  --server vps.example:51820 --server-key SERVER_KEY \ \
   --key /var/lib/buddynet/id.key \
   --invite --forward 127.0.0.1:873
 ```
@@ -28,8 +27,7 @@ BuddyNet prints a one-time TOKEN and waits. Send it to your buddy out of band.
 
 ```bash
 buddynet --role=buddy \
-  --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake \
+  --server vps.example:51820 --server-key SERVER_KEY \ \
   --key /var/lib/buddynet/id.key \
   --join=TOKEN -L 127.0.0.1:9000
 ```
@@ -48,7 +46,7 @@ session secret is used automatically.
 |------|-----|-------------|
 | `--invite` | — | Mint a ONE-TIME invite token, print it, and wait for the joiner. Tokens expire after `--invite-timeout` (default 15 min) without a first pairing. |
 | `--join=TOKEN` | — | Join with the invite token your buddy gave you. Sets the rendezvous token and marks the session as ephemeral (one-time). |
-| `--token TOKEN` | `BUDDYNET_TOKEN` | **Legacy.** Fixed token reused on every reconnect. Weaker: anyone who ever observed the token can reconnect. Prefer `--invite`/`--join`. |
+| `--join TOKEN` | `--join` | **Legacy.** Fixed token reused on every reconnect. Weaker: anyone who ever observed the token can reconnect. Prefer `--invite`/`--join`. |
 | `--invite-timeout` | — | How long to wait for the first pairing before giving up on the invite. Default `15m`. Re-run `--invite` for a fresh token after expiry. |
 | `--peer-key KEY` | `BUDDYNET_PEER_KEY` | Pin the buddy's Ed25519 public key (base64). Strongest: any key mismatch is refused outright, no SAS needed. |
 | `--known-peers PATH` | `BUDDYNET_KNOWN_PEERS` | Trust-on-first-use store. Defaults to `~/.config/buddynet/known_peers`. Holds one `token-hash → pubkey` entry per paired buddy. |
@@ -164,7 +162,7 @@ For a systemd service, Unraid, or any unattended process:
 
 1. **Pin the key** with `--peer-key` so the SAS prompt never appears.
 2. Add `--no-interactive` as a belt-and-suspenders safeguard.
-3. Store the token (or `--join` value) in an environment variable (`BUDDYNET_TOKEN`)
+3. Store the token (or `--join` value) in an environment variable (`--join`)
    or a `0600` file to keep it out of `argv`/`ps`.
 
 ```ini
@@ -173,10 +171,9 @@ ExecStart=/usr/local/bin/buddynet \
   --role=buddy \
   --key /var/lib/buddynet/id.key \
   --server vps.example:51820 \
-  --server-key SERVER_KEY \
-  --quic-handshake \
+  --server-key SERVER_KEY \ \
   --peer-key PARTNER_KEY \
   --no-interactive \
   -L 0.0.0.0:9000
-EnvironmentFile=/etc/buddynet/env  # contains BUDDYNET_TOKEN=…
+EnvironmentFile=/etc/buddynet/env  # contains BUDDYNET_JOIN_UNUSED=…
 ```

@@ -14,6 +14,12 @@
 # Asserts: each node reaches TWO partners (two CONNECTED lines, on bnet0 + bnet1),
 # and can ping BOTH partner VIPs over their per-buddy interfaces. Needs root + wg.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 BN=/tmp/wgm/bn
 D=/tmp/wgm
@@ -32,10 +38,10 @@ go build -o "$BN" ./cmd/buddynet
 sudo modprobe wireguard
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-APUB=$("$BN" --key "$D/a.key" identity)
-BPUB=$("$BN" --key "$D/b.key" identity)
-CPUB=$("$BN" --key "$D/c.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+APUB=$("$BN" --key "$D/a.key" init)
+BPUB=$("$BN" --key "$D/b.key" init)
+CPUB=$("$BN" --key "$D/c.key" init)
 
 echo "== per-pair bootstrap tokens + manifests =="
 TAB=tok-ab; TAC=tok-ac; TBC=tok-bc
@@ -61,7 +67,7 @@ add_node b 10.50.0.30
 add_node c 10.50.0.40
 
 echo "== handshake+relay server =="
-sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
+sudo ip netns exec ns-srv "$BN" --role=handshake,relay --relay-id "$RID" \
 	--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
 	--relay-endpoint 10.50.0.10:51821 \
 	--key "$D/srv.key" >"$D/srv.log" 2>&1 &

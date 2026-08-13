@@ -73,12 +73,31 @@ var sessionFileMu sync.Mutex
 // serialisation the last writer silently drops every session another worker
 // stored in between, and a crash mid-write could leave a truncated store (which
 // reads as "no sessions", i.e. every buddy falls back to needing a fresh invite).
+//
+// sessionFileMu alone is NOT enough, because it is process-global and this file
+// has TWO writer processes: the running buddy (here) and the operator's CLI
+// (`peers remove` → removeSession, the revoke path). They hold different mutexes,
+// so without an advisory FILE lock one can rename its snapshot over the other's —
+// dropping a stored session, or worse RESURRECTING one the operator just revoked.
+// Hence acquireLock around the read-modify-write as well, fail-closed: a lock we
+// cannot take means another process is mid-update, which is exactly when writing
+// anyway would lose data.
 func saveSession(path, inviteToken, partnerB64, secret string) error {
 	if path == "" {
 		return fmt.Errorf("no known-peers path to persist the session")
 	}
 	sessionFileMu.Lock()
 	defer sessionFileMu.Unlock()
+	// The lock file lives next to the store, so the directory has to exist before
+	// we can take it (the write below needs it anyway).
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	unlock, lerr := acquireLock(path)
+	if lerr != nil {
+		return fmt.Errorf("lock session store: %w", lerr)
+	}
+	defer unlock()
 	var kept []string
 	if f, err := os.Open(path); err == nil {
 		sc := bufio.NewScanner(f)
@@ -100,9 +119,6 @@ func saveSession(path, inviteToken, partnerB64, secret string) error {
 	}
 	kept = append(kept, fmt.Sprintf("%s %s %s", tokenKey(inviteToken), partnerB64, secret))
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
 	return atomicfile.Write(path, []byte(strings.Join(kept, "\n")+"\n"), 0o600)
 }
 
@@ -117,6 +133,24 @@ func removeSession(path, partnerB64 string) (int, error) {
 	}
 	sessionFileMu.Lock() // same read-modify-write as saveSession; same serialisation
 	defer sessionFileMu.Unlock()
+	// Nothing to revoke and nothing to lock if the store does not exist yet. (A
+	// store created between this check and the lock below simply cannot contain the
+	// partner we were asked to remove — the same outcome as "no store".)
+	if _, serr := os.Stat(path); serr != nil {
+		if os.IsNotExist(serr) {
+			return 0, nil
+		}
+		return 0, serr
+	}
+	// The FILE lock, not just the in-process one: the running buddy writes this
+	// store too (saveSession on every reconnect). Without it a concurrent save can
+	// rename its pre-revocation snapshot over ours and the revoked buddy is
+	// reconnectable again. Fail-closed — see acquireLock.
+	unlock, lerr := acquireLock(path)
+	if lerr != nil {
+		return 0, fmt.Errorf("lock session store: %w", lerr)
+	}
+	defer unlock()
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

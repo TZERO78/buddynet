@@ -65,7 +65,7 @@ cosign/Sigstore:
 ```bash
 # needs cosign installed (https://docs.sigstore.dev/system_config/installation/)
 cosign verify-blob --bundle buddynet-linux-amd64.bundle \
-  --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+  --certificate-identity-regexp '^https://github\.com/TZERO78/buddynet/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   buddynet-linux-amd64
 
@@ -219,7 +219,7 @@ The handshake unit stores its identity key under `/var/lib/buddynet-handshake/`
 sudo systemctl edit buddynet-handshake
 # add:
 #   [Service]
-#   Environment=BUDDYNET_QUIC=1
+#   Environment=
 ```
 
 Without this, a `REGISTER` (including the pairing token) travels in **cleartext**
@@ -227,14 +227,32 @@ and the server logs a `WARNING`. Keep QUIC on — it's the secure default.
 
 ---
 
-## 5. Start it and get the server key
+## 5. Create the identity, start it, and note the server key
+
+The server does **not** create its own key. That is deliberate: if the state
+directory is ever empty — a volume that did not mount, a typo in `--key` — it
+refuses to start instead of coming up as a *different* server that every buddy
+rejects as a possible MITM.
 
 ```bash
+# ONCE: create the identity. This prints the server key your buddies pin
+# (--server-key). Back this file up.
+sudo -u buddynet-handshake buddynet --role=handshake \
+    --key /var/lib/buddynet-handshake/id.key init
+
 sudo systemctl enable --now buddynet-handshake
+
+# ONCE: mint the relay id (not a secret) and put the SAME value on both units.
+buddynet gen-relay-id                             # → RELAY_ID
+#   sudo systemctl edit buddynet-handshake
+#     [Service]
+#     Environment=BUDDYNET_RELAY_ARGS=--relay-endpoint vps.example:51821 --relay-id RELAY_ID
+#   sudo systemctl edit buddynet-relay
+#     [Service]
+#     Environment=BUDDYNET_RELAY_POLICY=--server-key SERVER_KEY --relay-id RELAY_ID
 sudo systemctl enable --now buddynet-relay        # optional but recommended fallback
 
-# the server key your buddies must pin (--server-key).
-# `identity` just reads the key and prints the pubkey, then exits:
+# Print the key again later — `identity` only READS it:
 sudo buddynet --role=handshake --key /var/lib/buddynet-handshake/id.key identity
 ```
 
@@ -248,9 +266,21 @@ journalctl --namespace=buddynet -u buddynet-handshake -f
 # look for: HANDSHAKE: action=listening addr=[::]:51820 ...
 ```
 
+> **The relay refuses to start without an authorization policy.** Give it
+> `--server-key <SERVER_KEY> --relay-id <RELAY_ID>` (verify tickets from the
+> handshake server above — recommended, it follows a buddy whose address changes)
+> or `--allow-cidr` (named networks only). `0.0.0.0/0` is refused. Without a
+> policy, anyone on the internet can spend your bandwidth and hoard the capacity
+> your own fallback needs.
+
 > **Running both roles in one process instead?** You can skip the separate relay
-> unit and run `--role=handshake,relay` with `--relay-endpoint vps.example:51821`
-> so buddies learn the relay address automatically. See
+> unit and run `--role=handshake,relay --relay-endpoint vps.example:51821
+> --relay-id RELAY_ID`; the relay then trusts the handshake server in its own
+> process, so no `--server-key` is needed. **The trade is blast radius:** one
+> process means the server's signing key sits in the memory that parses relay
+> packets, so code execution through the relay could mint tickets. Two units keep
+> the relay holding no signing key at all — prefer them when the relay faces the
+> public internet. See
 > [OPERATIONS.md — Combined handshake + relay](OPERATIONS.md#combined-handshake--relay-typical-vps-setup).
 
 ---
@@ -263,12 +293,10 @@ invite** (valid 15 min or until first pairing):
 
 ```bash
 # On machine A — mint an invite (prints a TOKEN):
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake --invite
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --invite
 
 # On machine B — join with that token:
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
-  --quic-handshake --join=TOKEN
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=TOKEN
 ```
 
 On first contact each side shows a 6-character **safety code** — read yours to
@@ -327,7 +355,7 @@ outsiders are rejected at the TLS handshake, before they reach any logic:
 ```bash
 sudo systemctl edit buddynet-handshake
 #   [Service]
-#   Environment=BUDDYNET_QUIC=1
+#   Environment=
 #   ExecStart=                       # reset, then re-specify with --authorized
 #   ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} \
 #     --key ${STATE_DIRECTORY}/id.key \
@@ -335,7 +363,7 @@ sudo systemctl edit buddynet-handshake
 
 # approve a buddy (get its key with `buddynet identity` on that host):
 sudo -u buddynet-handshake buddynet \
-  --authorized /var/lib/buddynet-handshake/clients.txt allowclient <buddy-key>
+  --authorized /var/lib/buddynet-handshake/clients.txt approve <buddy-key>
 ```
 
 See [APPROVAL.md](APPROVAL.md).

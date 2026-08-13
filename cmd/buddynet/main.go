@@ -41,6 +41,7 @@ import (
 	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/role"
 	"github.com/tzero78/buddynet/internal/secret"
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -98,24 +99,23 @@ func main() {
 	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
 	listen := flag.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr))
 	relayListenFlag := flag.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr))
-	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); other sources are dropped before any crypto (empty = open to all)")
+	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); a disallowed source is refused before it can occupy a connection slot, and on the relay before any crypto. On the HANDSHAKE server empty means open to all; on the RELAY it is one of the two authorization policies (the other is --server-key) and the relay refuses to start with neither — 0.0.0.0/0 and ::/0 are refused, an open relay is not a supported configuration")
 	relayMaxSessions := flag.Int("relay-max-sessions", 0, "relay: max concurrent sessions (abuse ceiling; 0 = default 4096). Lower it for a small private relay")
 	relayMaxLegsPerIP := flag.Int("relay-max-legs-per-ip", 0, "relay: max legs one source may hold (anti-hoarding; 0 = default 64). A source is one IPv4 address or one IPv6 /64 — every address in a /64 is free to mint, so they share this budget. Lower it for a small private relay")
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
-	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke/allowclient subcommands")
+	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
-	debug := flag.Bool("debug", false, "handshake: verbose logging of parked/dropped packets (not for production)")
-	quicHandshake := flag.Bool("quic-handshake", true, "encrypt the handshake control plane with QUIC/TLS 1.3 — the secure default. Pass --quic-handshake=false (or BUDDYNET_QUIC=0) for legacy PLAIN UDP, where the token travels in cleartext. Set the SAME on the server and every buddy.")
+	relayID := flag.String("relay-id", "", "handshake/relay: the relay's id, the SAME value on both (mint one with `buddynet gen-relay-id`). On the handshake server it turns on relay tickets — every paired buddy is issued a short-lived signed permit for that relay; on the relay it names which tickets to accept")
+	debug := flag.Bool("debug", false, "handshake/relay: verbose logging of parked/dropped packets; on the relay it also puts SOURCE ADDRESSES in ticket-rejection lines, which a shipped relay deliberately does not log (not for production)")
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
-	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]")
-	token := flag.String("token", "", "buddy: legacy fixed pairing token, reused on every reconnect (--invite/--join instead use a one-time token + a stored session secret)")
+	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]. RELAY: the handshake server whose relay tickets this relay accepts — pass two comma-separated keys during a server key rotation")
 	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest)")
 	knownPeers := flag.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)")
 	lab := flag.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1.")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
 	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
-	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest (YAML: buddies with key/token/name/expose per entry; legacy line format still read — run `peers migrate`); maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--token/--lazy")
+	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest (YAML: buddies with key/token/name/expose per entry; legacy line format still read — run `peers migrate`); maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--lazy")
 	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
 	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
 	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
@@ -148,8 +148,14 @@ func main() {
 	case flag.Arg(0) == "gen-token":
 		genToken()
 		return
+	case flag.Arg(0) == "gen-relay-id":
+		genRelayID()
+		return
 	case flag.Arg(0) == "identity":
 		printIdentity(*keyPath)
+		return
+	case flag.Arg(0) == "init":
+		initIdentity(*keyPath)
 		return
 	}
 	// Handshake allowlist admin subcommands operate on --authorized and exit.
@@ -167,24 +173,17 @@ func main() {
 	*roleFlag = orEnv(*roleFlag, "BUDDYNET_ROLE")
 	*server = orEnv(*server, "BUDDYNET_SERVER")
 	*serverKey = orEnv(*serverKey, "BUDDYNET_SERVER_KEY")
-	*token = orEnv(*token, "BUDDYNET_TOKEN")
 	*peerKey = orEnv(*peerKey, "BUDDYNET_PEER_KEY")
 	*knownPeers = orEnv(*knownPeers, "BUDDYNET_KNOWN_PEERS")
 	*code = orEnv(*code, "BUDDYNET_CODE")
+	// The invite token is a bearer secret, so it needs a way out of argv/ps. That
+	// used to be BUDDYNET_TOKEN for the removed --token; --join inherits the role.
+	*join = orEnv(*join, "BUDDYNET_JOIN")
 	*name = orEnv(*name, "BUDDYNET_NAME")
 	if !*dnsFlag {
 		if v := os.Getenv("BUDDYNET_DNS"); v == "1" || v == "true" {
 			*dnsFlag = true
 		}
-	}
-	// QUIC (encrypted) is the secure default; BUDDYNET_QUIC=0/false opts out to the
-	// legacy cleartext plain-UDP control plane (for headless setups that pass env,
-	// not flags). =1/true is accepted too (a redundant explicit opt-in).
-	switch os.Getenv("BUDDYNET_QUIC") {
-	case "0", "false":
-		*quicHandshake = false
-	case "1", "true":
-		*quicHandshake = true
 	}
 	if !*lazyFlag {
 		if v := os.Getenv("BUDDYNET_LAZY"); v == "1" || v == "true" {
@@ -216,26 +215,33 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// The pairing token is now only ever a ONE-TIME invite: --invite mints one,
+	// --join carries the one your buddy gave you. Both retire it after the first
+	// pairing in favour of the stored session secret, so there is no longer a mode
+	// where a fixed token is replayed on every reconnect (that was --token, removed
+	// in v5: a long-lived bearer secret that anyone who ever learned it could use to
+	// squat the pairing, for as long as the pair existed).
+	token := ""
 	ephemeral := false
 	if hasBuddy {
 		if *join != "" {
-			*token = *join
+			token = *join
 			ephemeral = true
 		}
 		if *invite {
-			*token = mintInviteToken()
+			token = mintInviteToken()
 			ephemeral = true
 		}
 	}
 	bArgs := buddyArgs{
-		server: *server, serverKey: *serverKey, token: *token, peerKey: *peerKey,
+		server: *server, serverKey: *serverKey, token: token, peerKey: *peerKey,
 		knownPeers: *knownPeers, lab: *lab, code: *code, keyPath: *keyPath,
 		peersPath: *peersPath, peersFile: *peersFile, localListen: *localListen, forward: *forward, vipListen: *vipListen,
 		punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
 		// Interactive only when not explicitly disabled AND a human is at the
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
-		ephemeral: ephemeral, inviteTimeout: *inviteTimeout, quic: *quicHandshake,
+		ephemeral: ephemeral, inviteTimeout: *inviteTimeout,
 		reauthInterval: *reauthInterval,
 		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
 		expose: *expose,
@@ -262,6 +268,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", cerr)
 		os.Exit(2)
 	}
+	// On the RELAY, --server-key names the handshake server(s) whose tickets it
+	// accepts — a different meaning from the buddy's "the server I pin", and one or
+	// two keys rather than exactly one. Resolved here so a typo fails before a
+	// socket is opened.
+	var relayServerKeys []ed25519.PublicKey
+	if hasRole(roles, protocol.RoleRelay) {
+		relayServerKeys, cerr = relayKeys(roles, *serverKey, *keyPath)
+		if cerr != nil {
+			fmt.Fprintln(os.Stderr, "error:", cerr)
+			os.Exit(2)
+		}
+	}
 
 	// Run every selected role concurrently; the first hard failure cancels the
 	// rest and is reported.
@@ -282,14 +300,17 @@ func main() {
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
 					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
-					QUIC: *quicHandshake, AllowCIDRs: allowedCIDRs,
+					RelayID: *relayID, AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
 					Listen: relayListen(*relayListenFlag, *listen, roles), TTL: *ttl,
+					ServerKeys:   relayServerKeys,
+					RelayID:      *relayID,
 					AllowCIDRs:   allowedCIDRs,
 					MaxSessions:  *relayMaxSessions,
 					MaxLegsPerIP: *relayMaxLegsPerIP,
+					Debug:        *debug,
 				}))
 			case protocol.RoleBuddy:
 				fail("buddy", role.Buddy(ctx, bArgs.config()))
@@ -357,6 +378,77 @@ func parseCIDRs(s string) ([]netip.Prefix, error) {
 	return out, nil
 }
 
+// hasRole reports whether r is among the selected roles.
+func hasRole(roles []protocol.Role, r protocol.Role) bool {
+	for _, have := range roles {
+		if have == r {
+			return true
+		}
+	}
+	return false
+}
+
+// relayKeys resolves which handshake server(s) the relay trusts.
+//
+// The common deployment is one VPS running --role=handshake,relay. There the
+// answer is not in doubt — the relay should accept the tickets THIS process
+// issues — so the public half of the node's own identity is used and the
+// operator only has to set --relay-id, one flag, on one command. An explicit
+// --server-key always wins, which is what a separated deployment (recommended
+// for an exposed relay) passes.
+//
+// The derivation needs a persistent --key: with an ephemeral identity the two
+// roles would not even agree on a key, so there is nothing to derive and the
+// relay falls back to whatever policy was configured explicitly.
+func relayKeys(roles []protocol.Role, serverKey, keyPath string) ([]ed25519.PublicKey, error) {
+	if strings.TrimSpace(serverKey) != "" {
+		return parseServerKeys(serverKey)
+	}
+	if !hasRole(roles, protocol.RoleHandshake) || keyPath == "" {
+		return nil, nil
+	}
+	priv, _, err := bcrypto.LoadKey(keyPath)
+	if err != nil {
+		// Reported here rather than swallowed: falling through to "no policy" would
+		// send the operator looking for a missing flag when the actual problem is a
+		// key that could not be read.
+		return nil, fmt.Errorf("the relay derives the handshake key it trusts from --key %s, which could not be read: %w\n"+
+			"  Create the identity once:  %s --key %s init\n"+
+			"  Or name the server explicitly:  --server-key <SERVER_KEY>", keyPath, err, appName, keyPath)
+	}
+	log.Printf("NOTE: the relay accepts tickets from the handshake server in THIS process (--key %s). "+
+		"Pass --server-key explicitly if it should trust a different server.", keyPath)
+	return []ed25519.PublicKey{priv.Public().(ed25519.PublicKey)}, nil
+}
+
+// parseServerKeys parses the relay's --server-key: one or two base64 Ed25519
+// public keys, comma-separated. Two are allowed so a handshake-server key
+// rotation can be made before-break — the relay accepts tickets from either
+// while buddies move over.
+//
+// A relay that also runs --role=buddy shares this flag with the buddy's own
+// "pin the server I talk to", where exactly one key is meaningful; the buddy
+// therefore keeps its own strict parse, and only this side accepts a pair.
+func parseServerKeys(s string) ([]ed25519.PublicKey, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil // network mode, or no policy at all — role.Relay decides
+	}
+	var out []ed25519.PublicKey
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		k, err := bcrypto.DecodePubKey(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --server-key entry %q: %w (want the base64 the server prints with `identity`)", part, err)
+		}
+		out = append(out, k)
+	}
+	return out, nil
+}
+
 // relayListen resolves the relay's listen address. It prefers --relay-listen;
 // failing that it uses --listen only when relay is the sole role (so a lone
 // `--role=relay --listen ...` still works), and otherwise the default — which
@@ -382,7 +474,7 @@ type buddyArgs struct {
 	server, serverKey, token, peerKey, knownPeers, code, keyPath, peersPath string
 	peersFile                                                               string
 	localListen, forward, vipListen, name, expose                           string
-	lab, status, interactive, ephemeral, quic, dns, lazy, wireguard         bool
+	lab, status, interactive, ephemeral, dns, lazy, wireguard               bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
 
@@ -407,7 +499,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		LocalListen: a.localListen, Forward: a.forward, VIPListen: a.vipListen,
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
-		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout, QUIC: a.quic,
+		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout,
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
 		WireGuard: a.wireguard, Expose: a.exposeScope(),
@@ -430,10 +522,10 @@ func (a buddyArgs) validate() {
 		fmt.Fprintln(os.Stderr, "error: --lab disables all identity verification (MITM-exposed).\nOnly for throwaway test setups. Set BUDDYNET_LAB=1 to confirm.")
 		os.Exit(2)
 	}
-	// A token is needed for a first pairing (--invite/--join/--token) and for a
+	// A token is needed for a first pairing (--invite/--join) and for a
 	// --status probe; once paired, a stored session lets you reconnect with none.
 	if a.status && a.token == "" {
-		fmt.Fprintln(os.Stderr, "error: --status needs --token (the pairing token)")
+		fmt.Fprintln(os.Stderr, "error: --status needs a pairing token — pass --join <TOKEN> (or run it where a session is already stored)")
 		os.Exit(2)
 	}
 	// --wireguard carries IP natively (each partner is reachable at its VIP over
@@ -468,6 +560,13 @@ func (a buddyArgs) validate() {
 		fmt.Fprintln(os.Stderr, "error: set at least one of -L, --vip-listen or -forward (otherwise the tunnel carries nothing)")
 		os.Exit(2)
 	}
+	// A punch longer than this would eat into the window a relay ticket leaves for
+	// binding, so the ticket could expire while the punch it was issued for is
+	// still running. Refused here rather than silently shortened.
+	if a.punchDur > role.PunchDurMax {
+		fmt.Fprintf(os.Stderr, "error: --punch %s is over the %s maximum (a relay ticket is short-lived and has to cover the punch AND the bind that follows it)\n", a.punchDur, role.PunchDurMax)
+		os.Exit(2)
+	}
 	if a.vipListen != "" {
 		if _, err := net.LookupPort("tcp", a.vipListen); err != nil {
 			fmt.Fprintf(os.Stderr, "error: --vip-listen %q is not a valid TCP port\n", a.vipListen)
@@ -478,8 +577,8 @@ func (a buddyArgs) validate() {
 	// listed buddy, so it cannot be combined with the single-peer pairing modes.
 	if a.peersFile != "" {
 		switch {
-		case a.token != "" || a.peerKey != "":
-			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --token/--peer-key (the manifest pins and pairs each buddy)")
+		case a.peerKey != "":
+			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --peer-key (the manifest pins and pairs each buddy)")
 			os.Exit(2)
 		case a.ephemeral:
 			fmt.Fprintln(os.Stderr, "error: --peers-file cannot be combined with --invite/--join (use a bootstrap token per line in the manifest)")
@@ -528,6 +627,27 @@ func mintInviteToken() string {
 	return tok
 }
 
+// genRelayID mints a relay id: the value that must be configured IDENTICALLY on
+// the handshake server (--relay-id, which turns on ticket issuance) and on the
+// relay (--relay-id, which names the tickets it accepts). It is not a secret —
+// it only has to be unguessable enough that a ticket for one relay cannot be
+// replayed at another by picking the right string — so unlike a token it is
+// printed plainly and needs no reveal-and-hide.
+func genRelayID() {
+	id, err := ticket.NewID()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: could not read random bytes: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(id)
+	if secret.Interactive() {
+		fmt.Fprintf(os.Stderr, "\nUse the SAME value on both sides:\n"+
+			"  handshake:  %[1]s --role=handshake ... --relay-endpoint <VPS:51821> --relay-id %[2]s\n"+
+			"  relay:      %[1]s --role=relay ... --relay-id %[2]s --server-key <SERVER_KEY>\n"+
+			"It is not a secret; a mismatch shows up as every ticket being rejected.\n", appName, id)
+	}
+}
+
 func genToken() {
 	tok, err := secret.NewToken()
 	if err != nil {
@@ -538,25 +658,65 @@ func genToken() {
 		fmt.Println(tok)
 		return
 	}
-	fmt.Fprint(os.Stderr, `New pairing token (384-bit). Both buddies use the SAME value as --token (or
+	fmt.Fprint(os.Stderr, `New pairing token (384-bit). Give it to your buddy as --join (or
 --join). It's a bearer secret — keep it off the command line (prefer a 0600
-file or BUDDYNET_TOKEN) and pin each other with --peer-key.
+file) and pin each other with --peer-key.
 `)
 	secret.RevealUntilKey(tok)
 	fmt.Fprintln(os.Stderr, "Token hidden — copy it to your buddy before you lose it.")
 }
 
 // printIdentity prints the base64 public key for --key (to pin in buddies).
+// printIdentity prints the public key at keyPath. It READS ONLY: creating an
+// identity is `init`, deliberately a different command.
+//
+// It used to create one when the file was missing, which quietly made every
+// wrapper that reads the key ("get the pubkey, then start the server") able to
+// mint a fresh identity after a volume was lost — the exact accident this split
+// exists to prevent.
 func printIdentity(keyPath string) {
 	if keyPath == "" {
 		fmt.Fprintln(os.Stderr, "error: set --key <path> to read the persistent identity")
 		os.Exit(2)
 	}
-	priv, _, err := bcrypto.LoadOrCreateKey(keyPath)
+	priv, _, err := bcrypto.LoadKey(keyPath)
+	if errors.Is(err, bcrypto.ErrKeyMissing) {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n"+
+			"  Create it once (this is the only command that does):\n"+
+			"      buddynet --key %s init\n\n"+
+			"  If this host has run before, the key is LOST rather than absent — check the\n"+
+			"  volume or credential holding it before creating a new identity, or every\n"+
+			"  buddy that pinned the old key will refuse this node.\n", err, keyPath)
+		os.Exit(2)
+	}
 	if err != nil {
 		log.Fatalf("identity key: %v", err)
 	}
 	fmt.Println(bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
+}
+
+// initIdentity creates the node's identity, once. It refuses if the file already
+// exists, so it can never re-key a node whose buddies have pinned it.
+func initIdentity(keyPath string) {
+	if keyPath == "" {
+		fmt.Fprintln(os.Stderr, "error: set --key <path> — `init` creates a persistent identity, so it needs somewhere to put it")
+		os.Exit(2)
+	}
+	priv, err := bcrypto.CreateKey(keyPath)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(os.Stderr, "error: %s already holds an identity — refusing to replace it.\n"+
+				"  Print the existing one with: buddynet --key %s identity\n", keyPath, keyPath)
+			os.Exit(2)
+		}
+		log.Fatalf("create identity: %v", err)
+	}
+	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
+	fmt.Println(pub)
+	fmt.Fprintf(os.Stderr, "\ncreated a new identity at %s\n"+
+		"  Buddies pin this key — hand it to them as --server-key (handshake server)\n"+
+		"  or --peer-key (buddy). Back the file up: losing it changes this node's\n"+
+		"  identity AND its virtual IP, and everyone has to re-pin.\n", keyPath)
 }
 
 // runPeersCmd dispatches `peers <list|add|remove|migrate>` against the
@@ -655,11 +815,16 @@ func runAuthCmd(path, cmd string, args []string) int {
 		}
 		err = role.ApproveKey(path, args[0], label)
 	case "allowclient":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "usage: --authorized <file> allowclient <enrollment-code>")
-			return 2
-		}
-		err = role.AllowClient(path, args[0])
+		// Removed in v5.0.0 with the server's pending file: there is no longer any
+		// on-disk record mapping a code to a key, so nothing here could look one up.
+		// Kept as a named case purely so operators (and their scripts) get told what
+		// to do instead of "unknown command".
+		fmt.Fprintln(os.Stderr, "allowclient was removed in v5.0.0: the server no longer keeps a pending file.\n"+
+			"The server prints the ready-to-run command when a client enrols — approve by key instead:\n"+
+			"  buddynet --role=handshake --authorized "+path+" approve <CLIENT-PUBKEY>\n"+
+			"Find the key in the server log: AUTHZ: action=pending key=… code=… — approve with: …\n"+
+			"(The client must still be running: pending enrolments now live in memory only.)")
+		return 2
 	case "list":
 		err = role.ListKeys(path)
 	case "revoke":
@@ -741,17 +906,19 @@ NAMES & ON-DEMAND
 
 COMMANDS
   %[1]s gen-token                            mint a strong shared token
+  %[1]s --key PATH init                         create this node's identity (once)
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
   %[1]s --peers-file PATH peers list|add|remove|migrate   manage your buddies (MultiPeer)
-  %[1]s --authorized FILE approve|allowclient|list|revoke   server allowlist (approval mode)
+  %[1]s --authorized FILE approve|list|revoke    server allowlist (approval mode)
   %[1]s version
 
 SECURITY — please read
   • Pin your buddy with --peer-key (each buddy prints its identity at startup).
     Without a pin, first contact is verified by a Short Authentication String
     you compare out of band, then remembered in --known-peers.
-  • Keep the token off the command line: prefer BUDDYNET_TOKEN or a 0600 file.
+  • The invite token is one-time and retired after the first pairing; reconnects
+    use the stored session secret, so it never has to be kept around.
 
 TRANSPORT
   The handshake control plane is encrypted with QUIC/TLS 1.3 BY DEFAULT: the

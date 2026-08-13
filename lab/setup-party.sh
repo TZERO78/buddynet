@@ -33,7 +33,7 @@ for b in "${BUDDIES[@]}"; do touch "party/${b}.peers"; done
 
 echo "==> Bootstrapping server identity..."
 SERVER_KEY=$(docker compose -f docker-compose.yml run --rm \
-    server --key /var/lib/buddynet/id.key identity 2>/dev/null | tr -d '\r' | tail -1)
+    server --key /var/lib/buddynet/id.key init 2>/dev/null | tr -d '\r' | tail -1)
 echo "BUDDYNET_SERVER_KEY=${SERVER_KEY}" > .env
 echo "    server: ${SERVER_KEY}"
 

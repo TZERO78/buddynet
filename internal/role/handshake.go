@@ -6,9 +6,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -25,6 +25,7 @@ import (
 	"github.com/tzero78/buddynet/internal/netkey"
 	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/internal/safe"
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
@@ -36,11 +37,20 @@ type HandshakeConfig struct {
 	Authorized string        // optional client allowlist (approval mode)
 	TTL        time.Duration // liveness window for a registration
 	Debug      bool          // verbose, security-sensitive logging
-	QUIC       bool          // run the control plane over QUIC instead of plain UDP
 	// RelayEndpoint, if set, is advertised to every paired buddy as a relay of
 	// last resort — use it when this VPS also runs --role=relay (commonly on a
 	// second port). Buddies fall back to it only after a direct punch fails.
 	RelayEndpoint string
+	// RelayID is the relay's non-secret 128-bit id (--relay-id), configured
+	// IDENTICALLY here and on the relay. With it set, every paired PEER_LIST
+	// carries a signed ticket admitting that buddy to that relay; without it the
+	// server issues none, and only a relay running in network mode (--allow-cidr)
+	// will accept those buddies.
+	//
+	// It is an id rather than an address on purpose: address, DNS name and port
+	// all change, and a ticket bound to a moving value either breaks on a
+	// migration or has to be reissued for cosmetic reasons.
+	RelayID string
 	// AllowCIDRs, if non-empty, drops any datagram/connection whose source is not
 	// inside one of these networks BEFORE the cookie and any crypto — a cheap
 	// DoS pre-filter for a private/known-fleet server. Empty keeps it open to all.
@@ -154,6 +164,14 @@ type hsRegistry struct {
 	// knows a token turn that into a flood. Every other repeating line in this file
 	// is gated the same way. Released with the token in evict/reap.
 	pairedLogged map[string]struct{}
+	// sids holds the RELAY SESSION ID minted for a token the first time a ticket is
+	// issued for it. Both buddies of a pair must present the same sid to meet at
+	// the relay, and the sid is the server's to choose — that is what stops two
+	// legs from being spliced by anything a client picked. It lives exactly as long
+	// as the token bucket (released in evict/reap), so it is not new persistent
+	// state: a token that ages out and re-forms simply gets a fresh sid, and both
+	// buddies pick it up on their next poll (they re-register about once a second).
+	sids map[string]string
 	// intruderWarned records tokens for which an intrusion WARNING was already
 	// emitted, so the immediate log fires AT MOST ONCE per token even under an
 	// open-mode squat flood (the per-minute stats counters still carry the volume).
@@ -167,6 +185,7 @@ func newHSRegistry(ttl time.Duration) *hsRegistry {
 		waiting:        map[string]map[string]*hsPeer{},
 		seenPKs:        map[string]map[string]struct{}{},
 		pairedLogged:   map[string]struct{}{},
+		sids:           map[string]string{},
 		intruderWarned: map[string]struct{}{},
 		ttl:            ttl,
 	}
@@ -214,7 +233,7 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 			// legitimate buddy now finds no room, or when an attacker probes an
 			// occupied token.
 			hsStats.squatRejected.Add(1)
-			r.warnIntruderLocked(m.Token, "SECURITY: event=squat-rejected token=%s src=%s key=%s id=%q detail=%q",
+			r.warnIntruderLocked(m.Token, "SECURITY: event=squat-rejected token=%s src=%s key=%s id=%s detail=%q",
 				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "third-party register on a full token slot; possible squat in progress")
 			return nil, nil, false
 		}
@@ -240,7 +259,7 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 			// key. Either way it warrants attention.
 			if len(known) >= maxIDsPerToken {
 				hsStats.newPubKey.Add(1)
-				r.warnIntruderLocked(m.Token, "SECURITY: event=new-pubkey token=%s src=%s key=%s id=%q detail=%q",
+				r.warnIntruderLocked(m.Token, "SECURITY: event=new-pubkey token=%s src=%s key=%s id=%s detail=%q",
 					logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID,
 					"new pubkey on an established token; possible squat, key rotation, or new device")
 			}
@@ -273,34 +292,15 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 		partner = p
 		break
 	}
-	// The pair is DOWN to fewer than two live peers, so release the paired-once
-	// latch: the next time two peers meet on this token it is a genuinely new
-	// pairing and has to be announced again.
-	//
-	// This path matters on its own, without the reaper: the loop above expires
-	// peers inline, so a token can lose its partner and gain a new one between two
-	// reap ticks — or with no reaper running at all. Only clearing the latch in the
-	// reaper (and in eviction) left it set across exactly that transition.
+	// Releasing the paired-once latch when the partner is gone matters on its own,
+	// without the reaper: the loop above expires peers inline, so a token can lose
+	// its partner and gain a new one between two reap ticks — or with no reaper
+	// running at all. Clearing it only in the reaper (and in eviction) left it set
+	// across exactly that transition, and the new pairing was never announced.
 	if partner == nil {
 		delete(r.pairedLogged, m.Token)
 	}
 	return self, partner, true
-}
-
-// notePaired reports whether THIS is the moment a token became paired, recording
-// it so later registrations on the same token stay quiet. Bounded by maxTokens and
-// released with the token, like the intrusion-warning latch next to it.
-func (r *hsRegistry) notePaired(token string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, done := r.pairedLogged[token]; done {
-		return false
-	}
-	if len(r.pairedLogged) >= maxTokens {
-		return false // bounded: under extreme spread skip the line (stats still fire)
-	}
-	r.pairedLogged[token] = struct{}{}
-	return true
 }
 
 // evictStalestLocked frees one slot by removing the token bucket whose most
@@ -323,6 +323,7 @@ func (r *hsRegistry) evictStalestLocked() bool {
 	delete(r.seenPKs, victim)
 	delete(r.intruderWarned, victim)
 	delete(r.pairedLogged, victim)
+	delete(r.sids, victim)
 	return true
 }
 
@@ -359,6 +360,7 @@ func (r *hsRegistry) reap(ctx context.Context) {
 				delete(r.seenPKs, token)        // release pubkey history when the session is gone
 				delete(r.intruderWarned, token) // and its one-shot warning latch
 				delete(r.pairedLogged, token)   // and the paired-once latch
+				delete(r.sids, token)           // and the relay session id
 			}
 		}
 		r.mu.Unlock()
@@ -373,19 +375,32 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	if cfg.TTL == 0 {
 		cfg.TTL = 10 * time.Second
 	}
-	priv, created, err := bcrypto.LoadOrCreateKey(cfg.KeyPath)
+	// LoadKey, never LoadOrCreateKey: a handshake server that invents an identity
+	// is a different server to every buddy that pinned the old one, and they all
+	// refuse it as a possible MITM. A missing key here means the key was LOST (an
+	// unmounted volume, a typo in --key), not that this is a first run — and the two
+	// are indistinguishable from in here, so we refuse and let the operator say
+	// which it is.
+	priv, created, err := bcrypto.LoadKey(cfg.KeyPath)
+	if errors.Is(err, bcrypto.ErrKeyMissing) {
+		return fmt.Errorf("%w\n\n"+
+			"  If this is the FIRST start on this host, create the identity once:\n"+
+			"      buddynet --role=handshake --key %s init\n\n"+
+			"  If this host HAS run before, the key is missing rather than absent —\n"+
+			"  check that the volume/credential holding it is mounted. Starting with a\n"+
+			"  new identity would lock out every buddy that pinned the old one.",
+			err, cfg.KeyPath)
+	}
 	if err != nil {
 		return err
 	}
 	tokenLogKey = deriveSubkey(priv.Seed(), "buddynet-logtag-v1")
-	cookieKey = deriveSubkey(priv.Seed(), "buddynet-cookie-v1")
 	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
-	switch {
-	case cfg.KeyPath == "":
+	// created can only be true for an EMPTY --key (the ephemeral case): LoadKey
+	// never writes one, which is the point.
+	if created {
 		log.Printf("WARNING: ephemeral identity %s — pass --key to persist it (buddies pin this)", pub)
-	case created:
-		log.Printf("WARNING: generated a NEW identity at %s — buddies must pin the new key (print it: buddynet --role=handshake --key %s identity)", cfg.KeyPath, cfg.KeyPath)
-	default:
+	} else {
 		log.Printf("identity loaded from %s (print the public key: buddynet --role=handshake --key %s identity)", cfg.KeyPath, cfg.KeyPath)
 	}
 
@@ -414,8 +429,8 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 			// until a key is approved — never a silent fallback to open mode.
 			log.Printf("WARNING: the allowlist %s is empty or missing — NO client can pair yet. "+
 				"Approve one with: buddynet --role=handshake --authorized %s approve <CLIENT_KEY> "+
-				"(or --authorized %s allowclient <CODE> for code-based enrollment)",
-				cfg.Authorized, cfg.Authorized, cfg.Authorized)
+				"(the key is printed when a client enrols with --code)",
+				cfg.Authorized, cfg.Authorized)
 		}
 		go authz.watch(ctx)
 	} else {
@@ -434,71 +449,24 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 		log.Printf("source allowlist ON: only %v may register", cfg.AllowCIDRs)
 	}
 
-	// Transport choice: QUIC validates the source address in its handshake (and, in
-	// approval mode, pins clients to the allowlist at the TLS handshake), plain UDP
-	// gets source validation from the address-validation cookie. Both reuse the same
-	// pairing core.
-	if cfg.QUIC {
-		log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
-		return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl, cfg.AllowCIDRs)
+	// The control plane is QUIC/TLS 1.3, full stop. The plain-UDP transport it used
+	// to fall back to is gone (v8): its address-validation cookie only ever
+	// reproduced what QUIC's handshake does anyway, while the REGISTER — pairing
+	// token included — travelled in cleartext, which is what made a token squat and
+	// the roster/candidate poisoning that follows it possible for anyone on path.
+	log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
+	adv, err := relayAdvertFor(cfg)
+	if err != nil {
+		return err
 	}
-	log.Print("handshake control plane: UDP (source address validated by cookie)")
-	log.Print("WARNING: plain UDP is the LEGACY control plane (you opted out of the secure default with " +
-		"--quic-handshake=false): the REGISTER (incl. the pairing token) travels in CLEARTEXT — an on-path " +
-		"observer can learn it and squat/DoS a pairing (and MITM a buddy that runs --lab). Drop " +
-		"--quic-handshake=false on the server AND every buddy to restore encryption; always pin buddies with --peer-key.")
-
-	return serveRegisterUDP(ctx, conn, rl, cfg.AllowCIDRs, func(src *net.UDPAddr, raw []byte) {
-		handleRegister(conn, reg, priv, authz, cfg.RelayEndpoint, src, raw)
-	})
-}
-
-// serveRegisterUDP is the plain-UDP read loop: one datagram in, one REGISTER
-// handled. handle is a parameter rather than a fixed call so the panic isolation
-// below can be exercised with a handler that panics on purpose — a parameter
-// leaves no package-level state for a test to mutate, and therefore no race and
-// nothing an attacker could reach.
-func serveRegisterUDP(ctx context.Context, conn *net.UDPConn, rl *ratelimit.Limiter,
-	allowed []netip.Prefix, handle func(src *net.UDPAddr, raw []byte)) error {
-	buf := make([]byte, 1500)
-	for {
-		n, src, err := conn.ReadFromUDP(buf)
-		if err != nil {
-			if ctx.Err() != nil {
-				log.Print("shutting down")
-				return nil
-			}
-			log.Printf("read: %v", err)
-			continue
-		}
-		// Source allowlist (optional): drop a disallowed source before anything,
-		// even the rate limiter — a private server need not spend a cycle on it.
-		if !cidrAllowed(allowed, src.IP) {
-			continue
-		}
-		// Gate before any parsing or crypto so a flood is dropped cheaply and the
-		// expensive per-packet work stays bounded (DoS / reflection defense).
-		// Keyed by the shared accounting rule (netkey: exact IPv4, /64 for IPv6) —
-		// on this plain-UDP path nothing else bounds a source, so keying per exact
-		// IPv6 address would hand one /64 an unlimited number of buckets.
-		if !rl.Allow(netkey.FromIP(src.IP)) {
-			hsStats.rateLimited.Add(1)
-			hsDebugf("rate-limited %s", src)
-			continue
-		}
-		raw := make([]byte, n)
-		copy(raw, buf[:n])
-		// One malformed datagram must drop that packet, never the read loop /
-		// process (panic isolation for a 24/7 public server).
-		safe.Do("handshake.register", func() { handle(src, raw) })
-	}
+	return serveControlQUIC(ctx, conn, reg, priv, authz, adv, rl, cfg.AllowCIDRs)
 }
 
 // serveControlQUIC runs the handshake control plane over QUIC: each accepted
 // stream is one REGISTER, answered with a signed PEER_LIST (empty until paired,
 // so a polling buddy makes progress). QUIC's handshake already validated the
 // source address, so no cookie is needed; the rate limiter still bounds load.
-func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
+func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, adv relayAdvert, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
 	// The TLS handshake AUTHENTICATES every client (Ed25519 client certificate,
 	// proof of possession) but authorizes none: enrollment needs an unknown key to
 	// be able to deliver its sealed code, which a TLS-layer allowlist gate makes
@@ -507,7 +475,7 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 		log.Print("approval mode: QUIC control authenticates every client by key at the TLS handshake; " +
 			"the allowlist decision (allow / enroll with a code / refuse) is made per REGISTER")
 	}
-	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout, allowed)
 	if err != nil {
 		return err
 	}
@@ -523,16 +491,57 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 			return err
 		}
 		safe.Go("handshake.control", func() {
-			handleControlReq(req, reg, priv, authz, relayEndpoint, rl, allowed)
+			handleControlReq(req, reg, priv, authz, adv, rl, allowed)
 		})
 	}
 }
 
+// relayAdvert is everything the server tells a paired buddy about the relay it
+// may fall back to: the endpoint to bind, and the id the ticket is minted for.
+// Both are empty when no relay is configured — BuddyNet must work P2P-only, so
+// this is a normal state and not a degraded one.
+type relayAdvert struct {
+	endpoint string
+	rid      string
+}
+
+// relayAdvertFor validates the relay configuration and reports what the server
+// will advertise. It also PRINTS the relay id, because that id is configured in
+// two places (here and on the relay) and a mismatch produces "every ticket
+// rejected" with nothing in either log to point at the cause — so both sides say
+// out loud which id they are using.
+func relayAdvertFor(cfg HandshakeConfig) (relayAdvert, error) {
+	adv := relayAdvert{endpoint: cfg.RelayEndpoint, rid: cfg.RelayID}
+	switch {
+	case adv.rid != "" && !ticket.ValidID(adv.rid):
+		return relayAdvert{}, fmt.Errorf("--relay-id %q is not a valid relay id: pass the SAME value the relay was started with "+
+			"(%d base64url characters; mint one with `buddynet gen-relay-id`)", adv.rid, base64.RawURLEncoding.EncodedLen(ticket.IDLen))
+	case adv.rid != "" && adv.endpoint == "":
+		// Tickets without an endpoint are not wrong, only useless: nothing tells the
+		// buddy where to spend them.
+		log.Printf("WARNING: --relay-id is set but --relay-endpoint is not — buddies are issued relay tickets but never told which relay to use")
+	case adv.rid == "" && adv.endpoint != "":
+		log.Printf("WARNING: --relay-endpoint %s is advertised without --relay-id: this server issues NO relay tickets. "+
+			"A relay started with --server-key will refuse these buddies; only a relay restricted by --allow-cidr alone will carry them. "+
+			"Set the same --relay-id on both sides.", adv.endpoint)
+	case adv.rid != "":
+		log.Printf("relay tickets ON: rid=%s endpoint=%s ttl=%s — the relay must be started with the SAME --relay-id and this server's public key",
+			adv.rid, adv.endpoint, ticket.MaxTTL)
+	}
+	return adv, nil
+}
+
 // handleControlReq processes one QUIC control request and replies on its stream.
-func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) {
+func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, adv relayAdvert, rl *ratelimit.Limiter, allowed []netip.Prefix) {
 	src, _ := req.Remote.(*net.UDPAddr)
 	if src == nil || !cidrAllowed(allowed, src.IP) {
-		req.Reply(nil)
+		// Belt and braces: the listener already refuses disallowed sources before a
+		// slot is handed out (tunnel.ListenControl), so reaching here means either an
+		// address type we cannot classify or a mismatch between the two checks. Drop
+		// the CONNECTION, not just the stream — answering with a closed stream left
+		// the peer holding a slot until the idle timeout, which is exactly what a
+		// source we refuse should not get.
+		req.Drop("source not allowed")
 		return
 	}
 	// Same accounting key as every other per-source budget (netkey). The QUIC
@@ -540,6 +549,12 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	// would let one /64 hold several connections AND a fresh request budget each.
 	if !rl.Allow(netkey.FromIP(src.IP)) {
 		hsStats.rateLimited.Add(1)
+		// Stream closed, connection kept: a rate limit is TRANSIENT. A buddy polling
+		// while it waits for its partner (or for an operator approval) is expected to
+		// come back a second later, and dropping its connection would turn a moment of
+		// load into a reconnect storm. The connection cap in tunnel.admit is what
+		// bounds how many slots a source can hold; this only bounds the work inside
+		// one of them.
 		req.Reply(nil)
 		return
 	}
@@ -569,11 +584,14 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	// client can be told so directly.
 	if m.Ver != protocol.Version {
 		hsStats.dropped.Add(1)
+		// Answer first — the client turns this into "update buddynet" instead of a
+		// timeout — then close the CONNECTION. A version mismatch is final: this peer
+		// cannot become compatible on this connection, so leaving it open only lets it
+		// hold a slot until the idle timeout.
 		if b, err := json.Marshal(replyIncompatible()); err == nil {
 			req.Reply(b)
-		} else {
-			req.Reply(nil)
 		}
+		req.Drop("protocol version mismatch")
 		return
 	}
 	// Same order as the UDP path: the key-ownership fields are required once the
@@ -593,16 +611,29 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	}
 	if !resolveToken(&m, priv) {
 		hsStats.dropped.Add(1)
+		hsDebugf("drop register with undecryptable sealed token from %s", src)
 		req.Drop("sealed pairing token does not open")
 		return
 	}
-	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
+	peers, ok := pairRegister(reg, authz, adv.endpoint, src, m)
 	if !ok {
+		// Connection kept on purpose. "Not ok" here is usually "no partner yet" — the
+		// normal state of a buddy waiting to be paired, which polls about once a
+		// second — or "not approved yet", where the client MUST keep polling to notice
+		// the operator's approval. Closing on either would break pairing itself. The
+		// genuinely final refusals above (bad version, forged key, unopenable token)
+		// do drop the connection.
 		req.Reply(nil)
 		return
 	}
-	// Reply even when parked (empty peers) so the polling buddy retries.
-	if b, err := json.Marshal(signedPeerList(priv, m.Token, peers)); err == nil {
+	// Reply even when parked (empty peers) so the polling buddy retries. A relay
+	// ticket is attached only to a PAIRED reply: before that there is no partner,
+	// so there is no session to authorise.
+	reply := signedPeerList(priv, m.Token, peers)
+	if len(peers) > 0 {
+		reply.Ticket = issueTicket(reg, priv, adv.rid, m, peers[0])
+	}
+	if b, err := json.Marshal(reply); err == nil {
 		req.Reply(b)
 	}
 }
@@ -622,7 +653,6 @@ func hsDebugf(format string, args ...any) {
 // server stays silent and an attack shows up as a periodic spike line.
 type hsCounters struct {
 	paired        atomic.Int64
-	challenged    atomic.Int64 // sent an address-validation cookie (unvalidated source)
 	rateLimited   atomic.Int64
 	dropped       atomic.Int64 // malformed / over-cap / failed proof
 	newPubKey     atomic.Int64 // new pubkey on established token (possible squat / new device)
@@ -650,7 +680,7 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		pa, ch := c.paired.Swap(0), c.challenged.Swap(0)
+		pa := c.paired.Swap(0)
 		rl, dr := c.rateLimited.Swap(0), c.dropped.Swap(0)
 		npk, sq, rp := c.newPubKey.Swap(0), c.squatRejected.Swap(0), c.replay.Swap(0)
 		km, el := c.keyMismatch.Swap(0), c.enrollLimited.Swap(0)
@@ -661,11 +691,11 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 		total := safe.PanicCount()
 		pan := total - c.lastPanic
 		c.lastPanic = total
-		if pa|ch|rl|dr|npk|sq|rp|km|el == 0 && pan == 0 {
+		if pa|rl|dr|npk|sq|rp|km|el == 0 && pan == 0 {
 			continue // idle interval: stay quiet
 		}
-		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d challenged=%d rate-limited=%d dropped=%d",
-			statsInterval, pa, ch, rl, dr)
+		line := fmt.Sprintf("stats (last %s): role=handshake paired=%d rate-limited=%d dropped=%d",
+			statsInterval, pa, rl, dr)
 		if el > 0 {
 			line += fmt.Sprintf(" enroll-limited=%d", el)
 		}
@@ -673,67 +703,6 @@ func (c *hsCounters) logLoop(ctx context.Context) {
 			line += fmt.Sprintf(" ALERT: new-pubkey=%d squat-rejected=%d replay=%d key-mismatch=%d panics=%d", npk, sq, rp, km, pan)
 		}
 		log.Print(line)
-	}
-}
-
-// handleRegister handles one UDP datagram. It enforces the address-validation
-// cookie (UDP-only — QUIC validates the address in its handshake), then pairs;
-// when a partner is found it replies to the sender (only) with a signed
-// PEER_LIST. A parked registration draws no reply, exactly as before.
-func handleRegister(conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, src *net.UDPAddr, raw []byte) {
-	m, ok := parseRegister(raw)
-	if !ok {
-		hsStats.dropped.Add(1)
-		hsDebugf("drop invalid datagram from %s", src)
-		return
-	}
-	// A REGISTER without a valid cookie gets only a (smaller) challenge and no
-	// further work. A spoofed source never receives the cookie, so it can never
-	// complete this step — closing reflection before any crypto or PEER_LIST.
-	//
-	// This check comes FIRST, before the sealed token is opened. Unsealing runs
-	// X25519 + NaCl box, orders of magnitude more expensive than an HMAC compare,
-	// and it must not be reachable from an unvalidated (and therefore spoofable)
-	// source: otherwise a flood of garbage TokenEnc blobs buys an attacker a full
-	// asymmetric operation per packet. Everything downstream of here — unsealing,
-	// signature verification, the sealed enrollment code — is only reached by a
-	// source that has proven return-routability.
-	if !validCookie(m.Cookie, src.IP) {
-		hsStats.challenged.Add(1)
-		sendCookie(conn, src, len(raw))
-		hsDebugf("challenged unvalidated register id=%s from %s", m.ID, src)
-		return
-	}
-	// Source validated: an incompatible client now gets a clear answer rather than
-	// silence. Nothing else is done with the message.
-	if m.Ver != protocol.Version {
-		hsStats.dropped.Add(1)
-		if b, err := json.Marshal(replyIncompatible()); err == nil {
-			conn.WriteToUDP(b, src)
-		}
-		return
-	}
-	// Version agreed, so the key-ownership fields must be there. Checked before the
-	// sealed token is opened: a registration that cannot carry a valid proof must
-	// not buy an asymmetric operation.
-	if !requireV7Fields(m) {
-		hsStats.dropped.Add(1)
-		hsDebugf("drop register without a v7 key-ownership proof id=%s from %s", m.ID, src)
-		return
-	}
-	// Source validated and version agreed: only now is it worth an asymmetric
-	// operation to recover the sealed pairing token.
-	if !resolveToken(&m, priv) {
-		hsStats.dropped.Add(1)
-		hsDebugf("drop register with undecryptable sealed token from %s", src)
-		return
-	}
-	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
-	if !ok || len(peers) == 0 {
-		return // dropped, or parked (UDP sends nothing until paired)
-	}
-	if b, err := json.Marshal(signedPeerList(priv, m.Token, peers)); err == nil {
-		conn.WriteToUDP(b, src)
 	}
 }
 
@@ -749,15 +718,10 @@ func parseRegister(raw []byte) (protocol.Message, bool) {
 		len(m.Nonce) > protocol.MaxFieldLen {
 		return m, false
 	}
-	// The pairing token arrives sealed (TokenEnc, preferred — keeps it off a
-	// cleartext UDP wire) or plaintext (Token, legacy). Require exactly one and
-	// bound the sealed blob; resolveToken unseals and re-validates it before use.
-	switch {
-	case m.TokenEnc != "":
-		if m.Token != "" || len(m.TokenEnc) > maxCodeEncLen {
-			return m, false
-		}
-	case !validField(m.Token):
+	// The pairing token arrives SEALED to the server's identity key, always: the
+	// cleartext form is not on the wire any more (v8). resolveToken unseals and
+	// re-validates it before anything downstream sees it.
+	if m.TokenEnc == "" || len(m.TokenEnc) > maxCodeEncLen {
 		return m, false
 	}
 	// NOTE: the protocol version is deliberately NOT checked here. A mismatched
@@ -810,14 +774,10 @@ func replyIncompatible() protocol.Message {
 }
 
 // resolveToken unseals a sealed pairing token (TokenEnc) into m.Token using the
-// server's identity key, so all downstream logic (cookie, signature, bucket key)
-// works on the cleartext value exactly as before. A plaintext Token (legacy
-// buddy) passes through untouched. Returns false if the sealed token does not
-// decrypt or is malformed.
+// server's identity key, so all downstream logic (signature, bucket key) works on
+// the cleartext value. Returns false if it does not decrypt or is malformed —
+// there is no cleartext path to fall back to.
 func resolveToken(m *protocol.Message, priv ed25519.PrivateKey) bool {
-	if m.TokenEnc == "" {
-		return true // plaintext Token already validated in parseRegister
-	}
 	tok, err := bcrypto.OpenCode(m.TokenEnc, priv)
 	if err != nil || !validField(tok) {
 		return false
@@ -890,7 +850,7 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 		// this is the bolt.
 		if !authz.freshSinceApproval(m.PubKey, m.Ts) {
 			hsStats.replay.Add(1)
-			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%q detail=%q",
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
 				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration predates the key's approval")
 			return nil, false
 		}
@@ -899,7 +859,7 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 			// buddy draws a fresh one every attempt, so this is a genuine replay of a
 			// captured registration, not ordinary re-registration.
 			hsStats.replay.Add(1)
-			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%q detail=%q",
+			log.Printf("SECURITY: event=replay-detected token=%s src=%s key=%s id=%s detail=%q",
 				logTag(m.Token), src.IP, keyTag(m.PubKey), m.ID, "registration nonce reused by the same key")
 			return nil, false
 		}
@@ -938,6 +898,113 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 	return []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}, true
 }
 
+// notePaired reports whether THIS is the moment a token became paired, recording
+// it so later registrations on the same token stay quiet. Bounded by maxTokens and
+// released with the token, like the intrusion-warning latch next to it.
+func (r *hsRegistry) notePaired(token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, done := r.pairedLogged[token]; done {
+		return false
+	}
+	if len(r.pairedLogged) >= maxTokens {
+		return false // bounded: under extreme spread skip the line (stats still fire)
+	}
+	r.pairedLogged[token] = struct{}{}
+	return true
+}
+
+// sidFor returns the relay session id for a token, minting one on first use. It
+// is bounded like every other per-token map here: over the cap it returns
+// ok=false and the pairing simply gets no ticket, so the failure mode of a full
+// table is "no relay fallback", never "an unbounded map".
+func (r *hsRegistry) sidFor(token string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if sid, ok := r.sids[token]; ok {
+		return sid, true
+	}
+	if len(r.sids) >= maxTokens {
+		return "", false
+	}
+	sid, err := ticket.NewID()
+	if err != nil {
+		return "", false
+	}
+	r.sids[token] = sid
+	return sid, true
+}
+
+// issueTicket mints this buddy's relay permit for the pairing it just completed.
+// It is issued UNREQUESTED with the PEER_LIST, before the buddy has even tried
+// the direct path, for three reasons that all point the same way: asking for one
+// later would need a second control round trip at exactly the moment the direct
+// path has just failed; the stateless server would have to remember the pairing
+// to answer it (the runtime state WP4 deleted); and "my punch failed" is a claim
+// no server can verify anyway, so gating on it buys nothing.
+//
+// Issuing early is cheap because the ticket is bound to the buddy's ephemeral
+// key: one seen on the wire is inert without the matching private key. It is the
+// proof of possession that carries the security here, not the timing. A pairing
+// that then succeeds directly simply discards its ticket.
+//
+// The validity span is the relay's maximum (ticket.MaxTTL). The server cannot
+// know a buddy's --punch duration, so it cannot compute "punch + 60s bind
+// window" itself; the buddy caps --punch at punchDurMax instead, which is what
+// guarantees the intended bind window still fits inside the ticket.
+//
+// Every refusal below returns nil rather than an error: no ticket means no relay
+// fallback for this pairing, which must never take the pairing itself down.
+func issueTicket(reg *hsRegistry, priv ed25519.PrivateKey, rid string, m protocol.Message, partner protocol.Peer) *protocol.RelayTicket {
+	if rid == "" || m.EphPub == "" {
+		return nil // no relay configured, or a buddy that does not want one
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(m.EphPub)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		hsDebugf("no ticket for token=%s: epk is not an Ed25519 public key", logTag(m.Token))
+		return nil
+	}
+	// Leg assignment must be derivable by BOTH buddies with no extra signaling, and
+	// it must differ between them — otherwise the two legs collide and neither can
+	// bind. Key order is the rule the data plane already uses (the lower key
+	// listens), so there is one ordering convention in the project, not two.
+	if m.PubKey == partner.PubKey {
+		hsDebugf("no ticket for token=%s: both peers registered the same identity key", logTag(m.Token))
+		return nil
+	}
+	leg := ticket.LegA
+	if m.PubKey > partner.PubKey {
+		leg = ticket.LegB
+	}
+	sid, ok := reg.sidFor(m.Token)
+	if !ok {
+		return nil
+	}
+	nonce, err := ticket.NewID()
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	payload, sig, err := ticket.Sign(priv, ticket.Payload{
+		V:     ticket.FormatVersion,
+		RID:   rid,
+		SID:   sid,
+		Leg:   leg,
+		EPK:   m.EphPub,
+		IAT:   now.Unix(),
+		EXP:   now.Add(ticket.MaxTTL).Unix(),
+		Nonce: nonce,
+	})
+	if err != nil {
+		log.Printf("NOTE: could not sign a relay ticket (%v) — this pairing has no relay fallback", err)
+		return nil
+	}
+	return &protocol.RelayTicket{
+		Payload: base64.RawURLEncoding.EncodeToString(payload),
+		Sig:     base64.RawURLEncoding.EncodeToString(sig),
+	}
+}
+
 // signedPeerList builds a server-signed PEER_LIST over (token, ts, peers). An
 // empty peers slice yields a signed "not paired yet" reply, which the QUIC
 // transport sends so a polling client retries (the UDP transport stays silent).
@@ -953,6 +1020,7 @@ func signedPeerList(priv ed25519.PrivateKey, token string, peers []protocol.Peer
 	}
 }
 
+// validField rejects empty and oversized strings before they become map keys.
 // validField rejects empty, oversized and out-of-alphabet strings before they
 // become map keys — or log lines.
 //
@@ -1067,67 +1135,6 @@ func shortHash(token string) string {
 // tokenLogKey keys the HMAC used by logTag; derived from the server identity
 // seed so only this server can reproduce a tag (no offline guessing oracle).
 var tokenLogKey []byte
-
-// cookieEpoch is the validity granularity of an address-validation cookie. A
-// cookie is accepted for the current and the previous epoch, so it lives
-// 30..60s — long enough to survive a registration's first round-trip, short
-// enough to bound replay of a captured cookie to its source address.
-const cookieEpoch = 30 * time.Second
-
-// cookieKey keys the address-validation HMAC; HKDF-derived from the identity so
-// only this server can mint/verify cookies and they need no per-source state.
-var cookieKey []byte
-
-// computeCookie is HMAC(cookieKey, epoch || canonical-ip), truncated. Binding to
-// the source IP is what makes it prove return-routability: only a host that
-// actually received the challenge at that address can echo a matching value.
-func computeCookie(ip net.IP, epoch int64) string {
-	mac := hmac.New(sha256.New, cookieKey)
-	var e [8]byte
-	binary.BigEndian.PutUint64(e[:], uint64(epoch))
-	mac.Write(e[:])
-	mac.Write(ip.To16())
-	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil)[:16])
-}
-
-// freshCookie mints a cookie for the current epoch and source IP.
-func freshCookie(ip net.IP) string {
-	return computeCookie(ip, time.Now().UnixNano()/int64(cookieEpoch))
-}
-
-// validCookie accepts a cookie matching the current or previous epoch for ip,
-// compared in constant time.
-func validCookie(c string, ip net.IP) bool {
-	if c == "" {
-		return false
-	}
-	now := time.Now().UnixNano() / int64(cookieEpoch)
-	return hmac.Equal([]byte(c), []byte(computeCookie(ip, now))) ||
-		hmac.Equal([]byte(c), []byte(computeCookie(ip, now-1)))
-}
-
-// sendCookie replies with an address-validation challenge, but only when the
-// reply is STRICTLY SMALLER than the datagram that triggered it (reqLen is the
-// raw datagram, not the parsed message — otherwise the property would hang off
-// the field layout again).
-//
-// Without that gate the challenge is a small amplifier: the parser accepts a
-// 40-byte REGISTER (`{"type":"REGISTER","token":"x","id":"x"}`) and answers it
-// with 59 bytes — 1.48x, or 1.28x once IP/UDP headers are counted. Tiny, and the
-// per-source rate limit bounds it further, but "never an amplifier" was written
-// as an absolute and has to hold as one. Comparing the two lengths makes it true
-// by construction rather than by the current encoding happening to be favourable.
-//
-// A real buddy sends ~410 bytes, so the gate has ~350 bytes of headroom and never
-// fires on legitimate traffic.
-func sendCookie(conn *net.UDPConn, src *net.UDPAddr, reqLen int) {
-	reply := protocol.Message{Type: protocol.TypeCookie, Ver: protocol.Version, Cookie: freshCookie(src.IP)}
-	b, err := json.Marshal(reply)
-	if err != nil || len(b) >= reqLen {
-		return
-	}
-	conn.WriteToUDP(b, src)
-}
 
 // deriveSubkey derives a purpose-specific 32-byte key from the identity seed via
 // HKDF: key separation, so the same secret never serves two primitives. HKDF

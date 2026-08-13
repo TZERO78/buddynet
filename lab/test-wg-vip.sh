@@ -54,9 +54,9 @@ go build -o "$ATK" ./lab/wg-vip
 sudo modprobe wireguard
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-ATKPUB=$("$BN" --key "$D/atk.key" identity)     # attacker's REAL key (victim pins it)
-VICPUB=$("$BN" --key "$D/vic.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+ATKPUB=$("$BN" --key "$D/atk.key" init)     # attacker's REAL key (victim pins it)
+VICPUB=$("$BN" --key "$D/vic.key" init)
 echo "server=$SRVPUB"; echo "attacker=$ATKPUB"; echo "victim=$VICPUB"
 
 echo "== bridge topology =="
@@ -92,7 +92,7 @@ start_attacker() { # $1 token, $2 vip-arg ("" = correct)
 }
 
 run_victim() { # $1 token, $2 logfile
-	sudo ip netns exec ns-vic env BUDDYNET_TOKEN="$1" "$BN" --role=buddy \
+	sudo ip netns exec ns-vic "$BN" --join "$1" --role=buddy \
 		--server 10.50.0.10:51820 --server-key "$SRVPUB" \
 		--key "$D/vic.key" --peer-key "$ATKPUB" --no-interactive --wireguard >"$2" 2>&1 &
 	# let it pair, run the pre-connect check, and (not) bring up the interface

@@ -48,7 +48,7 @@ func enrollServer(t *testing.T, allowed ...string) (*net.UDPAddr, ed25519.Public
 	t.Cleanup(func() { cancel(); srvConn.Close() })
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
 	reg := newHSRegistry(time.Minute)
-	go serveControlQUIC(ctx, srvConn, reg, srvPriv, authz, "", rl, nil)
+	go serveControlQUIC(ctx, srvConn, reg, srvPriv, authz, relayAdvert{}, rl, nil)
 
 	return srvConn.LocalAddr().(*net.UDPAddr), srvPriv.Public().(ed25519.PublicKey), path, authz, reg
 }
@@ -123,9 +123,11 @@ func TestQUICEnrollmentLifecycle(t *testing.T) {
 		t.Fatalf("pending entry bound to %q, want the enrolling key %q", entry.Key, stranger.pub)
 	}
 
-	// 3. The operator approves by code; the hot reload picks it up.
-	if err := AllowClient(allowPath, code); err != nil {
-		t.Fatalf("AllowClient: %v", err)
+	// 3. The operator approves BY KEY — the pending set is memory-only since
+	// v5.0.0, so the log line is what carries the key to them. The hot reload
+	// picks the approval up.
+	if err := ApproveKey(allowPath, stranger.pub, "code:"+shortHash(code)); err != nil {
+		t.Fatalf("ApproveKey: %v", err)
 	}
 	if err := authz.reload(); err != nil {
 		t.Fatalf("reload: %v", err)
@@ -353,7 +355,7 @@ func TestEnrollmentRateLimitIsStricterThanNormal(t *testing.T) {
 
 	// Burst well past the per-source enrollment allowance from one address.
 	for i := 0; i < 200; i++ {
-		m := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+		m := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(1000), m); ok {
 			t.Fatal("an unknown key must never pair")
 		}
@@ -374,7 +376,7 @@ func TestUnapprovedKeysCannotOccupyTheReplayCache(t *testing.T) {
 	reg := newHSRegistry(time.Minute)
 
 	// An approved buddy registers once; that attempt must stay protected.
-	victim := unmarshalRegister(t, mustBuild(t, approved, ""), srvPriv)
+	victim := unmarshalRegister(t, mustBuild(t, approved), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), victim); !ok {
 		t.Fatal("the approved registration should have been accepted")
 	}
@@ -390,7 +392,7 @@ func TestUnapprovedKeysCannotOccupyTheReplayCache(t *testing.T) {
 	stranger.serverPub = approved.serverPub
 	authz.enroll = nil
 	for i := 0; i < maxReplayRegs+64; i++ {
-		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
+		m := unmarshalRegister(t, mustBuild(t, stranger), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
 			t.Fatal("an unapproved key must never be accepted")
 		}
@@ -415,7 +417,7 @@ func TestUnknownKeyIsNotStored(t *testing.T) {
 	authz := newTestAuthorizer(t, srvPriv)
 	reg := newHSRegistry(time.Minute)
 
-	m := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	m := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), m); ok {
 		t.Fatal("an unknown key must not be accepted")
 	}
@@ -449,13 +451,10 @@ func TestEnrollmentLogsNoSecrets(t *testing.T) {
 	if !contains(out, keyTag(nd.pub)) {
 		t.Fatalf("expected a key tag in the log line, got %q", out)
 	}
-	// The pending FILE must not hold the cleartext code either.
-	data, err := os.ReadFile(authz.pendDB)
-	if err != nil {
-		t.Fatalf("read pending db: %v", err)
-	}
-	if contains(string(data), code) {
-		t.Fatalf("the cleartext enrollment code was persisted: %q", data)
+	// And nothing about the enrolment reaches the disk at all: the server keeps no
+	// runtime state, so there is no file that could hold the code in any form.
+	if _, err := os.Stat(authz.path + ".pending"); !os.IsNotExist(err) {
+		t.Fatalf("the server created a pending file (%v) — enrolments must stay in memory", err)
 	}
 }
 
@@ -491,7 +490,7 @@ func TestPreApprovalRegistrationIsNotReplayableAfterApproval(t *testing.T) {
 	reg := newHSRegistry(time.Minute)
 
 	// Captured while the key is still unapproved.
-	captured := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	captured := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), captured); ok {
 		t.Fatal("an unapproved key must not pair")
 	}
@@ -522,7 +521,7 @@ func TestPreApprovalRegistrationIsNotReplayableAfterApproval(t *testing.T) {
 	}
 
 	// A genuinely fresh registration from the now-approved client must work.
-	fresh := unmarshalRegister(t, mustBuild(t, nd, ""), srvPriv)
+	fresh := unmarshalRegister(t, mustBuild(t, nd), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), fresh); !ok {
 		t.Fatal("the approved client cannot register with a fresh attempt")
 	}
@@ -595,7 +594,7 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 	reg := newHSRegistry(time.Minute)
 
 	// One approved registration, which must stay protected for its whole window.
-	victim := unmarshalRegister(t, mustBuild(t, approved, ""), srvPriv)
+	victim := unmarshalRegister(t, mustBuild(t, approved), srvPriv)
 	if _, ok := pairRegister(reg, authz, "", v4(1000), victim); !ok {
 		t.Fatal("the approved registration should have been accepted")
 	}
@@ -607,7 +606,7 @@ func TestPreAuthFloodCannotEvictApprovedEntries(t *testing.T) {
 	stranger.serverPub = approved.serverPub
 	authz.enroll = nil
 	for i := 0; i < maxPreAuthRegs+256; i++ {
-		m := unmarshalRegister(t, mustBuild(t, stranger, ""), srvPriv)
+		m := unmarshalRegister(t, mustBuild(t, stranger), srvPriv)
 		if _, ok := pairRegister(reg, authz, "", v4(2000), m); ok {
 			t.Fatal("an unapproved key must never pair")
 		}
@@ -659,7 +658,7 @@ func TestMalformedRequestDropsTheConnection(t *testing.T) {
 	// Positive control on this very connection: a well-formed registration works,
 	// so anything failing below fails for the reason under test.
 	rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
-	resp, err := cli.Roundtrip(rctx, mustBuild(t, nd, ""))
+	resp, err := cli.Roundtrip(rctx, mustBuild(t, nd))
 	rcancel()
 	if err != nil || len(resp) == 0 {
 		t.Fatalf("positive control failed: a valid registration was not answered (%v)", err)
@@ -673,7 +672,7 @@ func TestMalformedRequestDropsTheConnection(t *testing.T) {
 	// The connection must be gone, not merely the request unanswered.
 	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer ncancel()
-	if resp, err := cli.Roundtrip(nctx, mustBuild(t, nd, "")); err == nil && len(resp) > 0 {
+	if resp, err := cli.Roundtrip(nctx, mustBuild(t, nd)); err == nil && len(resp) > 0 {
 		t.Fatal("the connection survived a malformed request; it must be closed")
 	}
 }

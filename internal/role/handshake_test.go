@@ -1,7 +1,6 @@
 package role
 
 import (
-	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -154,18 +153,23 @@ func TestKeylessRegisterCannotSquatASlot(t *testing.T) {
 	}
 }
 
-// requireV7Fields must sit AFTER the version check: a v6 client carries no nonce,
-// and rejecting it structurally would replace the "update buddynet" diagnostic
-// with a silent timeout — the side-by-side rollout in docs/PROTOCOL.md depends on
-// that message.
-func TestV6ClientStillGetsTheVersionDiagnostic(t *testing.T) {
-	v6 := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version - 1,
-		Token: "tok", ID: "OLD", PubKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))}
-	if _, ok := parseRegister(mustMarshal(t, v6)); !ok {
-		t.Fatal("a v6 registration must still PARSE, or it can never be told to update")
+// requireV7Fields must sit AFTER the version check: an older client carries no
+// nonce, and rejecting it structurally would replace the "update buddynet"
+// diagnostic with a silent timeout — the side-by-side rollout in docs/PROTOCOL.md
+// depends on that message.
+func TestOldClientStillGetsTheVersionDiagnostic(t *testing.T) {
+	_, srvPriv, _ := ed25519.GenerateKey(rand.Reader)
+	enc, err := bcrypto.SealCode("tok", srvPriv.Public().(ed25519.PublicKey))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if requireV7Fields(v6) {
-		t.Fatal("a v6 registration must not pass the v7 field check")
+	old := protocol.Message{Type: protocol.TypeRegister, Ver: protocol.Version - 1,
+		TokenEnc: enc, ID: "OLD", PubKey: base64.StdEncoding.EncodeToString(make([]byte, ed25519.PublicKeySize))}
+	if _, ok := parseRegister(mustMarshal(t, old)); !ok {
+		t.Fatal("an older registration must still PARSE, or it can never be told to update")
+	}
+	if requireV7Fields(old) {
+		t.Fatal("a registration without a nonce must not pass the field check")
 	}
 }
 
@@ -506,7 +510,7 @@ func TestIntegrationPairingOverQUIC(t *testing.T) {
 	t.Cleanup(func() { cancel(); srvConn.Close() })
 	reg := newHSRegistry(time.Minute)
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
-	go serveControlQUIC(ctx, srvConn, reg, srvPriv, nil, "", rl, nil)
+	go serveControlQUIC(ctx, srvConn, reg, srvPriv, nil, relayAdvert{}, rl, nil)
 
 	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
 	type result struct {
@@ -525,9 +529,9 @@ func TestIntegrationPairingOverQUIC(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		cfg := BuddyConfig{QUIC: true}
+		cfg := BuddyConfig{}
 		nd := &node{id: randomID(), pub: bcrypto.PubKeyB64(pub), vip: bcrypto.VirtualIPString(pub), priv: priv, serverPub: srvPub}
-		p, err := buddyRegisterQUIC(c, []*net.UDPAddr{srvAddr}, cfg, nd, "tok", 15*time.Second)
+		p, _, err := buddyRegister(c, []*net.UDPAddr{srvAddr}, cfg, nd, "tok", 15*time.Second, nil)
 		out <- result{peer: p, err: err}
 	}
 
@@ -547,270 +551,5 @@ func TestIntegrationPairingOverQUIC(t *testing.T) {
 		case <-time.After(20 * time.Second):
 			t.Fatalf("buddy %d timed out pairing over QUIC", i)
 		}
-	}
-}
-
-func TestCookieValidatesSourceAndEpoch(t *testing.T) {
-	cookieKey = deriveSubkey(bytes.Repeat([]byte{7}, ed25519.SeedSize), "buddynet-cookie-v1")
-	ip := net.IPv4(203, 0, 113, 5)
-
-	c := freshCookie(ip)
-	if !validCookie(c, ip) {
-		t.Fatal("a fresh cookie must validate for its own source IP")
-	}
-	if validCookie(c, net.IPv4(203, 0, 113, 6)) {
-		t.Fatal("a cookie must not validate for a different source IP")
-	}
-	if validCookie("", ip) {
-		t.Fatal("an empty cookie must never validate")
-	}
-	if validCookie("not-a-real-cookie", ip) {
-		t.Fatal("a forged cookie must not validate")
-	}
-	// A cookie from two epochs ago is outside the accepted (now, now-1) window.
-	old := computeCookie(ip, time.Now().UnixNano()/int64(cookieEpoch)-2)
-	if validCookie(old, ip) {
-		t.Fatal("a cookie older than the previous epoch must not validate")
-	}
-}
-
-func TestIntegrationPairingOverUDP(t *testing.T) {
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	srvAddr := conn.LocalAddr().(*net.UDPAddr)
-
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("genkey: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	reg := newHSRegistry(time.Minute)
-	// Mirror Handshake's inner loop: read a datagram, hand it to handleRegister.
-	go func() {
-		buf := make([]byte, 1500)
-		for {
-			n, src, err := conn.ReadFromUDP(buf)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				continue
-			}
-			raw := make([]byte, n)
-			copy(raw, buf[:n])
-			handleRegister(conn, reg, priv, nil, "", src, raw) // nil authz = open mode
-		}
-	}()
-	t.Cleanup(func() { cancel(); conn.Close() })
-
-	dial := func() *net.UDPConn {
-		c, err := net.DialUDP("udp", nil, srvAddr)
-		if err != nil {
-			t.Fatalf("dial: %v", err)
-		}
-		return c
-	}
-	readReply := func(c *net.UDPConn) (protocol.Message, error) {
-		c.SetReadDeadline(time.Now().Add(2 * time.Second))
-		buf := make([]byte, 1500)
-		n, err := c.Read(buf)
-		if err != nil {
-			return protocol.Message{}, err
-		}
-		var m protocol.Message
-		return m, json.Unmarshal(buf[:n], &m)
-	}
-	// register performs the address-validation cookie round-trip transparently:
-	// the first REGISTER is answered with a COOKIE challenge, which the second
-	// REGISTER echoes. Callers then read the validated reply (parked or PEER_LIST).
-	register := func(c *net.UDPConn, priv ed25519.PrivateKey, token, id, pk string) {
-		b, _ := json.Marshal(signReg(t, priv, regMsg(token, id, pk)))
-		if _, err := c.Write(b); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-		r, err := readReply(c)
-		if err != nil || r.Type != protocol.TypeCookie || r.Cookie == "" {
-			t.Fatalf("expected cookie challenge, got %+v (err %v)", r, err)
-		}
-		m := signReg(t, priv, regMsg(token, id, pk))
-		m.Cookie = r.Cookie
-		b, _ = json.Marshal(m)
-		if _, err := c.Write(b); err != nil {
-			t.Fatalf("write: %v", err)
-		}
-	}
-
-	a, b := dial(), dial()
-	defer a.Close()
-	defer b.Close()
-
-	// Real Ed25519 identities: the server derives each peer's virtual IP from its
-	// key, so a placeholder string would be rejected as an inconsistent identity.
-	pkAPub, pkAPriv, _ := ed25519.GenerateKey(rand.Reader)
-	pkBPub, pkBPriv, _ := ed25519.GenerateKey(rand.Reader)
-	pkA, pkB := bcrypto.PubKeyB64(pkAPub), bcrypto.PubKeyB64(pkBPub)
-
-	// A registers first and should get no reply yet (parked).
-	register(a, pkAPriv, "tok", "A", pkA)
-	a.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	if _, err := a.Read(make([]byte, 1500)); err == nil {
-		t.Fatal("A got a reply while still alone; expected to be parked")
-	}
-
-	// B registers and must immediately receive a signed PEER_LIST naming A.
-	register(b, pkBPriv, "tok", "B", pkB)
-	got, err := readReply(b)
-	if err != nil {
-		t.Fatalf("B read: %v", err)
-	}
-	if got.Type != protocol.TypePeerList || len(got.Peers) != 1 {
-		t.Fatalf("B got %+v, want a one-peer PEER_LIST", got)
-	}
-	if got.Peers[0].ID != "A" || got.Peers[0].PubKey != pkA {
-		t.Fatalf("B got peer %+v, want A/%s", got.Peers[0], pkA)
-	}
-	// The server must publish the virtual IP DERIVED from the key, never a
-	// client-supplied claim.
-	if want := bcrypto.VirtualIPString(pkAPub); got.Peers[0].VirtualIP != want {
-		t.Fatalf("B got vip %q for A, want the key-derived %q", got.Peers[0].VirtualIP, want)
-	}
-	if len(got.Peers[0].Candidates) < 1 {
-		t.Fatal("B got no candidates for A")
-	}
-	// The server's signature must verify against its public key over the
-	// canonical roster exactly as received.
-	sig, err := base64.StdEncoding.DecodeString(got.Sig)
-	if err != nil {
-		t.Fatalf("decode sig: %v", err)
-	}
-	if !ed25519.Verify(pub, protocol.PeerListPayload("tok", got.Ts, canonicalPeers(got.Peers)), sig) {
-		t.Fatal("server signature did not verify")
-	}
-	// Tampering with the partner's public key must invalidate the signature.
-	tampered := canonicalPeers(got.Peers)
-	tampered[0].PubKey = "attacker-key"
-	if ed25519.Verify(pub, protocol.PeerListPayload("tok", got.Ts, tampered), sig) {
-		t.Fatal("signature still valid after tampering with the public key")
-	}
-
-	// A re-registers (retransmit) and now learns about B.
-	register(a, pkAPriv, "tok", "A", pkA)
-	got, err = readReply(a)
-	if err != nil {
-		t.Fatalf("A read: %v", err)
-	}
-	if len(got.Peers) != 1 || got.Peers[0].ID != "B" || got.Peers[0].PubKey != pkB {
-		t.Fatalf("A got %+v, want peer B/%s", got.Peers, pkB)
-	}
-}
-
-// The paired-once latch must be released with the token, or two things break: it
-// grows until maxTokens while the tokens behind it are long gone, and a pair that
-// separates and pairs AGAIN is never announced a second time. The eviction path
-// released it; the reaper did not.
-func TestPairedLatchIsReleasedWhenTheTokenIsReaped(t *testing.T) {
-	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
-	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
-	aB64 := base64.StdEncoding.EncodeToString(aPub)
-	xB64 := base64.StdEncoding.EncodeToString(xPub)
-	tokenLogKey = []byte("test-log-key")
-
-	pair := func(reg *hsRegistry) string {
-		t.Helper()
-		return captureLog(t, func() {
-			pairRegister(reg, nil, "", v4(1000), signReg(t, aPriv, protocol.Message{
-				Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: aB64}))
-			pairRegister(reg, nil, "", v4(2000), signReg(t, xPriv, protocol.Message{
-				Type: protocol.TypeRegister, Token: "tok", ID: "X", PubKey: xB64}))
-		})
-	}
-
-	// A TTL short enough that one reap tick clears the bucket.
-	reg := newHSRegistry(50 * time.Millisecond)
-	if out := pair(reg); !contains(out, "PAIRED:") {
-		t.Fatal("setup: the first pairing must be logged")
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go reg.reap(ctx)
-	if !waitFor(t, 3*time.Second, func() bool {
-		reg.mu.Lock()
-		defer reg.mu.Unlock()
-		return len(reg.waiting) == 0
-	}) {
-		t.Fatal("the reaper never dropped the expired token")
-	}
-
-	reg.mu.Lock()
-	latched := len(reg.pairedLogged)
-	reg.mu.Unlock()
-	if latched != 0 {
-		t.Errorf("the paired-once latch still holds %d token(s) after the reaper cleared them — it leaks", latched)
-	}
-	// And a genuine RE-pairing of the same token is announced again.
-	if out := pair(reg); !contains(out, "PAIRED:") {
-		t.Error("a token that paired again after expiring was never logged — the latch is permanent")
-	}
-}
-
-// The paired-once latch must also be released on the INLINE expiry path, with no
-// reaper involved at all: upsert drops peers whose TTL has passed while it looks
-// for a partner, so a token can lose its partner and gain a new one between two
-// reap ticks — or in a registry whose reaper was never started.
-//
-// Deliberately no reg.reap() here. If this test needed one, it would be testing
-// the path that was already fixed.
-func TestPairedLatchResetsWithoutTheReaper(t *testing.T) {
-	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
-	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
-	yPub, yPriv, _ := ed25519.GenerateKey(rand.Reader)
-	aB64 := base64.StdEncoding.EncodeToString(aPub)
-	xB64 := base64.StdEncoding.EncodeToString(xPub)
-	yB64 := base64.StdEncoding.EncodeToString(yPub)
-	tokenLogKey = []byte("test-log-key")
-
-	reg := newHSRegistry(80 * time.Millisecond)
-	regOnce := func(priv ed25519.PrivateKey, id, pk string, port int) string {
-		t.Helper()
-		return captureLog(t, func() {
-			pairRegister(reg, nil, "", v4(port), signReg(t, priv, protocol.Message{
-				Type: protocol.TypeRegister, Token: "tok", ID: id, PubKey: pk}))
-		})
-	}
-
-	// 1./2. A and X pair; announced exactly once.
-	regOnce(aPriv, "A", aB64, 1000)
-	if out := regOnce(xPriv, "X", xB64, 2000); strings.Count(out, "PAIRED:") != 1 {
-		t.Fatalf("setup: first pairing produced %d PAIRED lines, want 1", strings.Count(out, "PAIRED:"))
-	}
-
-	// 3. X goes stale. A re-registers: upsert expires X INLINE while looking for a
-	//    partner, so the token is back to one live peer.
-	time.Sleep(120 * time.Millisecond)
-	reg.mu.Lock()
-	_, xStillThere := reg.waiting["tok"]["X"]
-	reg.mu.Unlock()
-	if !xStillThere {
-		t.Fatal("setup: X should still be in the bucket until an upsert expires it")
-	}
-	regOnce(aPriv, "A", aB64, 1000)
-	reg.mu.Lock()
-	live := len(reg.waiting["tok"])
-	latched := len(reg.pairedLogged)
-	reg.mu.Unlock()
-	if live != 1 {
-		t.Fatalf("after the inline expiry the token holds %d peers, want 1 (A only)", live)
-	}
-	if latched != 0 {
-		t.Errorf("the paired-once latch survived the drop to one live peer (%d entries) — "+
-			"a genuinely new pairing on this token will never be announced", latched)
-	}
-
-	// 4./5. A NEW second peer arrives: this is a new pairing and must be logged.
-	if out := regOnce(yPriv, "Y", yB64, 3000); strings.Count(out, "PAIRED:") != 1 {
-		t.Fatalf("the new pairing produced %d PAIRED lines, want exactly 1", strings.Count(out, "PAIRED:"))
 	}
 }
