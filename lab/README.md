@@ -226,7 +226,11 @@ docker compose down -v
 rm -f .env
 ```
 
-After `down -v` the next `./setup.sh` generates a fresh server identity.
+After `down -v` the key volume is gone, so the next `./setup.sh` runs `init` and
+creates a fresh server identity — which means the buddies in the lab pin the new
+key on their next start. (A real server never creates its own key: it refuses to
+start, so a lost volume is loud rather than silent. `setup.sh` is doing the `init`
+for you.)
 
 ## How this maps to a real deployment
 
