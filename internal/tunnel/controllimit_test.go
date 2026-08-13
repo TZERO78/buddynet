@@ -26,7 +26,7 @@ func controlTestServer(t *testing.T) (*ControlServer, *net.UDPAddr, ed25519.Publ
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		srvConn.Close()
 		t.Fatalf("ListenControl: %v", err)
@@ -261,7 +261,7 @@ func TestOversizeRequestIsRejectedNotTruncated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestSlotsAreReleasedOnEveryExitPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

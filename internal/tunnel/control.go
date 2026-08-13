@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -257,6 +258,13 @@ type ControlServer struct {
 	perIP     map[string]int // normalized source IP -> open connections
 	rejected  int64          // refusals since the last logged line
 	lastLogAt time.Time
+
+	// allowed restricts which source networks may reach the control plane at all.
+	// Empty means open (the default). Read-only after construction, so it needs no
+	// lock. Enforced in acceptConns BEFORE a slot is handed out — it used to be
+	// checked in the REGISTER handler, i.e. after TLS and after the slot was taken,
+	// so a disallowed source could still occupy capacity.
+	allowed []netip.Prefix
 }
 
 // connLoop returns the per-connection handler: the test override if one is
@@ -280,6 +288,29 @@ func (s *ControlServer) connLoop() func(*ControlServer, *quic.Conn) {
 // finding H-01 happened: this one aggregated to /64 while the relay keyed per
 // exact address, so a single /64 bypassed the relay's caps entirely.
 func ipKey(a net.Addr) string { return netkey.FromAddr(a) }
+
+// sourceAllowed reports whether a source may reach the control plane at all. An
+// empty allowlist is open (the default).
+func (s *ControlServer) sourceAllowed(remote net.Addr) bool {
+	if len(s.allowed) == 0 {
+		return true
+	}
+	ua, ok := remote.(*net.UDPAddr)
+	if !ok {
+		return false
+	}
+	a, ok := netip.AddrFromSlice(ua.IP)
+	if !ok {
+		return false
+	}
+	a = a.Unmap()
+	for _, p := range s.allowed {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
 
 // admit reserves a connection slot for a source, returning the release closure.
 // The closure is idempotent, so calling it on several exit paths is safe and
@@ -334,8 +365,26 @@ func (s *ControlServer) noteRejection() {
 // handshake server bind REGISTER.PubKey to the key that actually authenticated —
 // and decide, per key, between "allowlisted", "enrolling with a code" and
 // "refused". The TLS layer itself makes no authorization decision.
-func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duration) (*ControlServer, error) {
+// allowed restricts which source networks may reach the control plane. An empty
+// slice keeps it open, which is the default; a non-empty one is enforced BEFORE a
+// connection is given a slot (see acceptConns) rather than in the REGISTER
+// handler, where it used to sit — after TLS and after the slot was already taken.
+func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duration, allowed []netip.Prefix) (*ControlServer, error) {
 	tr := &quic.Transport{Conn: conn}
+	// QUIC Retry for every unvalidated source (RFC 9000 §8.1.2). Without this,
+	// quic-go creates a connection — and runs the whole TLS/Ed25519 handshake — for
+	// any peer that sends a well-formed Initial, INCLUDING a spoofed one, and the
+	// per-source caps below never see it because they only apply once a connection
+	// exists. Retry costs one extra round trip on connection setup, which for a
+	// buddy that dials once per reconnect is nothing, and in exchange nothing but a
+	// small stateless token is produced for an address that has not proven it can
+	// receive packets.
+	//
+	// quic-go suggests gating this on "a suspiciously high number of connections".
+	// Deliberately not done: a threshold is one more thing to tune wrong, and the
+	// traffic here is a handful of dials per day. Always validating is the simpler
+	// and stricter rule.
+	tr.VerifySourceAddress = func(net.Addr) bool { return true }
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{selfSignedCert(priv)},
 		MinVersion:   tls.VersionTLS13,
@@ -355,7 +404,7 @@ func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duratio
 		tr.Close()
 		return nil, err
 	}
-	s := &ControlServer{tr: tr, ln: ln, reqs: make(chan *ControlRequest), done: make(chan struct{}), perIP: map[string]int{}}
+	s := &ControlServer{tr: tr, ln: ln, reqs: make(chan *ControlRequest), done: make(chan struct{}), perIP: map[string]int{}, allowed: allowed}
 	go s.acceptConns()
 	return s, nil
 }
@@ -370,6 +419,17 @@ func (s *ControlServer) acceptConns() {
 		qc, err := s.ln.Accept(context.Background())
 		if err != nil {
 			return // listener closed
+		}
+		// Source allowlist BEFORE the slot: a disallowed source must not be able to
+		// occupy one of the 256 connection slots, which is what it could do while
+		// this check lived in the REGISTER handler. TLS has already run by the time
+		// quic-go hands us a connection — that is unavoidable with this library — but
+		// nothing of BuddyNet's own capacity is spent, and the connection is closed
+		// rather than left to idle out.
+		if !s.sourceAllowed(qc.RemoteAddr()) {
+			s.noteRejection()
+			qc.CloseWithError(0, "source not allowed")
+			continue
 		}
 		release, ok := s.admit(qc.RemoteAddr())
 		if !ok {

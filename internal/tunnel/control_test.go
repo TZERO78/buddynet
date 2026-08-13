@@ -71,7 +71,7 @@ func TestControlRoundtripAndSocketReuse(t *testing.T) {
 		t.Fatalf("server listen: %v", err)
 	}
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestControlRejectsWrongServerKey(t *testing.T) {
 
 	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestControlReportsAuthenticatedClientKey(t *testing.T) {
 
 	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestControlRequiresAClientCertificate(t *testing.T) {
 
 	srvConn, _ := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	defer srvConn.Close()
-	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second)
+	srv, err := ListenControl(srvConn, srvPriv, 30*time.Second, nil)
 	if err != nil {
 		t.Fatalf("ListenControl: %v", err)
 	}

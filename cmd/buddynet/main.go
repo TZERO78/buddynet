@@ -98,7 +98,7 @@ func main() {
 	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
 	listen := flag.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr))
 	relayListenFlag := flag.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr))
-	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); other sources are dropped before any crypto (empty = open to all)")
+	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); a disallowed source is refused before it can occupy a connection slot, and on the relay before any crypto (empty = open to all)")
 	relayMaxSessions := flag.Int("relay-max-sessions", 0, "relay: max concurrent sessions (abuse ceiling; 0 = default 4096). Lower it for a small private relay")
 	relayMaxLegsPerIP := flag.Int("relay-max-legs-per-ip", 0, "relay: max legs one source may hold (anti-hoarding; 0 = default 64). A source is one IPv4 address or one IPv6 /64 — every address in a /64 is free to mint, so they share this budget. Lower it for a small private relay")
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")

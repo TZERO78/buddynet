@@ -449,7 +449,7 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 		log.Print("approval mode: QUIC control authenticates every client by key at the TLS handshake; " +
 			"the allowlist decision (allow / enroll with a code / refuse) is made per REGISTER")
 	}
-	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout)
+	cs, err := tunnel.ListenControl(conn, priv, controlIdleTimeout, allowed)
 	if err != nil {
 		return err
 	}
@@ -474,7 +474,13 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) {
 	src, _ := req.Remote.(*net.UDPAddr)
 	if src == nil || !cidrAllowed(allowed, src.IP) {
-		req.Reply(nil)
+		// Belt and braces: the listener already refuses disallowed sources before a
+		// slot is handed out (tunnel.ListenControl), so reaching here means either an
+		// address type we cannot classify or a mismatch between the two checks. Drop
+		// the CONNECTION, not just the stream — answering with a closed stream left
+		// the peer holding a slot until the idle timeout, which is exactly what a
+		// source we refuse should not get.
+		req.Drop("source not allowed")
 		return
 	}
 	// Same accounting key as every other per-source budget (netkey). The QUIC
@@ -482,6 +488,12 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	// would let one /64 hold several connections AND a fresh request budget each.
 	if !rl.Allow(netkey.FromIP(src.IP)) {
 		hsStats.rateLimited.Add(1)
+		// Stream closed, connection kept: a rate limit is TRANSIENT. A buddy polling
+		// while it waits for its partner (or for an operator approval) is expected to
+		// come back a second later, and dropping its connection would turn a moment of
+		// load into a reconnect storm. The connection cap in tunnel.admit is what
+		// bounds how many slots a source can hold; this only bounds the work inside
+		// one of them.
 		req.Reply(nil)
 		return
 	}
@@ -511,11 +523,14 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	// client can be told so directly.
 	if m.Ver != protocol.Version {
 		hsStats.dropped.Add(1)
+		// Answer first — the client turns this into "update buddynet" instead of a
+		// timeout — then close the CONNECTION. A version mismatch is final: this peer
+		// cannot become compatible on this connection, so leaving it open only lets it
+		// hold a slot until the idle timeout.
 		if b, err := json.Marshal(replyIncompatible()); err == nil {
 			req.Reply(b)
-		} else {
-			req.Reply(nil)
 		}
+		req.Drop("protocol version mismatch")
 		return
 	}
 	// Same order as the UDP path: the key-ownership fields are required once the
@@ -541,6 +556,12 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 	}
 	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
 	if !ok {
+		// Connection kept on purpose. "Not ok" here is usually "no partner yet" — the
+		// normal state of a buddy waiting to be paired, which polls about once a
+		// second — or "not approved yet", where the client MUST keep polling to notice
+		// the operator's approval. Closing on either would break pairing itself. The
+		// genuinely final refusals above (bad version, forged key, unopenable token)
+		// do drop the connection.
 		req.Reply(nil)
 		return
 	}
