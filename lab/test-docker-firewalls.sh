@@ -20,6 +20,12 @@
 # Needs: docker, the wireguard kernel module on the host, NET_ADMIN (containers
 # run --privileged so firewalld/ufw can manage the ruleset and kernel-WG works).
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 
 IMG=buddynet-fw-lab
@@ -57,7 +63,7 @@ BPUB=$(gen_key "$KD/b")
 echo "== start server (handshake + relay) =="
 docker run -d --name fw-server --network "$NET" --ip "$SRVIP" \
 	-v "$KD/srv":/var/lib/buddynet --entrypoint buddynet "$IMG" \
-	--role=handshake,relay --listen "0.0.0.0:51820" --relay-listen "0.0.0.0:51821" \
+	--role=handshake,relay --relay-id "$RID" --listen "0.0.0.0:51820" --relay-listen "0.0.0.0:51821" \
 	--key /var/lib/buddynet/id.key --relay-endpoint "$SRVIP:51821" >/dev/null
 
 wait_log() { # $1 container, $2 pattern

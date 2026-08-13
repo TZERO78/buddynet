@@ -23,6 +23,12 @@
 # needs a TTY), so each runs under `script` which allocates a pty; the SAS the
 # buddy prints to that pty is captured and scraped. Needs root + the wg module.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 D=/tmp/wgmitm
 BN="$D/bn"
@@ -101,7 +107,11 @@ scrape_sas() { # $1 logfile
 start_server() { # $1 roles, $2 relay-endpoint, [relay-listen]
 	local extra=""
 	[ -n "${3:-}" ] && extra="--relay-listen $3"
-	sudo ip netns exec ns-srv "$BN" --role="$1" \
+	# --relay-id is passed in both phases: in phase 2 it is what lets the honest
+	# relay in this same process accept the pairing at all, and in phase 1 it
+	# changes nothing — the attacker's fake relay never checks a ticket, which is
+	# the point of the phase (a relay cannot be trusted, so nothing rests on it).
+	sudo ip netns exec ns-srv "$BN" --role="$1" --relay-id "$RID" \
 		--listen 0.0.0.0:51820 --relay-endpoint "$2" $extra \
 		--key "$D/srv.key" >"$D/srv.log" 2>&1 &
 	SRVPID=$!
