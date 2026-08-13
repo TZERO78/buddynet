@@ -9,7 +9,8 @@ import (
 )
 
 // lockFile takes an exclusive advisory lock on path+".lock" so that the server
-// and the operator's `approve`/`revoke`/`allowclient` invocations — separate
+// and the operator's `approve`/`revoke` invocations, or the buddy and a `peers
+// remove` — separate
 // processes — serialise their read-modify-write of a state file and never lose an
 // update.
 //

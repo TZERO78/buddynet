@@ -42,11 +42,10 @@ accepting a weaker proof. Run the two versions side by side instead:
    restart v7 on it; buddies then need one more `--server` change, so it is
    usually simpler to keep the new port.
 
-**Writable state must not be shared.** Give the v7 server its own `--key`-adjacent
-paths for everything it writes — in particular `<authorized>.pending`, which both
-processes would otherwise rewrite under each other, losing enrollments. In
-approval mode, **copy** the allowlist to the v7 server rather than pointing both
-at the same file: two processes appending and atomically renaming the same path
+**Writable state must not be shared.** Since v5.0.0 the control server writes
+nothing at runtime (pending enrolments live in memory), so the only file to think
+about is the allowlist. In approval mode, **copy** it to the v7 server rather than
+pointing both at the same file: two processes appending and atomically renaming the same path
 will drop each other's approvals. Copy it before migrating, or the first buddy to
 move finds itself unapproved — `--authorized` is fail-closed, so an empty file
 means nobody pairs. Approvals made during the migration have to be applied to

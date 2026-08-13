@@ -132,9 +132,34 @@ else
 	ok "un-approved clients did not pair"
 fi
 
-step "operator approves both codes (server keeps running)"
-"$BIN" --authorized "$ALLOW" allowclient "$CODE_A" >>"$DIR/admin.log" 2>&1 || bad "allowclient A failed"
-"$BIN" --authorized "$ALLOW" allowclient "$CODE_B" >>"$DIR/admin.log" 2>&1 || bad "allowclient B failed"
+step "the server keeps NO runtime state on disk (v5.0.0)"
+if [ -e "$ALLOW.pending" ]; then
+	bad "the server wrote $ALLOW.pending — pending enrolments must live in memory only"
+else
+	ok "no pending file: the control server keeps no runtime database"
+fi
+if "$BIN" --authorized "$ALLOW" allowclient "$CODE_A" >>"$DIR/admin.log" 2>&1; then
+	bad "allowclient still succeeds — it was removed in v5.0.0"
+else
+	if grep -q "approve <CLIENT-PUBKEY>" "$DIR/admin.log"; then
+		ok "allowclient refuses with an actionable message pointing at approve"
+	else
+		bad "allowclient failed without telling the operator what to do instead"
+	fi
+fi
+
+step "operator approves both KEYS from the log line (server keeps running)"
+# The log line is the only route now, so take the keys from it exactly as an
+# operator would: AUTHZ: action=pending key=… — approve with: … approve <KEY>
+PKEY_A=$(grep -o "approve [A-Za-z0-9+/=]\{40,\}" "$DIR/srv.log" | awk '{print $2}' | sed -n 1p)
+PKEY_B=$(grep -o "approve [A-Za-z0-9+/=]\{40,\}" "$DIR/srv.log" | awk '{print $2}' | sed -n 2p)
+if [ -z "$PKEY_A" ] || [ -z "$PKEY_B" ]; then
+	bad "could not read the client keys from the server log — the approve hint is unusable"
+else
+	ok "the log line carries a ready-to-run approve command for each client"
+fi
+"$BIN" --authorized "$ALLOW" approve "$PKEY_A" >>"$DIR/admin.log" 2>&1 || bad "approve A failed"
+"$BIN" --authorized "$ALLOW" approve "$PKEY_B" >>"$DIR/admin.log" 2>&1 || bad "approve B failed"
 if [ "$(grep -c . "$ALLOW")" = "2" ]; then
 	ok "both keys are on the allowlist"
 else
@@ -143,7 +168,7 @@ fi
 if grep -qE "$CODE_A|$CODE_B" "$ALLOW"; then
 	bad "the cleartext code was written into the allowlist"
 else
-	ok "the allowlist stores a hashed code label, not the code"
+	ok "the allowlist holds no cleartext enrollment code"
 fi
 
 step "the SAME running clients now pair — no restart"
