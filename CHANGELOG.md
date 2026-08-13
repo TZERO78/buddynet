@@ -223,6 +223,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   field** — the exact shape the original fix called out as "the test blessing the
   hole". It asserts the opposite again.
 
+- **A live rescope to `--expose all` REMOVED the rules (regression, v8 only).**
+  The same mistake as below, one function over and one degree worse:
+  `reprogramScope` — the SIGHUP manifest-reload path — called `nft.Remove` for the
+  `all` scope. Editing a buddy's `expose:` to `all` and reloading therefore did not
+  merely fail to install the forward drop, it **took the existing one away**, live,
+  on a tunnel that stayed up, with nothing in the log to say that buddy had just
+  become a route into the LAN. Found by asking which other functions branch on
+  `scope.All` after fixing the one below.
+
 - **`--expose all` installed no nftables rules at all (regression, v8 only).**
   `applyScope` returned before `nft.Apply` for the `all` scope, on the old
   reasoning that "whole host" means "nothing to install". That stopped being true

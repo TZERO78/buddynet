@@ -124,3 +124,51 @@ func TestApplyScopeTeardownRemovesTheRules(t *testing.T) {
 		t.Fatalf("teardown removed %v, want exactly [bnet0]", *removed)
 	}
 }
+
+// TestReprogramScopeProgramsRulesForEveryScope covers the SIGHUP reload path,
+// which had the SAME defect as applyScope in a sharper form: for `all` it called
+// nft.Remove, so editing a manifest entry to `expose: all` and reloading did not
+// merely fail to install the forward drop — it took the existing one away, live,
+// on a tunnel that stayed up, with nothing in the log to say the buddy had just
+// become a route into the LAN.
+//
+// Found by asking which OTHER functions branch on scope.All, after the same
+// mistake was fixed in applyScope. One test per decision point, not one per bug.
+func TestReprogramScopeProgramsRulesForEveryScope(t *testing.T) {
+	all, err := nft.ParseScope("all")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ports, err := nft.ParseScope("tcp/445")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		scope nft.Scope
+	}{
+		{"expose all", all},
+		{"named ports", ports},
+		{"fail-closed", nft.Scope{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			applied, removed := withFakeNFT(t, nil)
+			sc := tc.scope
+			if err := reprogramScope(BuddyConfig{}, "bnet0", &sc); err != nil {
+				t.Fatalf("reprogramScope: %v", err)
+			}
+			if len(*removed) != 0 {
+				t.Fatalf(`reprogramScope REMOVED the ruleset for %q.
+
+On a live reload that strips the forward-hook drop from a tunnel that stays up:
+the buddy silently becomes a route into whatever this host can reach.`, tc.name)
+			}
+			if len(*applied) != 1 {
+				t.Fatalf("reprogramScope called nft.Apply %d times for %q, want exactly 1", len(*applied), tc.name)
+			}
+			if (*applied)[0].All != tc.scope.All {
+				t.Fatalf("reprogramScope passed a different scope than it was given: %+v", (*applied)[0])
+			}
+		})
+	}
+}
