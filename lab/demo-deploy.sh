@@ -22,8 +22,8 @@ BN=/tmp/buddynet; [ -x "$BN" ] || go build -o "$BN" ../cmd/buddynet
 #    invite token shown in step 2 is the genuine article. ───────────────────────
 docker rm -f demo-inviter demo-joiner >/dev/null 2>&1
 rm -f /tmp/A.key /tmp/B.key
-APUB=$("$BN" --key /tmp/A.key identity); BPUB=$("$BN" --key /tmp/B.key identity)
-SRVID=$(docker exec "$SRV" buddynet --key /var/lib/buddynet/id.key identity 2>/dev/null)
+APUB=$("$BN" --key /tmp/A.key init); BPUB=$("$BN" --key /tmp/B.key init)
+SRVID=$(docker exec "$SRV" buddynet --key /var/lib/buddynet/id.key init 2>/dev/null)
 
 docker run -d --name demo-inviter --network "$NET" \
   -v /tmp/A.key:/var/lib/buddynet/id.key:ro --entrypoint /entrypoint-a.sh "$IMG" \

@@ -36,8 +36,8 @@ import (
 //
 // TRUST DOMAIN (gosec flags the two variable-path opens below as G304). Every
 // path reaching this function is an operator-supplied flag or a value derived
-// from one — --authorized and its ".pending" sibling, --peers, --known-peers, or
-// the XDG defaults behind them. No component of any path comes from the network:
+// from one — --authorized, --peers, --known-peers, or the XDG defaults behind
+// them. No component of any path comes from the network:
 // the control plane influences the CONTENT of these files (a pending entry, a
 // cached peer), never their location. A caller who can choose the path is already
 // the operator, and holds --key as well.

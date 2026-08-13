@@ -81,6 +81,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   server still does the matchmaking, it just no longer needs an operator, because
   the key is already approved.
 
+- **A server never creates its own identity any more; `init` does.** The key file
+  was created whenever the `--key` path did not exist. That is right on a genuine
+  first run and wrong every time after — and from inside the process the two are
+  indistinguishable. A volume that did not mount, a typo in `--key`, an empty
+  credentials directory, or a fresh container expected to inherit a key all led to
+  the same outcome: the server came up happily with a **new identity**, logged one
+  warning, and every buddy that had pinned the old key refused it as a possible
+  MITM. For the public matchmaker — whose entire job is to be the one key everyone
+  pinned — that is the worst silent failure available.
+
+  Creating an identity is now an explicit act:
+
+  ```bash
+  buddynet --key PATH init                    # creates it, once; refuses to replace one
+  buddynet --key PATH identity                # READS only; errors if the file is missing
+  buddynet --role=handshake --key PATH        # refuses to start without it
+  ```
+
+  `identity` used to create the key as a side effect, which meant any wrapper that
+  read the key ("print the pubkey, then start the server") could mint a fresh
+  identity after a volume was lost. It only reads now, so no automation can do
+  that by accident — creating one requires typing a command whose name nobody puts
+  in a start-up path.
+
+  **Buddies are unchanged:** a buddy still creates its key on first start. Setting
+  one up is a person on their own machine, and a buddy that loses its key has to
+  be re-pinned by its one partner — it does not lock a network out.
+
+  Both refusals name the path and print the exact command, and say what the two
+  possible causes are (first run vs. lost key), because that is the decision only
+  the operator can make.
+
 ### Changed (Breaking, `--wireguard` only)
 
 - **A buddy is no longer routed THROUGH your host: `--expose` covers this host,
@@ -130,6 +162,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   QUIC-native scenario set is separate work.
 
 ### Fixed
+
+- **Two overstated security claims corrected.** The docs said the long-lived
+  session secret is "never transmitted" / "never sent over the wire". It is
+  *derived* locally from the TLS channel binding, so nothing an observer sees
+  yields it — but on every reconnect it **is** sent to the handshake server, sealed
+  to that server's pinned key, and the server **unseals** it: it is the value the
+  server matches the two buddies on. Never in the clear, never in a log, but **not
+  a secret from the server**. A hostile server therefore knows the rendezvous value
+  and can squat a pairing; it still cannot read traffic (end-to-end between the two
+  pinned identities) or impersonate a buddy to one that pins with `--peer-key` or
+  has TOFU-pinned it. Corrected in PROTOCOL.md, ARCHITECTURE.md and TWO-BUDDIES.md.
+
+- **The Sigstore verification example was too loose to be worth much.**
+  `--certificate-identity-regexp '^https://github.com/TZERO78/buddynet'` matched
+  *any* workflow in the repo, on *any* ref, and — with no `/` after the repo name —
+  also any same-owner repository whose name merely starts with `buddynet`. It now
+  pins the release workflow **and** a version tag:
+
+  ```
+  ^https://github\.com/TZERO78/buddynet/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$
+  ```
+
+  Verified against the five cases the old pattern wrongly accepted (another
+  workflow, a branch instead of a tag, a different same-owner repo, a
+  prefix-matching repo, a non-SemVer tag).
+
+
 
 - **Concurrent peer updates no longer lose entries from `peers.json`.** `Upsert`
   mutated the roster under a lock, took a snapshot, released the lock, and only

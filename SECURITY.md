@@ -560,11 +560,25 @@ even though the process kept running.
 
 ### 8.1 Lost identity keys
 
-Identity *is* the key. If a node loses its key file, it generates a **new** one
-and logs a loud `WARNING: generated a NEW identity`. The new identity is **not**
-trusted automatically (the safe behaviour):
+Identity *is* the key, so losing the file changes who the node **is**.
 
-- **Server key lost:** every buddy must update its pinned `--server-key`.
+Since v5.0.0 the two roles behave differently on purpose:
+
+- **A server role refuses to start** without its key (`--role=handshake`, both
+  binaries). It does not generate one, because from inside the process a first run
+  and a lost key are indistinguishable — and inventing a replacement would bring
+  the node up as a *different* server that every buddy rejects as a possible MITM.
+  The refusal names the path and prints the `init` command. Creating an identity is
+  only ever `buddynet --key PATH init`, which also refuses to replace an existing
+  one.
+- **A buddy still creates its key on first start.** Setting one up is a person on
+  their own machine, and a buddy that loses its key is re-pinned by its one
+  partner rather than locking a network out.
+
+Either way the new identity is **not** trusted automatically (the safe behaviour):
+
+- **Server key lost:** restore it from backup. If you genuinely start over
+  (`init`), every buddy must update its pinned `--server-key`.
 - **Buddy key lost, `--peer-key` in use:** the partner rejects the new key as a
   mismatch until it updates the pin (like SSH's "host key changed").
 - **Buddy key lost, allowlist server:** re-enroll the new key (`--code`, then

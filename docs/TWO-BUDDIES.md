@@ -14,9 +14,14 @@ buddy at once, see [MultiPeer](PEERS.md).
 Run the bootstrap server and print the key your buddies will pin:
 
 ```bash
+# Once: create the server identity (it never creates one itself).
+buddynet --role=handshake --key /var/lib/buddynet/id.key init
+
 buddynet --role=handshake,relay \
     --key /var/lib/buddynet/id.key \
-    --relay-endpoint vps.example:51821 \
+    --relay-endpoint vps.example:51821
+
+# Print the key again any time (read-only):
 buddynet --role=handshake --key /var/lib/buddynet/id.key identity   # → SERVER_KEY
 ```
 
@@ -48,8 +53,10 @@ worthless afterwards.
 ### Reconnecting
 
 On the first successful pairing both buddies derive a long-lived **session
-secret** from the TLS channel binding (never sent over the wire) and store it
-next to the partner key. From then on just rerun **without a token** — each side
+secret** from the TLS channel binding — each side computes it locally, so it is
+never guessable from anything an observer sees — and stores it next to the partner
+key. On later reconnects it is sent to the handshake server sealed to that
+server's pinned key, as the value it matches you two on. From then on just rerun **without a token** — each side
 reconnects via the stored session secret:
 
 ```bash

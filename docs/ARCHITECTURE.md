@@ -159,8 +159,10 @@ See the `REGISTER` section of [PROTOCOL.md](PROTOCOL.md) for the wire details.
   before the key is trusted.
 - **Ephemeral pairing secret.** `--invite`/`--join` use a one-time invite token;
   after first pairing both ends derive a long-lived rendezvous **session secret**
-  from the channel binding (never transmitted) and reconnect with that. See
-  [SECURITY.md](../SECURITY.md) for the full threat model.
+  from the channel binding — computed locally, never derived from anything on the
+  wire — and reconnect with that. It travels sealed to the server's pinned key,
+  which the server unseals to match the pair: never in the clear, but not a secret
+  from the server. See [SECURITY.md](../SECURITY.md) for the full threat model.
 - **Bounded server memory.** Hard caps (`maxTokens`, two ids per token,
   capped candidates) bound memory even under spoofed source addresses; the
   attacker-growable approval-mode maps are capped and pruned.

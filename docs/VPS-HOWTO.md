@@ -65,7 +65,7 @@ cosign/Sigstore:
 ```bash
 # needs cosign installed (https://docs.sigstore.dev/system_config/installation/)
 cosign verify-blob --bundle buddynet-linux-amd64.bundle \
-  --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+  --certificate-identity-regexp '^https://github\.com/TZERO78/buddynet/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   buddynet-linux-amd64
 
@@ -227,14 +227,23 @@ and the server logs a `WARNING`. Keep QUIC on — it's the secure default.
 
 ---
 
-## 5. Start it and get the server key
+## 5. Create the identity, start it, and note the server key
+
+The server does **not** create its own key. That is deliberate: if the state
+directory is ever empty — a volume that did not mount, a typo in `--key` — it
+refuses to start instead of coming up as a *different* server that every buddy
+rejects as a possible MITM.
 
 ```bash
+# ONCE: create the identity. This prints the server key your buddies pin
+# (--server-key). Back this file up.
+sudo -u buddynet-handshake buddynet --role=handshake \
+    --key /var/lib/buddynet-handshake/id.key init
+
 sudo systemctl enable --now buddynet-handshake
 sudo systemctl enable --now buddynet-relay        # optional but recommended fallback
 
-# the server key your buddies must pin (--server-key).
-# `identity` just reads the key and prints the pubkey, then exits:
+# Print the key again later — `identity` only READS it:
 sudo buddynet --role=handshake --key /var/lib/buddynet-handshake/id.key identity
 ```
 

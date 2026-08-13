@@ -54,9 +54,9 @@ go build -o "$ATK" ./lab/wg-vip
 sudo modprobe wireguard
 
 echo "== identities =="
-SRVPUB=$("$BN" --key "$D/srv.key" identity)
-ATKPUB=$("$BN" --key "$D/atk.key" identity)     # attacker's REAL key (victim pins it)
-VICPUB=$("$BN" --key "$D/vic.key" identity)
+SRVPUB=$("$BN" --key "$D/srv.key" init)
+ATKPUB=$("$BN" --key "$D/atk.key" init)     # attacker's REAL key (victim pins it)
+VICPUB=$("$BN" --key "$D/vic.key" init)
 echo "server=$SRVPUB"; echo "attacker=$ATKPUB"; echo "victim=$VICPUB"
 
 echo "== bridge topology =="

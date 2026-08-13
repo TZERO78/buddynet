@@ -100,7 +100,7 @@ docker compose build >/dev/null 2>&1
 docker compose up -d server >/dev/null 2>&1
 
 # HowTo step 5: read the server key and pin it (also repairs a stale .env).
-KEY=$(docker compose run --rm server --key /var/lib/buddynet/id.key identity 2>/dev/null | tr -d '\r\n')
+KEY=$(docker compose run --rm server --key /var/lib/buddynet/id.key init 2>/dev/null | tr -d '\r\n')
 [ -n "$KEY" ] && ok "coordinator server key read (identity subcommand)" || no "could not read server key"
 grep -q '^BUDDYNET_SERVER_KEY=' .env 2>/dev/null && sed -i "s|^BUDDYNET_SERVER_KEY=.*|BUDDYNET_SERVER_KEY=${KEY}|" .env || echo "BUDDYNET_SERVER_KEY=${KEY}" > .env
 
@@ -109,7 +109,7 @@ grep -q '^BUDDYNET_SERVER_KEY=' .env 2>/dev/null && sed -i "s|^BUDDYNET_SERVER_K
 KEYDIR="$(mktemp -d /tmp/bnhowto.XXXXXX)"; chmod 755 "$KEYDIR"
 BN="$KEYDIR/buddynet"; go build -o "$BN" "$ROOT/cmd/buddynet" 2>/dev/null
 lab_cleanup
-APUB=$("$BN" --key "$KEYDIR/HA.key" identity); BPUB=$("$BN" --key "$KEYDIR/HB.key" identity)
+APUB=$("$BN" --key "$KEYDIR/HA.key" init); BPUB=$("$BN" --key "$KEYDIR/HB.key" init)
 
 # Machine A: serve httpd:7777, mint a one-time invite, pin B.
 docker run -d --name howto-inviter --network "$NET" \

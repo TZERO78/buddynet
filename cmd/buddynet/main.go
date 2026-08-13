@@ -149,6 +149,9 @@ func main() {
 	case flag.Arg(0) == "identity":
 		printIdentity(*keyPath)
 		return
+	case flag.Arg(0) == "init":
+		initIdentity(*keyPath)
+		return
 	}
 	// Handshake allowlist admin subcommands operate on --authorized and exit.
 	if cmd := flag.Arg(0); cmd == "approve" || cmd == "allowclient" || cmd == "list" || cmd == "revoke" {
@@ -545,16 +548,56 @@ file) and pin each other with --peer-key.
 }
 
 // printIdentity prints the base64 public key for --key (to pin in buddies).
+// printIdentity prints the public key at keyPath. It READS ONLY: creating an
+// identity is `init`, deliberately a different command.
+//
+// It used to create one when the file was missing, which quietly made every
+// wrapper that reads the key ("get the pubkey, then start the server") able to
+// mint a fresh identity after a volume was lost — the exact accident this split
+// exists to prevent.
 func printIdentity(keyPath string) {
 	if keyPath == "" {
 		fmt.Fprintln(os.Stderr, "error: set --key <path> to read the persistent identity")
 		os.Exit(2)
 	}
-	priv, _, err := bcrypto.LoadOrCreateKey(keyPath)
+	priv, _, err := bcrypto.LoadKey(keyPath)
+	if errors.Is(err, bcrypto.ErrKeyMissing) {
+		fmt.Fprintf(os.Stderr, "error: %v\n\n"+
+			"  Create it once (this is the only command that does):\n"+
+			"      buddynet --key %s init\n\n"+
+			"  If this host has run before, the key is LOST rather than absent — check the\n"+
+			"  volume or credential holding it before creating a new identity, or every\n"+
+			"  buddy that pinned the old key will refuse this node.\n", err, keyPath)
+		os.Exit(2)
+	}
 	if err != nil {
 		log.Fatalf("identity key: %v", err)
 	}
 	fmt.Println(bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey)))
+}
+
+// initIdentity creates the node's identity, once. It refuses if the file already
+// exists, so it can never re-key a node whose buddies have pinned it.
+func initIdentity(keyPath string) {
+	if keyPath == "" {
+		fmt.Fprintln(os.Stderr, "error: set --key <path> — `init` creates a persistent identity, so it needs somewhere to put it")
+		os.Exit(2)
+	}
+	priv, err := bcrypto.CreateKey(keyPath)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			fmt.Fprintf(os.Stderr, "error: %s already holds an identity — refusing to replace it.\n"+
+				"  Print the existing one with: buddynet --key %s identity\n", keyPath, keyPath)
+			os.Exit(2)
+		}
+		log.Fatalf("create identity: %v", err)
+	}
+	pub := bcrypto.PubKeyB64(priv.Public().(ed25519.PublicKey))
+	fmt.Println(pub)
+	fmt.Fprintf(os.Stderr, "\ncreated a new identity at %s\n"+
+		"  Buddies pin this key — hand it to them as --server-key (handshake server)\n"+
+		"  or --peer-key (buddy). Back the file up: losing it changes this node's\n"+
+		"  identity AND its virtual IP, and everyone has to re-pin.\n", keyPath)
 }
 
 // runPeersCmd dispatches `peers <list|add|remove|migrate>` against the
@@ -744,6 +787,7 @@ NAMES & ON-DEMAND
 
 COMMANDS
   %[1]s gen-token                            mint a strong shared token
+  %[1]s --key PATH init                         create this node's identity (once)
   %[1]s --role=handshake --key PATH identity   print the server's public key
   %[1]s --role=buddy ... --status            is my buddy online and reachable?
   %[1]s --peers-file PATH peers list|add|remove|migrate   manage your buddies (MultiPeer)
