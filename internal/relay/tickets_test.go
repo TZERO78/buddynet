@@ -171,6 +171,14 @@ func (h *harness) legAddr(sid, name string) string {
 	return ""
 }
 
+// budgetCeiling is the most a token bucket of this rate can admit over elapsed:
+// it starts full at twice the rate (ratelimit.New's burst) and refills at the
+// rate. The small constant absorbs the fraction of a token in flight when the
+// measurement is taken; it is not a fudge factor for a wrong bound.
+func budgetCeiling(rate float64, elapsed time.Duration) int64 {
+	return int64(2*rate+rate*elapsed.Seconds()) + 2
+}
+
 func addr(ip string, port int) *net.UDPAddr {
 	return &net.UDPAddr{IP: net.ParseIP(ip), Port: port}
 }
@@ -689,16 +697,21 @@ func TestMultiSourceFloodStaysBounded(t *testing.T) {
 	// behind and therefore cannot rescue. That residual is pre-existing and is
 	// stated in the docs rather than papered over here.
 	const n = 900
+	start := time.Now()
 	h.flood(t, "", n)
+	elapsed := time.Since(start)
 
 	verified := h.s.statVerify.Load()
 	if verified >= n {
 		t.Fatalf("%d of %d flood binds reached signature verification — the global budget did not hold", verified, n)
 	}
-	// The bucket starts full at twice the rate and refills while the burst runs, so
-	// this is the ceiling to expect, not the nominal rate.
-	if verified > 3*sigGlobalRate {
-		t.Fatalf("%d verifications for one burst is over the expected ceiling (~%d)", verified, 2*sigGlobalRate)
+	// The guarantee is a RATE, so the ceiling has to be expressed in time: the
+	// bucket starts full at twice the rate and refills at the rate while the burst
+	// runs. A fixed number here would only be testing how fast the machine is —
+	// which is exactly how this assertion first failed on slower CI.
+	if max := budgetCeiling(sigGlobalRate, elapsed); verified > max {
+		t.Fatalf("%d verifications in %s is over the budget ceiling %d (burst %d + %g/s)",
+			verified, elapsed.Round(time.Millisecond), max, 2*sigGlobalRate, float64(sigGlobalRate))
 	}
 	if h.legs(victim) != 1 {
 		t.Fatalf("the flood disturbed the victim session: %d leg(s)", h.legs(victim))
@@ -728,7 +741,9 @@ func TestReplayingALiveSessionIDGrantsNothing(t *testing.T) {
 	h.bind(t, va)
 
 	before := h.s.statVerify.Load()
+	start := time.Now()
 	h.flood(t, victim, 900)
+	elapsed := time.Since(start)
 
 	// No state: the reserve decides WHERE work waits, never whether it is checked.
 	if h.legs(victim) != 1 {
@@ -737,11 +752,14 @@ func TestReplayingALiveSessionIDGrantsNothing(t *testing.T) {
 	if h.legAddr(victim, ticket.LegA) != va.src.String() {
 		t.Fatal("replaying a live session id moved the bound leg")
 	}
-	// And the work it bought is bounded: the reserve is small and separately
-	// metered, so it cannot be summed with the global ceiling.
+	// And the work it bought is bounded by the two budgets it could draw on — the
+	// reserve for a half-open sid, and the global one — each expressed as a rate
+	// over the time the burst actually took.
 	spent := h.s.statVerify.Load() - before
-	if spent > 3*(sigGlobalRate+reserveRate) {
-		t.Fatalf("a known-sid flood forced %d verifications, past the reserve+global ceiling", spent)
+	max := budgetCeiling(sigGlobalRate, elapsed) + budgetCeiling(reserveRate, elapsed)
+	if spent > max {
+		t.Fatalf("a known-sid flood forced %d verifications in %s, past the reserve+global ceiling %d",
+			spent, elapsed.Round(time.Millisecond), max)
 	}
 }
 
