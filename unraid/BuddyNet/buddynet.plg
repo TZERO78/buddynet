@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.08.13">
+<!ENTITY version   "2026.08.13.2">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -26,7 +26,7 @@ rsync/borg/kopia at the local socket and back up directly between two sites — 
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
 
-###2026.08.13b
+###2026.08.13.2
 - Pinned to buddynet **v5.0.0** — a major release. **⚠ Coordinated upgrade
   required (protocol 7→8):** the handshake server **and every buddy** must be on
   v5.0.0; a v4 node will not pair with a v5 one in either direction, and there is
