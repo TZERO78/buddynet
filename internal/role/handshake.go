@@ -145,6 +145,14 @@ type hsRegistry struct {
 	// maxIDsPerToken+1 entries to bound memory). Used for squat/intrusion detection:
 	// a new pubkey on an established token fires a WARNING in the server log.
 	seenPKs map[string]map[string]struct{}
+	// pairedLogged records tokens whose PAIRED line has already been written, so
+	// the pairing is announced ONCE — at the transition — rather than on every
+	// subsequent registration. A waiting buddy re-registers about once a second and
+	// keeps doing so for as long as the tunnel lives, so the unthrottled version
+	// wrote one line per second per pair in NORMAL operation, and let anyone who
+	// knows a token turn that into a flood. Every other repeating line in this file
+	// is gated the same way. Released with the token in evict/reap.
+	pairedLogged map[string]struct{}
 	// intruderWarned records tokens for which an intrusion WARNING was already
 	// emitted, so the immediate log fires AT MOST ONCE per token even under an
 	// open-mode squat flood (the per-minute stats counters still carry the volume).
@@ -157,6 +165,7 @@ func newHSRegistry(ttl time.Duration) *hsRegistry {
 	return &hsRegistry{
 		waiting:        map[string]map[string]*hsPeer{},
 		seenPKs:        map[string]map[string]struct{}{},
+		pairedLogged:   map[string]struct{}{},
 		intruderWarned: map[string]struct{}{},
 		ttl:            ttl,
 	}
@@ -263,6 +272,14 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 		partner = p
 		break
 	}
+	// Releasing the paired-once latch when the partner is gone matters on its own,
+	// without the reaper: the loop above expires peers inline, so a token can lose
+	// its partner and gain a new one between two reap ticks — or with no reaper
+	// running at all. Clearing it only in the reaper (and in eviction) left it set
+	// across exactly that transition, and the new pairing was never announced.
+	if partner == nil {
+		delete(r.pairedLogged, m.Token)
+	}
 	return self, partner, true
 }
 
@@ -285,6 +302,7 @@ func (r *hsRegistry) evictStalestLocked() bool {
 	delete(r.waiting, victim)
 	delete(r.seenPKs, victim)
 	delete(r.intruderWarned, victim)
+	delete(r.pairedLogged, victim)
 	return true
 }
 
@@ -320,6 +338,7 @@ func (r *hsRegistry) reap(ctx context.Context) {
 				delete(r.waiting, token)
 				delete(r.seenPKs, token)        // release pubkey history when the session is gone
 				delete(r.intruderWarned, token) // and its one-shot warning latch
+				delete(r.pairedLogged, token)   // and the paired-once latch
 			}
 		}
 		r.mu.Unlock()
@@ -780,10 +799,31 @@ func pairRegister(reg *hsRegistry, authz *authorizer, relayEndpoint string, src 
 		return nil, true // ok, but no partner yet
 	}
 	hsStats.paired.Add(1)
-	log.Printf("PAIRED: token=%s a=%s/%s b=%s/%s cands=%d/%d",
-		logTag(m.Token), self.id, keyTag(self.pubkey), partner.id, keyTag(partner.pubkey),
-		len(self.cands), len(partner.cands))
+	// Announce the TRANSITION only. The ids are quoted: validField already confines
+	// them to base64url, so this is belt and braces for the day a field reaches a
+	// log line without passing it.
+	if reg.notePaired(m.Token) {
+		log.Printf("PAIRED: token=%s a=%q/%s b=%q/%s cands=%d/%d",
+			logTag(m.Token), self.id, keyTag(self.pubkey), partner.id, keyTag(partner.pubkey),
+			len(self.cands), len(partner.cands))
+	}
 	return []protocol.Peer{partner.asProtocolPeer(relayEndpoint)}, true
+}
+
+// notePaired reports whether THIS is the moment a token became paired, recording
+// it so later registrations on the same token stay quiet. Bounded by maxTokens and
+// released with the token, like the intrusion-warning latch next to it.
+func (r *hsRegistry) notePaired(token string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, done := r.pairedLogged[token]; done {
+		return false
+	}
+	if len(r.pairedLogged) >= maxTokens {
+		return false // bounded: under extreme spread skip the line (stats still fire)
+	}
+	r.pairedLogged[token] = struct{}{}
+	return true
 }
 
 // signedPeerList builds a server-signed PEER_LIST over (token, ts, peers). An
@@ -802,7 +842,33 @@ func signedPeerList(priv ed25519.PrivateKey, token string, peers []protocol.Peer
 }
 
 // validField rejects empty and oversized strings before they become map keys.
-func validField(s string) bool { return s != "" && len(s) <= protocol.MaxFieldLen }
+// validField rejects empty, oversized and out-of-alphabet strings before they
+// become map keys — or log lines.
+//
+// The alphabet is base64url, which is what every generator in the project already
+// produces: secret.NewToken (invite), deriveSessionSecret / PairSecret (reconnect
+// rendezvous), randomID (the per-run id). Before this, "non-empty and short
+// enough" also admitted CONTROL CHARACTERS, and the id is logged verbatim in the
+// PAIRED line — so a registration with an id containing a newline wrote a second,
+// forged line into the audit trail, in the operator's own log, in the format the
+// project's own log schema uses for security events.
+//
+// Sanitising at the log call would fix that one site; rejecting at the boundary
+// fixes every present and future one, and costs nothing a real client wanted.
+func validField(s string) bool {
+	if s == "" || len(s) > protocol.MaxFieldLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
 
 // verifyRegistration checks a client's key-ownership proof. m must already carry
 // the PLAINTEXT token (resolveToken ran), because that is what the client signed.

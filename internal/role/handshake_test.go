@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -395,15 +396,71 @@ func TestReapDropsStale(t *testing.T) {
 
 func TestValidField(t *testing.T) {
 	cases := map[string]bool{
-		"":                        false,
-		"ok":                      true,
-		string(make([]byte, 128)): true,  // exactly the limit
-		string(make([]byte, 129)): false, // over the limit
+		"":                           false,
+		"ok":                         true,
+		"AbC-123_xyz":                true, // base64url, what every generator emits
+		strings.Repeat("a", 128):     true, // exactly the limit
+		strings.Repeat("a", 129):     false,
+		string(make([]byte, 128)):    false, // 128 NUL bytes: the old check called this VALID
+		"ok\nSECURITY: event=forged": false, // the log-injection payload
+		"ok\rSECURITY: event=forged": false,
+		"tab\there":                  false,
+		"space here":                 false,
+		"semi;colon":                 false,
+		"quote\"here":                false,
+		"ünïcode":                    false,
 	}
 	for in, want := range cases {
 		if got := validField(in); got != want {
-			t.Errorf("validField(len %d) = %v, want %v", len(in), got, want)
+			t.Errorf("validField(%q) = %v, want %v", in, got, want)
 		}
+	}
+}
+
+// The concrete attack: REGISTER.ID is written into the PAIRED line, so an id
+// carrying a newline used to forge a second line in the operator's audit trail —
+// in the exact format the project's own log schema uses for security events.
+func TestRegisterIDCannotInjectALogLine(t *testing.T) {
+	const evil = "ok\nSECURITY: event=forged-by-attacker detail=\"injected\""
+	if validField(evil) {
+		t.Fatal("an id with a newline is still accepted at the boundary")
+	}
+	// And it cannot even reach the pairing core: parseRegister rejects it.
+	raw, err := json.Marshal(protocol.Message{
+		Type: protocol.TypeRegister, Ver: protocol.Version, Token: "tok", ID: evil,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parseRegister(raw); ok {
+		t.Fatal("a registration with a control character in its id was parsed")
+	}
+}
+
+// The pairing is announced ONCE, at the transition. A waiting buddy re-registers
+// about once a second for as long as the tunnel lives, so logging on every
+// registration wrote a line per second per pair in NORMAL operation — and let
+// anyone who knows a token turn that into a flood.
+func TestPairedIsLoggedOncePerToken(t *testing.T) {
+	aPub, aPriv, _ := ed25519.GenerateKey(rand.Reader)
+	xPub, xPriv, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := base64.StdEncoding.EncodeToString(aPub)
+	xB64 := base64.StdEncoding.EncodeToString(xPub)
+	tokenLogKey = []byte("test-log-key")
+
+	reg := newHSRegistry(time.Minute)
+	if _, ok := pairRegister(reg, nil, "", v4(1000), signReg(t, aPriv, protocol.Message{
+		Type: protocol.TypeRegister, Token: "tok", ID: "A", PubKey: aB64})); !ok {
+		t.Fatal("setup: first peer should park")
+	}
+	out := captureLog(t, func() {
+		for i := 0; i < 20; i++ {
+			pairRegister(reg, nil, "", v4(2000), signReg(t, xPriv, protocol.Message{
+				Type: protocol.TypeRegister, Token: "tok", ID: "X", PubKey: xB64}))
+		}
+	})
+	if n := strings.Count(out, "PAIRED:"); n != 1 {
+		t.Fatalf("20 registrations on a paired token produced %d PAIRED lines, want 1", n)
 	}
 }
 

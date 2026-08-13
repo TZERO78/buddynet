@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # BuddyNet forward-path test (finding M-1: --expose must not be a route into the LAN)
+#
+# SCOPE OF THIS LAB: it installs the rules through lab/pentest/applyscope, which
+# calls internal/nft.Apply directly. It therefore proves what the rules DO once
+# installed — not that the buddy path installs them. That second half regressed
+# once already (role.applyScope returned early for `--expose all`, so the forward
+# drop never reached the kernel while this lab was green), and is now covered by
+# internal/role/applyscope_test.go. Keep both.
 # ===================================================================================
 # `--expose` used to install its rules only on the nftables INPUT hook. A packet
 # that arrives on bnetN and is ROUTED onward never traverses that hook, and
