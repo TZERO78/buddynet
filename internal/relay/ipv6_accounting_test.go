@@ -134,7 +134,7 @@ func sessionCount(s *Server) int {
 // harness rather than an enforced limit.
 func TestHarnessBindsAndCookieIsEnforced(t *testing.T) {
 	conn := v4LoopbackConn(t)
-	s := NewServer(time.Minute, nil, 128, 4)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: 4})
 	src := udpAddr(t, "2001:db8:1234:5678::1", 41000)
 
 	doBind(t, s, conn, token(1), src, "")
@@ -165,7 +165,7 @@ func TestRelayIPv6BindRoundTripOverLoopback(t *testing.T) {
 		t.Skipf("BLOCKER: no IPv6 loopback socket available here: %v", err)
 	}
 	defer srv.Close()
-	s := NewServer(time.Minute, nil, 128, 4)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: 4})
 	go s.Run(srv)
 
 	cli, err := net.ListenUDP("udp6", &net.UDPAddr{IP: net.IPv6loopback})
@@ -174,7 +174,7 @@ func TestRelayIPv6BindRoundTripOverLoopback(t *testing.T) {
 	}
 	defer cli.Close()
 
-	if err := BindLeg(cli, srv.LocalAddr().(*net.UDPAddr), token(1), 5*time.Second); err != nil {
+	if err := BindLeg(cli, srv.LocalAddr().(*net.UDPAddr), token(1), 5*time.Second, nil); err != nil {
 		t.Fatalf("IPv6 bind round-trip failed: %v", err)
 	}
 	if n := sessionCount(s); n != 1 {
@@ -191,7 +191,7 @@ func TestRelayIPv6BindRoundTripOverLoopback(t *testing.T) {
 // TestLegCapSharedAcrossIPv6Slash64 is about the KEY, not about a broken cap.
 func TestLegCapEnforcedForOneExactIPv6Address(t *testing.T) {
 	conn := v4LoopbackConn(t)
-	s := NewServer(time.Minute, nil, 128, 4)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: 4})
 	src := "2001:db8:1234:5678::1"
 
 	for i := 1; i <= 4; i++ {
@@ -223,7 +223,7 @@ func TestLegCapEnforcedForOneExactIPv6Address(t *testing.T) {
 func TestLegCapSharedAcrossIPv6Slash64(t *testing.T) {
 	conn := v4LoopbackConn(t)
 	const maxLegs = 4
-	s := NewServer(time.Minute, nil, 128, maxLegs)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: maxLegs})
 
 	addrs := []string{
 		"2001:db8:1234:5678::1",
@@ -278,7 +278,7 @@ which a site gets for free — can hold the whole relay's session table.`,
 // double its allowance by reaching the relay over ::ffff:a.b.c.d.
 func TestLegCapUnmapsIPv4MappedIPv6(t *testing.T) {
 	conn := v4LoopbackConn(t)
-	s := NewServer(time.Minute, nil, 128, 2)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: 2})
 
 	plain := udpAddr(t, "192.0.2.7", 43001)
 	doBind(t, s, conn, token(300), plain, validCookieFor(s, plain))
@@ -307,7 +307,7 @@ func TestLegCapUnmapsIPv4MappedIPv6(t *testing.T) {
 func TestRefusedBindLeavesNoEmptySession(t *testing.T) {
 	conn := v4LoopbackConn(t)
 	const maxLegs = 2
-	s := NewServer(time.Minute, nil, 128, maxLegs)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: maxLegs})
 	ip := "2001:db8:dddd:1::1"
 
 	// Spend the per-source budget with real legs.
@@ -348,7 +348,7 @@ sessions and lock out unrelated users. accounting=%s`, got, maxLegs, accounting(
 // without disturbing the two legs already spliced together.
 func TestThirdLegRefusalLeavesTheSessionIntact(t *testing.T) {
 	conn := v4LoopbackConn(t)
-	s := NewServer(time.Minute, nil, 128, 64)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: 64})
 	tok := token(800)
 
 	a := udpAddr(t, "2001:db8:eeee:1::1", 47001)
@@ -384,7 +384,7 @@ func TestThirdLegRefusalLeavesTheSessionIntact(t *testing.T) {
 func TestBindRateLimitSharedAcrossIPv6Slash64(t *testing.T) {
 	conn := v4LoopbackConn(t)
 	// maxLegsPerIP high so the hoarding cap cannot be what refuses a bind here.
-	s := NewServer(time.Minute, nil, 128, 64)
+	s := New(Config{TTL: time.Minute, MaxSessions: 128, MaxLegsPerIP: 64})
 	s.bindRL = ratelimit.New(100000, 1, 8192) // global 100k/s, per-source 1/s (burst 2)
 
 	first := udpAddr(t, "2001:db8:aaaa:1::1", 44001)
@@ -437,7 +437,7 @@ Rotating through a single /64 therefore resets the per-source throttle at will.`
 // negative counter is left behind.
 func TestReapReleasesTheAccountingKeyItCharged(t *testing.T) {
 	conn := v4LoopbackConn(t)
-	s := NewServer(20*time.Millisecond, nil, 128, 1) // maxLegsPerIP=1: the budget is visible
+	s := New(Config{TTL: 20 * time.Millisecond, MaxSessions: 128, MaxLegsPerIP: 1}) // maxLegsPerIP=1: the budget is visible
 	defer s.stop()
 
 	a := udpAddr(t, "2001:db8:cccc:1::1", 45001)

@@ -168,10 +168,10 @@ func applyScope(ifName string, scope nft.Scope) (func(), error) {
 // relay forwards the encrypted WG packets to the partner's leg, exactly as it does
 // QUIC — it is never a WG peer and holds no key). conn keeps the NAT mapping the
 // bind/punch opened, so the socket handoff to kernel WG reuses it.
-func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration) (*net.UDPAddr, relay.Path, error) {
+func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration, cred *relayCred) (*net.UDPAddr, relay.Path, error) {
 	var lastErr error
 	for _, p := range chain {
-		addr, err := primeOne(conn, myID, p, session, punchDur)
+		addr, err := primeOne(conn, myID, p, session, punchDur, cred)
 		if err != nil {
 			log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, err.Error())
 			lastErr = err
@@ -193,11 +193,11 @@ func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session str
 // bnet0 (no -L/-forward). It fails closed: if WG is unavailable, no path works, or
 // the SAS is rejected, it returns an error rather than silently using another plane.
 // MultiPeer-over-bnet0 is a later step.
-func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, att attempt, partner protocol.Peer, partnerPub ed25519.PublicKey, needSAS bool, chain []relay.Path, session string) error {
+func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, att attempt, partner protocol.Peer, partnerPub ed25519.PublicKey, needSAS bool, chain []relay.Path, session string, cred *relayCred) error {
 	if !wg.Available() {
 		return errors.New("--wireguard set but kernel WireGuard is unavailable here (need Linux + NET_ADMIN + the wireguard module)")
 	}
-	remote, used, err := primeWGPath(conn, nd.id, chain, session, cfg.PunchDur)
+	remote, used, err := primeWGPath(conn, nd.id, chain, session, cfg.PunchDur, cred)
 	if err != nil {
 		return fmt.Errorf("--wireguard: %w", err)
 	}

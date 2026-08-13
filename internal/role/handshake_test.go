@@ -510,7 +510,7 @@ func TestIntegrationPairingOverQUIC(t *testing.T) {
 	t.Cleanup(func() { cancel(); srvConn.Close() })
 	reg := newHSRegistry(time.Minute)
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
-	go serveControlQUIC(ctx, srvConn, reg, srvPriv, nil, "", rl, nil)
+	go serveControlQUIC(ctx, srvConn, reg, srvPriv, nil, relayAdvert{}, rl, nil)
 
 	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
 	type result struct {
@@ -531,7 +531,7 @@ func TestIntegrationPairingOverQUIC(t *testing.T) {
 		defer c.Close()
 		cfg := BuddyConfig{}
 		nd := &node{id: randomID(), pub: bcrypto.PubKeyB64(pub), vip: bcrypto.VirtualIPString(pub), priv: priv, serverPub: srvPub}
-		p, err := buddyRegister(c, []*net.UDPAddr{srvAddr}, cfg, nd, "tok", 15*time.Second)
+		p, _, err := buddyRegister(c, []*net.UDPAddr{srvAddr}, cfg, nd, "tok", 15*time.Second, nil)
 		out <- result{peer: p, err: err}
 	}
 

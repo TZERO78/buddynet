@@ -75,6 +75,30 @@ func New(globalRate, srcRate float64, maxSources int) *Limiter {
 	}
 }
 
+// NewGlobal builds a Limiter with ONLY the global ceiling, for work that must be
+// bounded in total regardless of how it is spread across sources — a relay's
+// signature verifications, where an attacker with many real addresses stays
+// under every per-source budget while still forcing the total up. Use AllowGlobal
+// with it; Allow would charge a per-source bucket that carries no meaning here.
+func NewGlobal(rate float64) *Limiter {
+	return &Limiter{
+		globalRate:  rate,
+		globalBurst: 2 * rate,
+		global:      bucket{tokens: 2 * rate, last: time.Now()},
+		perSrc:      map[string]*bucket{},
+	}
+}
+
+// AllowGlobal charges the global bucket alone and reports whether the work may
+// proceed. It is the ceiling that holds no matter how many distinct sources the
+// load arrives from.
+func (l *Limiter) AllowGlobal() bool {
+	now := time.Now()
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.global.take(now, l.globalRate, l.globalBurst)
+}
+
 // Allow reports whether a packet from src may be processed. It charges the
 // per-source bucket first (so an over-quota source is dropped cheaply without
 // spending global budget), then the global bucket.

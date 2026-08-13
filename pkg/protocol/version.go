@@ -34,6 +34,16 @@ package protocol
 // serialised either: the pairing token travels exclusively as TokenEnc, sealed to
 // the server's pinned key. A v7 server and a v8 buddy cannot talk; upgrade both.
 // (The RELAY keeps its own cookie — a relay bind is always plain UDP.)
+//
+// v8, second breaking change BEFORE v8 SHIPPED — relay authorization tickets.
+// REGISTER carries an ephemeral relay-session key (Message.EphPub, covered by
+// RegistrationPayload), a paired PEER_LIST carries a server-signed relay ticket
+// (Message.Ticket), and a relay in ticket mode refuses the old style of bind. It
+// is folded into v8 rather than raised to v9 deliberately and only because v8 is
+// UNRELEASED: v7 is the newest version any published build speaks, so no
+// deployed node can be holding the intermediate v8 wire format. Once v5.0.0
+// ships, the same change is a v9 MAJOR — the window is the release, not the
+// version number.
 const Version = 8
 
 // MaxFieldLen bounds untrusted string fields (token, id, pubkey, virtual IP)
