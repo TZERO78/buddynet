@@ -82,11 +82,22 @@ server:
 # Once: create the identity and note the key your buddies will pin.
 buddynet --role=handshake --key /var/lib/buddynet/id.key init   # → SERVER_KEY
 
+# Once: mint the relay id (not a secret; the same value on both roles).
+buddynet gen-relay-id                                           # → RELAY_ID
+
 # Then run it (a server never creates its own key — see below):
 buddynet --role=handshake,relay \
     --key /var/lib/buddynet/id.key \
-    --relay-endpoint vps.example:51821
+    --relay-endpoint vps.example:51821 \
+    --relay-id RELAY_ID
 ```
+
+> **A relay refuses to start without an authorization policy.** `--relay-id`
+> turns on **relay tickets**: your handshake server hands each paired buddy a
+> short-lived signed permit, and the relay admits only those sessions — while
+> still learning nothing about who is in them. Serving named networks instead
+> (`--allow-cidr`) is the alternative; running a relay open to everyone is not
+> offered. See [docs/OPERATIONS.md](docs/OPERATIONS.md#relay-setup).
 
 > **Why the extra step:** the server refuses to start without its key instead of
 > generating a fresh one. A lost volume or a typo in `--key` would otherwise bring
@@ -163,6 +174,9 @@ revoke and honest caveats: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md).
   structurally (no extra round-trip), so the server is never a reflector.
 - **Fallback chain.** Direct P2P → known relay → handshake-as-relay → cached
   peer (works even if the server is offline).
+- **Authorized relay.** A relay admits only sessions your handshake server
+  signed a ticket for (bound to a fresh ephemeral key the binder must prove it
+  holds), or sources inside networks you name. It refuses to start with neither.
 - **Blind relay.** Buddies run their own QUIC/TLS end to end; a relay only
   forwards the encrypted packets, keyed by an opaque session token. It sees
   virtual IPs and ciphertext, never content.

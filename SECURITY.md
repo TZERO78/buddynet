@@ -97,6 +97,8 @@ adversary."
 | Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. The token (and the reconnect rendezvous secret) is **sealed to the server's pinned key** (`TokenEnc`), and the control plane is TLS 1.3 on top of that. | **Mitigated** |
 | Spoofed-source flood / reflection on the **handshake server** | Source address validated first (UDP cookie or QUIC) before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier (§5.2–§5.3). | **Mitigated** |
 | Spoofed-source reflection / traffic-laundering through a **relay** | A bind binds no leg until the source echoes an address-validation cookie (reply smaller than the bind); a spoofed source can never validate, so attacker data can never be forwarded to a victim address. | **Mitigated** |
+| A stranger **using your relay** (bandwidth, or hoarding capacity so your own fallback fails) | The relay admits only sessions your handshake server authorised (signed ticket bound to an ephemeral key the binder must prove) and/or named networks; it refuses to start with neither. | **Mitigated** (v5.0.0) |
+| A **compromised relay** | It holds only a public verify key: it can withhold service — which it can do by being offline anyway — but can never authorise a session, nor forge one for another relay. It still sees only ciphertext. In a COMBINED `--role=handshake,relay` process the server's signing key is in the same memory; run them separated when the relay is exposed (§6.4). | **Mitigated (separated) / reduced (combined)** |
 | **Malicious / compromised paired buddy** (WireGuard plane) | Reaches only the port(s) you `--expose`; without a scope, nothing (fail-closed). It is a *trusted* peer by construction — treat what you expose as reachable by a hostile peer and keep it patched and least-privileged (§6.3). | **Scoped** |
 | Local process on the same host | Reads the `0600` key / `known_peers`, or a TCP-loopback `-L`. Use a `unix:/path` socket and the systemd sandbox. | **Mitigated** |
 
@@ -350,8 +352,21 @@ token as a bearer secret and pin buddies with `--peer-key`.
   neither a broad flood nor one host parking connections can exhaust the table.
 - **Relay caps.** The relay carries the same per-source bind rate-limit plus a
   legs-per-source ceiling, and a refused bind leaves no session behind, so the
-  ceiling bounds table occupancy and not just legs. It stays unauthenticated
-  **by design** — the caps are abuse ceilings, not access control.
+  ceiling bounds table occupancy and not just legs. Since v5.0.0 these sit on top
+  of an authorization policy (tickets and/or a network allowlist, §6.4) rather
+  than standing in for one.
+- **Bounded signature work on the relay.** A ticketed bind costs two Ed25519
+  verifications, where a bind used to be nearly free. The address-validation
+  cookie gates all of it — an unvalidated source can never make the relay verify a
+  signature or allocate a session — and behind the cookie a **global** per-second
+  budget, a hard cap on verifications **in flight** and a separately metered,
+  per-session **reserve** bound the total. The per-source limiter alone would not:
+  an attacker with many real addresses stays under every per-source budget while
+  driving the total up. Verification also runs off the read loop, so a flood
+  cannot stall the data path the relay exists to carry.
+- **A half-open relay session expires absolutely** (60 s from creation, not
+  extendable), because a leg's idle timer is refreshed by any packet from a bound
+  source — one leg plus a trickle would otherwise hold a slot indefinitely.
 - **What counts as one source.** Every per-source budget in BuddyNet — the
   control-connection cap, the handshake rate limits, the relay's bind limiter and
   leg cap — charges the same key (`internal/netkey`): **one IPv4 address**, or
@@ -493,10 +508,64 @@ terms:
 ### 6.4 The blind relay
 
 Used only when no direct path exists. It forwards **encrypted** datagrams between
-two legs keyed by an opaque token — it sees ciphertext and virtual IPs, never
-plaintext, and holds **no key** on either plane. It cannot read or inject
-(QUIC/WireGuard authentication). It is unauthenticated by design; its abuse
-ceilings and its spoof-proof leg binding are in §5.3 and §3 (relay rows).
+two legs keyed by an opaque session id — it sees ciphertext and virtual IPs, never
+plaintext, and holds **no private key** on either plane. It cannot read or inject
+(QUIC/WireGuard authentication). Its abuse ceilings and its spoof-proof leg
+binding are in §5.3 and §3 (relay rows).
+
+**Since v5.0.0 it is no longer open.** A relay admits a session only if a
+handshake server the operator named authorised it (a signed **relay ticket**),
+and/or if the source is inside a named network. It refuses to start with neither,
+and `--allow-cidr 0.0.0.0/0` is refused rather than accepted as a policy.
+
+What the relay learns is deliberately kept minimal, and the ticket design is what
+keeps it that way:
+
+- it verifies **that** the server authorised this session, never **who** is in it.
+  A bind carries no durable identity, only an opaque server-chosen session id and
+  an ephemeral key that exists for one attempt;
+- there is **no buddy list on the relay**. Checking one would require the buddy's
+  durable key in the bind, and the relay would then know who talks to whom —
+  metadata it deliberately does not have, plus runtime state on a server, which is
+  the shape behind every persistence bug this project has had;
+- its logs carry a shortened session id, the leg and a reason. **Source addresses
+  only under `--debug`.**
+
+A ticket is bound to a **fresh ephemeral key per attempt**, and the bind must
+carry a signature by that key over the relay's own address-bound, rotating cookie.
+So a captured ticket, or an entire captured bind, is inert: it cannot be replayed
+from another address, cannot be replayed after the cookie epoch turns, and cannot
+be re-signed — the private half never leaves the buddy. A ticket authorises
+**joining, not staying**: an established session is not torn down when it expires,
+but nothing new can be bound with an expired one, including a re-bind after an
+address change.
+
+**Combined roles cost blast radius.** `--role=handshake,relay` runs both in ONE
+process, so the server's signing key sits in the memory that also parses relay
+packets: code execution reached through the relay could then **sign tickets**,
+which is strictly worse than abusing a relay — it forges authorisation for every
+relay that trusts that key. "The relay holds no private key" is a property of the
+**separated** deployment (two processes, ideally two users, ideally two hosts).
+Both are supported; they are not equivalent, and the choice belongs to whoever
+writes the command.
+
+**Residual risks, stated:**
+
+- **Clocks.** Relay and server must agree within 10 s or every ticket is refused.
+  A relay cannot tell a skewed clock from a tampered ticket, so its rejection line
+  names both causes and asserts neither.
+- **Tickets authorise, they do not meter.** A paired buddy may use the relay as
+  much as it likes. This is access control, not cost control.
+- **A packet flood still degrades a relay.** The ticket budgets (a global
+  verification ceiling, an in-flight cap, a small per-session reserve) bound the
+  *cryptographic* work an attacker with many real addresses can force. The coarse
+  per-second bind limiter that predates them sits in front and drops cheap packets
+  indiscriminately, so a flood above that rate delays legitimate binds too. It is
+  bounded, not eliminated.
+- **A live session id is not a secret.** Anyone who learns one can contend for
+  that session's own share of the small reserve. It buys no admission — both
+  signature checks still run first and no state is allocated — and it cannot reach
+  other sessions' capacity, which is what the per-session limit is for.
 
 ---
 

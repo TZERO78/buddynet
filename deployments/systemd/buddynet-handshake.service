@@ -17,7 +17,14 @@ StartLimitBurst=5
 #   sudo systemctl edit buddynet-handshake
 # and add, e.g.:  [Service]\nEnvironment=BUDDYNET_LISTEN=[::]:7000
 Environment=BUDDYNET_LISTEN=[::]:51820
-ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} --key ${STATE_DIRECTORY}/id.key
+# Optional: advertise a relay to paired buddies and issue them tickets for it.
+# The id is not a secret; mint it once with `buddynet gen-relay-id` and set the
+# SAME value on the relay unit (BUDDYNET_RELAY_POLICY there).
+#   sudo systemctl edit buddynet-handshake
+#   [Service]
+#   Environment=BUDDYNET_RELAY_ARGS=--relay-endpoint vps.example:51821 --relay-id RELAY_ID
+Environment=BUDDYNET_RELAY_ARGS=
+ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} --key ${STATE_DIRECTORY}/id.key $BUDDYNET_RELAY_ARGS
 Restart=on-failure
 RestartSec=2
 
