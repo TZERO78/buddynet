@@ -53,8 +53,10 @@ worthless afterwards.
 ### Reconnecting
 
 On the first successful pairing both buddies derive a long-lived **session
-secret** from the TLS channel binding (never sent over the wire) and store it
-next to the partner key. From then on just rerun **without a token** — each side
+secret** from the TLS channel binding — each side computes it locally, so it is
+never guessable from anything an observer sees — and stores it next to the partner
+key. On later reconnects it is sent to the handshake server sealed to that
+server's pinned key, as the value it matches you two on. From then on just rerun **without a token** — each side
 reconnects via the stored session secret:
 
 ```bash

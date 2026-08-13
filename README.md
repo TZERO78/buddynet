@@ -264,7 +264,7 @@ Release binaries are signed with [Sigstore](https://www.sigstore.dev/) (keyless
 
 ```bash
 cosign verify-blob --bundle buddynet-linux-amd64.bundle \
-  --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+  --certificate-identity-regexp '^https://github\.com/TZERO78/buddynet/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   buddynet-linux-amd64
 # -> Verified OK

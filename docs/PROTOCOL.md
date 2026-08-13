@@ -170,8 +170,19 @@ derive a long-lived **session secret** from the same channel binding
 session_secret = base64url( EKM("buddynet-session-rendezvous-v1", sort(pubA,pubB), 32) )
 ```
 
-It is **never transmitted** and becomes the `token` in REGISTER on every later
-reconnect, so the invite is retired after first use. `--join` is the legacy mode:
+It is **never derived from anything on the wire** — both ends compute it from
+their own TLS channel binding, so nothing an observer sees yields it. It then
+becomes the rendezvous `token` in REGISTER on every later reconnect, so the invite
+is retired after first use.
+
+Be precise about what that does and does not mean: on reconnect the secret **is**
+sent to the handshake server, sealed to the server's pinned key (`token_enc`), and
+the server **unseals it** — it is the value it matches the two buddies on. So it is
+never in the clear on the wire and never in a log, but it is not a secret from the
+server. A hostile server therefore knows the rendezvous value and can squat a
+pairing with it; what it still cannot do is read any traffic (the tunnel is
+end-to-end between the two pinned identities) or impersonate a buddy to one that
+pins its partner with `--peer-key` or has TOFU-pinned it. `--join` is the legacy mode:
 a fixed token reused as the rendezvous secret on every connect (no session
 secret). See [SECURITY.md](../SECURITY.md).
 
@@ -249,7 +260,7 @@ endpoint — the relay forwards ciphertext and never sees content.
 | MITM on the control path | server-signed `PEER_LIST`, pinned server key |
 | Impersonating the partner | partner cert must carry the pinned/learned pubkey |
 | MITM at first contact (TOFU) | SAS compared out of band over the TLS channel binding before the key is trusted |
-| Leaked pairing token | invite token is one-time/short-lived; the long-lived session secret is derived from the channel binding and never sent |
+| Leaked pairing token | invite token is one-time/short-lived; the long-lived session secret is derived locally from the channel binding, never in the clear on the wire, and sealed to the server's pinned key in transit (the server does see it — see above) |
 | Replaying an old roster | `ts` freshness window binds each roster in time |
 | Replaying a signed registration (approval mode) | bounded cache rejects a repeated `(pubkey, nonce)` within the freshness window |
 | Forging a peer's virtual IP in the roster | the server derives `virtual_ip` from `pubkey` and rejects any other claim |

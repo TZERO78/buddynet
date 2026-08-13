@@ -163,6 +163,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Two overstated security claims corrected.** The docs said the long-lived
+  session secret is "never transmitted" / "never sent over the wire". It is
+  *derived* locally from the TLS channel binding, so nothing an observer sees
+  yields it — but on every reconnect it **is** sent to the handshake server, sealed
+  to that server's pinned key, and the server **unseals** it: it is the value the
+  server matches the two buddies on. Never in the clear, never in a log, but **not
+  a secret from the server**. A hostile server therefore knows the rendezvous value
+  and can squat a pairing; it still cannot read traffic (end-to-end between the two
+  pinned identities) or impersonate a buddy to one that pins with `--peer-key` or
+  has TOFU-pinned it. Corrected in PROTOCOL.md, ARCHITECTURE.md and TWO-BUDDIES.md.
+
+- **The Sigstore verification example was too loose to be worth much.**
+  `--certificate-identity-regexp '^https://github.com/TZERO78/buddynet'` matched
+  *any* workflow in the repo, on *any* ref, and — with no `/` after the repo name —
+  also any same-owner repository whose name merely starts with `buddynet`. It now
+  pins the release workflow **and** a version tag:
+
+  ```
+  ^https://github\.com/TZERO78/buddynet/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$
+  ```
+
+  Verified against the five cases the old pattern wrongly accepted (another
+  workflow, a branch instead of a tag, a different same-owner repo, a
+  prefix-matching repo, a non-SemVer tag).
+
+
+
 - **Concurrent peer updates no longer lose entries from `peers.json`.** `Upsert`
   mutated the roster under a lock, took a snapshot, released the lock, and only
   then wrote the file. Two updates landing together could therefore rename an
