@@ -99,7 +99,8 @@ func TestQUICEnrollmentLifecycle(t *testing.T) {
 	}
 	// Under the lock: the server goroutine writes a.pend from its own goroutine,
 	// so reading the map bare races it (the race detector catches this on a loaded
-	// CI runner and rarely on a quiet laptop).
+	// CI runner and rarely on a quiet laptop). Every other assertion on authz
+	// internals in these tests already takes the lock; this one did not.
 	authz.mu.RLock()
 	pending := len(authz.pend)
 	authz.mu.RUnlock()
