@@ -48,6 +48,8 @@ sudo -n ip netns exec "$NS" ip link set fwordB up
 # Load the ruleset with a counter on whatever handles over-limit control traffic.
 sed 's/\$port_handshake/51820/g; s/\$port_relay/51821/g; s/\$port_ssh/22/g; /^define/d' "$CONF" \
   | sed 's/udp dport 51820 drop/udp dport 51820 counter drop/' \
+  | sed 's/udp dport 51820 limit rate \(.*\) accept/udp dport 51820 limit rate \1 counter accept/' \
+  | sed 's/udp dport 51821 accept/udp dport 51821 counter accept/' \
   | sudo -n ip netns exec "$NS" nft -f - || { bad "ruleset does not load"; exit 1; }
 info "loaded $CONF"
 
@@ -68,12 +70,45 @@ for _ in $(seq 1 400); do printf 'x' | timeout 1 socat -u - UDP-SENDTO:10.99.0.2
 sleep 1
 
 RULES=$(sudo -n ip netns exec "$NS" nft -a list chain inet buddynet input 2>/dev/null)
-echo "$RULES" | grep 51820 | sed 's/^/    /'
-DROPPED=$(echo "$RULES" | grep "51820" | grep "drop" | grep -oP 'packets \K[0-9]+' | head -1)
+echo "$RULES" | grep -E "5182[01]" | sed 's/^/    /'
+
+ACCEPTED=$(echo "$RULES" | grep 51820 | grep "limit rate" | grep -oP 'packets \K[0-9]+' | head -1)
+DROPPED=$(echo "$RULES"  | grep 51820 | grep " drop"      | grep -oP 'packets \K[0-9]+' | head -1)
+
+# POSITIVE CONTROL. Without this the test passes on a ruleset that drops
+# EVERYTHING on the control port — "over-limit traffic is dropped" is only
+# meaningful next to "within-limit traffic still gets through".
+if [ -n "${ACCEPTED:-}" ] && [ "$ACCEPTED" -gt 0 ]; then
+  ok "control traffic within the allowance is still accepted ($ACCEPTED)"
+else
+  bad "NOTHING was accepted on the control port — the ruleset is blocking legitimate traffic, so the drop count below proves nothing"
+fi
+
 if [ -n "${DROPPED:-}" ] && [ "$DROPPED" -gt 0 ]; then
   ok "over-limit control packets are dropped even on an established flow ($DROPPED)"
 else
   bad "nothing was dropped: the rate limit does not apply once the flow is established"
+fi
+
+# The relay port carries tunnel DATA and must NOT be rate-limited here: a burst
+# that trips the control-port limit has to pass on the relay port untouched.
+sudo -n ip netns exec "$NS" timeout 12 socat -u UDP-RECVFROM:51821,fork - >/dev/null 2>&1 &
+sleep 1
+for _ in $(seq 1 300); do printf 'x' | timeout 1 socat -u - UDP-SENDTO:10.99.0.2:51821 2>/dev/null; done
+sleep 1
+RULES2=$(sudo -n ip netns exec "$NS" nft -a list chain inet buddynet input 2>/dev/null)
+echo "$RULES2" | grep 51821 | sed 's/^/    /'
+# Sum every accept counter on the relay port: a ruleset that rate-limits it has
+# more than one rule, and an unthrottled one has a single accept carrying all of
+# the burst.
+RELAY_OK=$(echo "$RULES2" | grep 51821 | grep accept | grep -oP 'packets \K[0-9]+' | paste -sd+ | bc 2>/dev/null)
+RELAY_OK=${RELAY_OK:-0}
+if [ "$RELAY_OK" -ge 200 ]; then
+  ok "relay data passes unthrottled ($RELAY_OK of 300) — a control-plane rate would have cut the tunnel"
+elif echo "$RULES2" | grep 51821 | grep -q "limit rate"; then
+  bad "the relay port is rate-limited ($RELAY_OK of 300 accepted): a packet rate safe for the control port strangles the data path"
+else
+  bad "only $RELAY_OK of 300 relay packets were accepted, and no rate limit explains it"
 fi
 
 printf '\n  passed: %d   failed: %d\n\n' "$PASS" "$FAIL"

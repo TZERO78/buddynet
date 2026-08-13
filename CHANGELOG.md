@@ -228,9 +228,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   meter sized for your link, or an egress budget. Restrict *who* may reach it
   instead. Saying so beats shipping a number that looks like protection.
 
-  Measured with rule counters in `lab/test-firewall-order.sh` (new): on the old
-  ordering the limit accepted 146 packets and dropped **none**; on the new one 243
-  over-limit packets are dropped on an established flow.
+  Measured with rule counters in `lab/test-firewall-order.sh` (new), including two
+  positive controls — traffic *within* the allowance must still be accepted, and a
+  burst on the relay port must pass untouched — so "the excess is dropped" cannot
+  be satisfied by a ruleset that simply blocks everything. On the old ordering the
+  limit accepted 147 packets and dropped **none**; on the new one 253 over-limit
+  packets are dropped on an established flow while all 300 relay packets pass. The
+  lab fails against the old ruleset *and* against one that rate-limits the relay
+  port, so it tells the three states apart.
 
 
 - **The public QUIC port did work before it could refuse anyone.** Two findings
