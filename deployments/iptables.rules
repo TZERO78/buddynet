@@ -14,19 +14,31 @@
 :FORWARD DROP [0:0]
 :OUTPUT ACCEPT [0:0]
 
-# Always allow loopback and already-established flows.
 -A INPUT -i lo -j ACCEPT
--A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 -A INPUT -m conntrack --ctstate INVALID -j DROP
+
+# BuddyNet's UDP ports come BEFORE the generic ESTABLISHED,RELATED accept.
+# Conntrack marks a UDP flow established as soon as it has seen traffic both ways,
+# so once the server answers the first packet, every later packet of that 5-tuple
+# matched the accept and the limit was never reached. The excess must also be
+# dropped explicitly, or it falls through to the established rule.
+-A INPUT -p udp --dport 51820 -m limit --limit 100/second --limit-burst 50 -j ACCEPT
+-A INPUT -p udp --dport 51820 -j DROP
+
+# The relay port has NO packet-rate limit on purpose: it carries tunnel DATA, and
+# a rate safe for a control plane would throttle the tunnel. Its ceilings live in
+# the relay itself; bandwidth is a shaping/provider problem, not a packets-per-
+# second rule. Restrict WHO may reach it (--allow-cidr, or remove this line and
+# firewall the port to your buddies).
+-A INPUT -p udp --dport 51821 -j ACCEPT
+
+# Everything else that belongs to an existing conversation.
+-A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
 # ICMP (use -p icmpv6 with ip6tables-restore).
 -A INPUT -p icmp -j ACCEPT
 
 # Management.
 -A INPUT -p tcp --dport 22 -j ACCEPT
-
-# BuddyNet control + relay, rate-limited against UDP floods.
--A INPUT -p udp --dport 51820 -m limit --limit 100/second --limit-burst 50 -j ACCEPT
--A INPUT -p udp --dport 51821 -m limit --limit 100/second --limit-burst 50 -j ACCEPT
 
 COMMIT

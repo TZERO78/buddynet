@@ -187,6 +187,19 @@ own outbound connections to the buddy keep working; and that LAN→buddy forward
 is blocked — deliberately, until subnet routing exists as its own option. Every
 LAN check runs over IPv4 and IPv6.
 
+## Firewall rule-order test
+
+Proves with rule counters that the shipped ruleset's rate limit still applies once
+a UDP flow is established — it did not, because the generic `established,related
+accept` came first:
+
+```bash
+sudo -v && ./test-firewall-order.sh                  # → 2/2 passed
+./test-firewall-order.sh /path/to/old-ruleset.conf   # must FAIL
+```
+
+Needs root, `nft` and `socat`; runs in a throwaway namespace.
+
 ## Observing the tunnels
 
 ```bash

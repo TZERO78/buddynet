@@ -208,6 +208,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The shipped firewall rate limit did nothing once a flow was established.** In
+  `deployments/nftables.conf` and `deployments/iptables.rules`, the generic
+  `established,related accept` sat *above* the UDP rate limits. Netfilter marks a
+  UDP flow established as soon as it has seen traffic in both directions — so from
+  the moment the server answered the first packet (a QUIC Initial, a relay cookie
+  challenge), every later packet of that 5-tuple matched the accept and the limit
+  was never reached. QUIC also multiplexes many connections over one UDP flow, so
+  conntrack is not a per-connection quota either.
+
+  The control port is now limited *before* the established accept, and the excess
+  is dropped explicitly — without that drop, over-limit packets simply fall through
+  to the accept below.
+
+  The **relay port deliberately gets no packet-rate limit**: it carries tunnel
+  data, so a rate that is safe for a control plane would throttle the tunnel
+  itself. Its ceilings belong in the relay (per-source bind limit, legs per source,
+  session cap) and bandwidth is a shaping/provider problem — `tc`, an nftables
+  meter sized for your link, or an egress budget. Restrict *who* may reach it
+  instead. Saying so beats shipping a number that looks like protection.
+
+  Measured with rule counters in `lab/test-firewall-order.sh` (new): on the old
+  ordering the limit accepted 146 packets and dropped **none**; on the new one 243
+  over-limit packets are dropped on an established flow.
+
+
 - **The public QUIC port did work before it could refuse anyone.** Two findings
   from an independent audit pass, both confirmed against the code:
 
