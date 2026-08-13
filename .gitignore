@@ -2,6 +2,14 @@
 /buddynet
 /dist/
 *.exe
+# Compiled lab/pentest helpers. Each tool lives in a directory named after itself,
+# so `go build` inside one drops a binary right next to its source — which is how
+# a 4.5 MB executable once reached a commit. The labs build these into a temp dir;
+# nothing in the tree should ever carry the compiled form.
+/lab/pentest/applyscope/applyscope
+/lab/pentest/labtool/labtool
+/lab/pentest/probe/probe
+/lab/pentest/relayflood/relayflood
 
 # Local runtime state
 *.key
