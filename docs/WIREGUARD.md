@@ -37,7 +37,10 @@
 >   allow there too (both layers must agree; defense in depth).
 > - **Fail-closed:** if the scope cannot be enforced (ancient pre-nftables
 >   kernel), the tunnel **refuses to come up** instead of silently exposing the
->   host — `--expose all` is the explicit escape hatch.
+>   host. This now includes `--expose all`, which used to be the escape hatch:
+>   since it also has to install the rule that stops a buddy being *routed onward*,
+>   there is nothing left it could enforce without nftables — and coming up anyway
+>   would mean routing into your LAN with no way to say so.
 > - **Per buddy:** in MultiPeer, each manifest entry can carry its own `expose:`
 >   list — see [PEERS.md](PEERS.md). Precedence: per-buddy `expose` →
 >   `--expose` flag → fail-closed.

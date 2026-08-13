@@ -208,6 +208,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Log injection through client-supplied fields (regression, v8 only).** The
+  removal of the plain-UDP control plane also took out two controls that had been
+  added together on `main`: `validField` no longer confined free-form fields to
+  the base64url alphabet, and the `PAIRED` line printed ids unquoted. An id
+  carrying a newline therefore wrote a **second, forged line into the operator's
+  audit trail**, in the exact format this project uses for security events. In
+  open mode any anonymous client could do it — and `buddynet-handshake`, the
+  public matchmaker, deliberately never wires an allowlist, so it always runs open
+  mode. Both controls are restored (reject at the boundary, quote at the log
+  call), together with the two regression tests that were deleted with them.
+
+  `TestValidField` had been changed to assert that **128 NUL bytes are a valid
+  field** — the exact shape the original fix called out as "the test blessing the
+  hole". It asserts the opposite again.
+
+- **`--expose all` installed no nftables rules at all (regression, v8 only).**
+  `applyScope` returned before `nft.Apply` for the `all` scope, on the old
+  reasoning that "whole host" means "nothing to install". That stopped being true
+  when the forward-hook chain arrived: `all` opens this HOST, never the networks
+  behind it, and that drop is a rule like any other. The ruleset was built
+  correctly and simply never reached the kernel, so a buddy on an `--expose all`
+  node could still be routed into the LAN — the very thing the forward chain
+  exists to stop.
+
+  **Behaviour change:** `--expose all` now also requires kernel nftables support,
+  where it previously came up without. Without nftables the forward drop cannot
+  exist, and starting anyway would mean routing into your LAN with nothing able to
+  say so.
+
+  Worth recording *why* this survived review: every test and the network-namespace
+  lab drove `nft.buildBatch` or `nft.Apply` **directly**, so all of them stayed
+  green through a gap that sat in the layer between them. There is now a test at
+  that layer (`internal/role/applyscope_test.go`) asserting the rules are
+  programmed for every scope, and the lab tooling says in its own docs which layer
+  it does *not* cover.
+
+- **`PAIRED` was logged on every registration (regression, v8 only).** The
+  once-per-token latch went out with the same commit. A waiting buddy re-registers
+  about once a second for as long as the tunnel lives, so this wrote a line per
+  second per pair in **normal** operation — and let anyone who knows a token turn
+  it into a flood that fills the disk. The latch is back, including its release on
+  eviction, on reap, and when a token loses its partner between reap ticks.
+
+
 - **A revoked buddy can no longer be resurrected by a concurrent reconnect.** The
   `known_peers` session store is written by TWO processes — the running buddy
   (`saveSession`, on every reconnect) and the operator's CLI (`peers remove`, the
