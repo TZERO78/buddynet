@@ -7,7 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Security
+
+- **One IPv6 /64 could exhaust a public relay (unauthenticated remote DoS).** The
+  relay charged its abuse budgets — the per-source bind rate limit and the
+  per-source leg cap — against the **exact** source address, while the control
+  plane already aggregated IPv6 to a `/64`. Every address inside a `/64` is free
+  to mint, so a single one handed an attacker an unlimited supply of "distinct
+  sources": each with a fresh leg budget and a fresh token bucket, enough to fill
+  the relay's global session table and lock unrelated users out. No account, no
+  pairing and no spoofing were needed — the cookie challenge was answered
+  honestly from each address.
+
+  The accounting rule now lives in **one** place (`internal/netkey`) and every
+  per-source budget calls it: the relay's bind limiter and leg cap, the control
+  plane's connection cap, and the handshake server's request and enrollment
+  limiters. IPv4 is still charged per exact address (addresses are scarce enough
+  there that rotation is no lever, and aggregating would fold unrelated customers
+  of one provider together); IPv6 is charged per `/64`; IPv4-mapped IPv6
+  (`::ffff:a.b.c.d`) is unmapped first so it can no longer be a second budget for
+  the same host. The leg's accounting key is stored when it binds and reused when
+  it expires, so charging and releasing cannot drift apart. Cookies stay bound to
+  the exact address and forwarding stays keyed by exact address **and** port —
+  neither is affected.
+
+  Two copies of one rule is how this happened, so a test now asserts that the
+  control plane and the relay derive the *same* key for the same address.
+
+  Aggregating to `/64` removes **free** rotation inside one `/64`; it is a ceiling
+  on cheap abuse, not access control. A site delegated a `/56` or `/60`, or a
+  botnet, still commands several budgets. A public relay that should not be open
+  to strangers belongs behind `--allow-cidr` or a firewall.
+
+- **A refused bind no longer costs a global session slot.** The relay inserted a
+  session into the global table *before* checking the per-source leg cap, and left
+  it there when the leg was then refused. The per-source cap therefore bounded only
+  how many legs a source could hold, not how much of the table it could occupy: a
+  throttled source could still fill `--relay-max-sessions` with legless sessions,
+  one per token, and lock everyone else out — the same denial of service by another
+  route. A bind that is refused now takes the empty session back out. A session that
+  already belongs to another party is never touched, so refusing a third leg leaves
+  an established pair intact.
+
+  Found by the network-namespace lab after the fix above, not by the unit tests;
+  both cases are covered by regression tests now.
+
+### Added
+
+- **`lab/test-relay-accounting.sh`** — a root-only network-namespace lab that
+  claims relay legs from 65 addresses of one IPv6 `/64` (and one address of
+  another) against the real relay binary, through the real client bind path, and
+  asserts the `/64` shares one budget and cannot lock out an unrelated prefix.
+  Point `BNBIN=` at an older build to watch it fail.
 
 ## [v4.0.0] — 2026-08-11
 

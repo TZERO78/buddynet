@@ -146,6 +146,27 @@ To run with fewer buddies (3–4), trim the `BUDDIES` list in `setup-party.sh` /
 `docker-compose.party.yml`. Live add/remove on the hub works too — edit
 `party/hub.peers` (or use `buddynet … peers add/remove`) and `kill -HUP` the hub.
 
+## Relay accounting test (finding H-01: one IPv6 /64 is ONE budget)
+
+Needs root for network namespaces, but **no Docker and no `lab/.env`** — it builds
+what it needs and cleans up after itself:
+
+```bash
+sudo -v && ./test-relay-accounting.sh          # → 9/9 passed
+
+# A/B control: against a pre-fix build it must FAIL (6 passed / 2 failed).
+BNBIN=/path/to/old/buddynet ./test-relay-accounting.sh
+```
+
+Two throwaway namespaces (ULA addressing only, nothing leaves the host): an
+"attacker" holding 65 addresses of one IPv6 `/64` plus one address of another, and
+the real relay binary. Legs are claimed through the real client path, so each one
+completes an honest cookie challenge round-trip from its own address. It asserts
+that the whole `/64` shares one leg budget, that a *different* `/64` is still
+admitted, and that one `/64` cannot fill the global session table and lock an
+unrelated prefix out. See `pentest/README.md` for why the probe's `relay-hoard`
+scene does not cover this.
+
 ## Observing the tunnels
 
 ```bash

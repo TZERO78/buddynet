@@ -211,7 +211,7 @@ Always logged. Never rate-limited or silenced.
 | `SECURITY: event=key-changed token=… key=… detail=…` | The buddy's key changed for a known token. Possible MITM or key rotation. Check with the partner. |
 | `SECURITY: event=vip-mismatch key=… detail=…` | The handshake server's `PEER_LIST` claims a VIP inconsistent with the key. Hostile or buggy server. |
 | `SECURITY: event=replay-detected token=… src=… key=… id=…` | A `REGISTER` signature was seen twice within the replay window. |
-| `SECURITY: event=leg-cap-hit src=… detail=…` | One source IP holds the maximum number of relay legs — possible session hoarding. |
+| `SECURITY: event=leg-cap-hit src=… detail=…` | One source holds the maximum number of relay legs — possible session hoarding. `src` is the accounting key, so it is an IPv4 address (`203.0.113.7`) or an IPv6 **`/64`** (`2001:db8:1:2::/64`), not a single IPv6 address: every address inside a `/64` is free to mint, so they share one budget. |
 | `SECURITY: event=panic-recovered component=… detail=…` | A request/connection handler panicked and was contained (the request was dropped, the process kept running). A repeat is a bug or a panic-triggering input worth investigating; the line is throttled per component. |
 
 ### Trust events — `TRUST:`

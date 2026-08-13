@@ -351,8 +351,20 @@ token as a bearer secret and pin buddies with `--peer-key`.
   a first stream within seconds, and puts a read deadline on every request, so
   neither a broad flood nor one host parking connections can exhaust the table.
 - **Relay caps.** The relay carries the same per-source bind rate-limit plus a
-  legs-per-source ceiling. It stays unauthenticated **by design** — the caps are
-  abuse ceilings, not access control.
+  legs-per-source ceiling, and a refused bind leaves no session behind, so the
+  ceiling bounds table occupancy and not just legs. It stays unauthenticated
+  **by design** — the caps are abuse ceilings, not access control.
+- **What counts as one source.** Every per-source budget in BuddyNet — the
+  control-connection cap, the handshake rate limits, the relay's bind limiter and
+  leg cap — charges the same key (`internal/netkey`): **one IPv4 address**, or
+  **one IPv6 `/64`**, with IPv4-mapped IPv6 folded onto the IPv4 key. IPv6 is
+  aggregated because every address inside a `/64` is free to mint, so counting per
+  address counts nothing; IPv4 is not, because addresses are scarce enough there
+  that rotation is no lever and aggregating would fold unrelated customers of one
+  provider together. This removes **free** rotation inside one `/64` — it is not a
+  claim that an attacker is limited to one budget: a site delegated a `/56` or
+  `/60`, or a botnet, still commands several. Use `--allow-cidr` or a firewall for
+  a relay that should not be open to strangers.
 - **Network allowlist.** `--allow-cidr` restricts which source networks may reach
   the relay **and** the handshake server, dropping others before any crypto.
 - **Anonymised logs.** Tokens are logged only as a hash (the log-tag HMAC key is
