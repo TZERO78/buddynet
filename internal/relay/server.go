@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/tzero78/buddynet/internal/netkey"
 	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/internal/safe"
 )
@@ -38,7 +39,8 @@ import (
 const (
 	defaultMaxSessions  = 4096 // concurrent relayed sessions (override: --relay-max-sessions)
 	maxLegsPerSes       = 2    // exactly two buddies per session; reject a third (fixed)
-	defaultMaxLegsPerIP = 64   // legs one source address may hold (override: --relay-max-legs-per-ip)
+	defaultMaxLegsPerIP = 64   // legs one SOURCE may hold — one IPv4 address or one
+	// IPv6 /64, see internal/netkey (override: --relay-max-legs-per-ip)
 )
 
 // Rate-limit ceilings for bind CONTROL packets only — data forwarding is the
@@ -55,6 +57,11 @@ const (
 type leg struct {
 	addr *net.UDPAddr
 	fwd  *fwd
+	// acctKey is the budget this leg was CHARGED under at bind time
+	// (netkey.FromIP: exact IPv4, /64 for IPv6). Stored rather than re-derived at
+	// reap, so releasing can never credit a different key than binding charged —
+	// the two would drift apart the moment the rule changes again.
+	acctKey string
 }
 
 // fwd is a leg's forwarding state, read on the data HOT PATH without taking
@@ -87,9 +94,13 @@ type Server struct {
 	maxSessions  int            // concurrent session ceiling (abuse bound)
 	maxLegsPerIP int            // per-source leg ceiling (session-hoarding bound)
 
-	mu        sync.Mutex
-	sessions  map[string]*session // token -> session (under mu)
-	legsPerIP map[string]int      // source IP -> legs it holds (abuse ceiling, under mu)
+	mu       sync.Mutex
+	sessions map[string]*session // token -> session (under mu)
+	// legsPerIP counts legs per ACCOUNTING KEY (netkey: exact IPv4, /64 for IPv6),
+	// not per exact address — one IPv6 /64 is free to mint addresses in, so keying
+	// per address would count nothing (finding H-01). The same key is charged to
+	// bindRL, so a source cannot exhaust one budget and get a fresh other one.
+	legsPerIP map[string]int // accounting key -> legs it holds (abuse ceiling, under mu)
 
 	// byAddr maps a leg's source-address string -> *fwd. It is a sync.Map so the
 	// data hot path (forward) can look up the destination without taking mu;
@@ -105,14 +116,14 @@ type Server struct {
 	statPaired     atomic.Int64
 	statChallenged atomic.Int64
 	statRejected   atomic.Int64 // over-cap / outside allowlist / rate-limited
-	statHoard      atomic.Int64 // per-IP leg cap hit (possible session hoarding)
+	statHoard      atomic.Int64 // per-source leg cap hit (possible session hoarding)
 
 	// lastPanic is the process-wide recovered-panic total at the previous stats
 	// tick, so statsLoop can report the per-interval delta. Touched only by the
 	// single statsLoop goroutine, so it needs no atomic.
 	lastPanic int64
 
-	// hoardWarned throttles the per-IP leg-cap WARNING to once per statsInterval so
+	// hoardWarned throttles the per-source leg-cap WARNING to once per statsInterval so
 	// a source hammering the cap cannot turn each packet into a log line. Bounded
 	// and pruned; the counter carries the volume into the stats line.
 	hoardWarned map[string]time.Time
@@ -148,12 +159,14 @@ func (s *Server) statsLoop() {
 	}
 }
 
-// warnHoardLocked logs a per-IP leg-cap WARNING at most once per statsInterval,
-// so a source hammering the cap cannot flood the log (the counter carries the
-// volume). Caller holds s.mu.
-func (s *Server) warnHoardLocked(ip string) {
+// warnHoardLocked logs a per-source leg-cap WARNING at most once per
+// statsInterval, so a source hammering the cap cannot flood the log (the counter
+// carries the volume). acct is the accounting key (exact IPv4, or an IPv6 /64),
+// which is what the operator needs to see — the individual address inside a /64
+// is not the actor. Caller holds s.mu.
+func (s *Server) warnHoardLocked(acct string) {
 	now := time.Now()
-	if last, ok := s.hoardWarned[ip]; ok && now.Sub(last) < statsInterval {
+	if last, ok := s.hoardWarned[acct]; ok && now.Sub(last) < statsInterval {
 		return
 	}
 	if len(s.hoardWarned) >= s.maxSessions {
@@ -166,8 +179,8 @@ func (s *Server) warnHoardLocked(ip string) {
 			return // bounded: skip the line under extreme spread (stats still fire)
 		}
 	}
-	s.hoardWarned[ip] = now
-	log.Printf("SECURITY: event=leg-cap-hit src=%s detail=%q", ip, "one source holds the max legs; possible session hoarding")
+	s.hoardWarned[acct] = now
+	log.Printf("SECURITY: event=leg-cap-hit src=%s detail=%q", acct, "one source holds the max legs; possible session hoarding")
 }
 
 // NewServer returns a relay whose bindings expire after ttl with no traffic. If
@@ -307,9 +320,14 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 		s.statRejected.Add(1)
 		return
 	}
+	// One accounting key for BOTH per-source budgets below (rate limit and leg
+	// cap). Deriving it once is what keeps them identical: charging the limiter
+	// per exact address while capping legs per /64 (or vice versa) leaves whichever
+	// is looser as the bypass.
+	acct := netkey.FromIP(src.IP)
 	// Throttle bind control packets per source so a flood cannot churn sessions;
 	// data forwarding (the hot path) is never rate-limited.
-	if !s.bindRL.Allow(src.IP.String()) {
+	if !s.bindRL.Allow(acct) {
 		s.statRejected.Add(1)
 		return
 	}
@@ -331,6 +349,12 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 	}
 	s.mu.Lock()
 	ses := s.sessions[token]
+	// created tracks whether THIS call put the session in the map. Every path that
+	// then refuses the leg must take that empty session back out again — otherwise
+	// a refused bind still costs a global session slot, and the per-source leg cap
+	// stops being the binding constraint: a source throttled to N binds/second
+	// fills the whole table with LEGLESS sessions without ever holding a leg.
+	created := false
 	if ses == nil {
 		if len(s.sessions) >= s.maxSessions {
 			s.statRejected.Add(1)
@@ -339,6 +363,15 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 		}
 		ses = &session{token: token}
 		s.sessions[token] = ses
+		created = true
+	}
+	// dropIfEmptyLocked undoes the session this call created when the leg is then
+	// refused. A session we did NOT create is left alone: it belongs to whoever
+	// bound the other leg.
+	dropIfEmptyLocked := func() {
+		if created && len(ses.legs) == 0 {
+			delete(s.sessions, token)
+		}
 	}
 	key := src.String()
 	var found *leg
@@ -349,23 +382,24 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 		}
 	}
 	if found == nil {
-		ip := src.IP.String()
 		if len(ses.legs) >= maxLegsPerSes {
 			s.statRejected.Add(1)
+			dropIfEmptyLocked()
 			s.mu.Unlock()
 			return // a third party tried to join this session
 		}
-		if s.legsPerIP[ip] >= s.maxLegsPerIP {
+		if s.legsPerIP[acct] >= s.maxLegsPerIP {
 			s.statRejected.Add(1)
 			s.statHoard.Add(1)
-			s.warnHoardLocked(ip)
+			s.warnHoardLocked(acct)
+			dropIfEmptyLocked()
 			s.mu.Unlock()
 			return // one source is hoarding sessions: refuse further legs
 		}
-		found = &leg{addr: src, fwd: &fwd{}}
+		found = &leg{addr: src, fwd: &fwd{}, acctKey: acct}
 		ses.legs = append(ses.legs, found)
 		s.byAddr.Store(key, found.fwd)
-		s.legsPerIP[ip]++
+		s.legsPerIP[acct]++
 		if len(ses.legs) == 2 {
 			ses.paired = true
 			s.statPaired.Add(1)
@@ -403,14 +437,15 @@ func (s *Server) forward(conn *net.UDPConn, src *net.UDPAddr, pkt []byte) {
 	}
 }
 
-// releaseIPLocked decrements the per-IP leg count for a reaped leg, dropping the
-// entry at zero so the map mirrors live legs. Caller holds s.mu.
-func (s *Server) releaseIPLocked(ip string) {
-	if s.legsPerIP[ip] <= 1 {
-		delete(s.legsPerIP, ip)
+// releaseIPLocked decrements the leg count for a reaped leg's ACCOUNTING KEY
+// (leg.acctKey, the value charged at bind), dropping the entry at zero so the map
+// mirrors live legs. Caller holds s.mu.
+func (s *Server) releaseIPLocked(acct string) {
+	if s.legsPerIP[acct] <= 1 {
+		delete(s.legsPerIP, acct)
 		return
 	}
-	s.legsPerIP[ip]--
+	s.legsPerIP[acct]--
 }
 
 // stop signals reap to exit. Idempotent; called when Run's read loop returns.
@@ -435,7 +470,9 @@ func (s *Server) reap() {
 			for _, l := range ses.legs {
 				if now.UnixNano()-l.fwd.seen.Load() > int64(s.ttl) {
 					s.byAddr.Delete(l.addr.String())
-					s.releaseIPLocked(l.addr.IP.String())
+					// Release the key this leg was CHARGED under, never a freshly
+					// derived one: re-deriving here is how bind and reap drift apart.
+					s.releaseIPLocked(l.acctKey)
 					continue
 				}
 				kept = append(kept, l)
@@ -453,7 +490,7 @@ func (s *Server) reap() {
 				delete(s.sessions, token)
 			}
 		}
-		// Release stale per-IP hoard-warning latches so the map mirrors recent abuse.
+		// Release stale per-source hoard-warning latches so the map mirrors recent abuse.
 		for ip, t := range s.hoardWarned {
 			if now.Sub(t) >= statsInterval {
 				delete(s.hoardWarned, ip)
