@@ -147,6 +147,10 @@ type Server struct {
 	cookieKey    []byte         // keys the address-validation HMAC (random per process)
 	maxSessions  int            // concurrent session ceiling (abuse bound)
 	maxLegsPerIP int            // per-source leg ceiling (session-hoarding bound)
+	// pendingPair is the absolute half-open timeout (pendingPairTimeout). A field
+	// rather than the constant so a test can drive it in milliseconds instead of
+	// sleeping for a minute; nothing in production ever changes it.
+	pendingPair time.Duration
 
 	// Ticket mode (empty serverKeys = network mode). serverKeys may hold two so a
 	// server key rotation can be made before-break; the relay never holds a private
@@ -198,6 +202,11 @@ type Server struct {
 	statRejected   atomic.Int64 // over-cap / outside allowlist / rate-limited
 	statHoard      atomic.Int64 // per-source leg cap hit (possible session hoarding)
 	statTicket     atomic.Int64 // binds refused by a ticket check (any reason)
+	// statVerify counts binds that reached the SIGNATURE VERIFICATIONS. It is the
+	// number that shows how much crypto work the relay is being made to do, and the
+	// one the check-order tests assert on: "an invalid cookie costs no Ed25519" is
+	// only a claim until something counts it.
+	statVerify atomic.Int64
 
 	// lastPanic is the process-wide recovered-panic total at the previous stats
 	// tick, so statsLoop can report the per-interval delta. Touched only by the
@@ -227,19 +236,19 @@ func (s *Server) statsLoop() {
 		}
 		pa, ch := s.statPaired.Swap(0), s.statChallenged.Swap(0)
 		rj, ho := s.statRejected.Swap(0), s.statHoard.Swap(0)
-		tk := s.statTicket.Swap(0)
+		tk, vf := s.statTicket.Swap(0), s.statVerify.Swap(0)
 		// Per-interval count of panics recovered by safe.Do across the process: a
 		// non-zero delta means a crafted datagram reliably trips a parser, which is
 		// otherwise invisible (each panic is logged only once per throttle window).
 		total := safe.PanicCount()
 		pan := total - s.lastPanic
 		s.lastPanic = total
-		if pa|ch|rj|ho|tk == 0 && pan == 0 {
+		if pa|ch|rj|ho|tk|vf == 0 && pan == 0 {
 			continue
 		}
 		line := fmt.Sprintf("stats (last %s): role=relay paired=%d challenged=%d rejected=%d", statsInterval, pa, ch, rj)
-		if tk > 0 {
-			line += fmt.Sprintf(" ticket-refused=%d", tk)
+		if vf > 0 || tk > 0 {
+			line += fmt.Sprintf(" tickets-verified=%d ticket-refused=%d", vf, tk)
 		}
 		if ho > 0 || pan > 0 {
 			line += fmt.Sprintf(" ALERT: leg-cap=%d panics=%d", ho, pan)
@@ -332,6 +341,7 @@ func New(cfg Config) *Server {
 		cookieKey:    key,
 		maxSessions:  maxSessions,
 		maxLegsPerIP: maxLegsPerIP,
+		pendingPair:  pendingPairTimeout,
 		serverKeys:   cfg.ServerKeys,
 		relayID:      cfg.RelayID,
 		debug:        cfg.Debug,
@@ -634,7 +644,7 @@ func (s *Server) reap() {
 			// pendingPairTimeout after creation, whatever its traffic. Refreshing on
 			// activity — which the idle timer below does — would let one leg plus a
 			// trickle hold a slot indefinitely without a partner ever arriving.
-			if !ses.paired && now.Sub(ses.created) > pendingPairTimeout {
+			if !ses.paired && now.Sub(ses.created) > s.pendingPair {
 				for _, l := range ses.legs {
 					s.byAddr.Delete(l.addr.String())
 					s.releaseIPLocked(l.acctKey)

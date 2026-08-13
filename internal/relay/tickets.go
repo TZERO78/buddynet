@@ -102,6 +102,10 @@ func (s *Server) verifyTicketBind(conn *net.UDPConn, b Bind, src *net.UDPAddr, a
 		s.rejectTicket(reasonEncoding, b.SessionToken, "", src)
 		return
 	}
+	// Counted HERE, at the last point before the first Ed25519 operation: every
+	// check that is supposed to happen earlier (size, CIDR, per-source rate, cookie,
+	// budgets) is only doing its job if this counter stays put when they refuse.
+	s.statVerify.Add(1)
 	// The signature is checked over the bytes AS RECEIVED, before they are parsed.
 	// Nothing below this line is reached by a blob the configured server key did
 	// not sign.
