@@ -176,6 +176,16 @@ partner is reachable natively at its VIP. Full design and security notes in
   manifest); without it, nothing is reachable (fail-closed). `--expose all` restores
   whole-host access explicitly. Only the partner's VIP `/32` is routed; LANs/VLANs
   behind the buddy are not. See [WIREGUARD.md](WIREGUARD.md).
+- **`--expose` covers this host only — a buddy is never routed THROUGH it.**
+  BuddyNet drops everything that arrives on `bnetN` and is destined elsewhere
+  (a `fwd` chain next to the `in` chain in `table inet buddynet`). This matters on
+  any host that forwards, which includes anything running Docker: without it, a
+  buddy could address a machine on your LAN directly and bypass `--expose`
+  entirely, since WireGuard's AllowedIPs constrains only the packet's *source*.
+  **Behaviour change in v5.0.0:** if you were routing a LAN host to a buddy through
+  this node — or a buddy into your LAN — that stops. Subnet routing returns as its
+  own explicit option with the destinations named by you; it will never be implied
+  by `--expose all`.
 - **Changing a scope at runtime.** A per-buddy `expose:` edit in the `--peers-file`
   manifest takes effect on `SIGHUP`: the supervisor reprograms that buddy's `bnetN`
   firewall scope **in place** — the tunnel stays up, no reconnect, the partner is

@@ -167,6 +167,26 @@ admitted, and that one `/64` cannot fill the global session table and lock an
 unrelated prefix out. See `pentest/README.md` for why the probe's `relay-hoard`
 scene does not cover this.
 
+## Forward-path test (finding M-1: `--expose` is not a route into your LAN)
+
+Needs root and the `wireguard` module; no Docker, no `lab/.env`:
+
+```bash
+sudo -v && ./test-wg-forward.sh          # → 22/22 passed
+
+# A/B control: against a pre-fix rule builder it must FAIL (15 passed / 7 failed).
+APPLYSCOPE=/path/to/old/applyscope ./test-wg-forward.sh
+```
+
+Four namespaces — buddy, victim, and two LAN segments behind the victim — with a
+real WireGuard tunnel and the real rule builder (`internal/nft.Apply`, via
+`pentest/applyscope`). It asserts that a buddy cannot reach a LAN host behind the
+victim with ports exposed, with nothing exposed, or under `--expose all`; that
+forwarding which never touches `bnetN` (LAN→LAN2) keeps working; that the victim's
+own outbound connections to the buddy keep working; and that LAN→buddy forwarding
+is blocked — deliberately, until subnet routing exists as its own option. Every
+LAN check runs over IPv4 and IPv6.
+
 ## Observing the tunnels
 
 ```bash
