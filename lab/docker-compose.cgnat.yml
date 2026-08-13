@@ -40,6 +40,12 @@ services:
     image: buddynet-lab-server
     command:
       - --role=handshake,relay
+      # Relay tickets, on both roles at once: this is one process, so the relay
+      # derives the server key it trusts from --key and only needs the id. Fixed
+      # here so a lab run is reproducible; production mints one with
+      # `buddynet gen-relay-id`.
+      - --relay-id
+      - YnVkZHluZXQtbGFiLXJpZA
       - --listen
       - "[::]:51820"
       - --relay-listen

@@ -22,6 +22,12 @@
 #   7. expose revoke: restart A without --expose → :445 gone (fail-closed)
 # Needs root + wireguard module + kernel nftables + samba/smbclient/cifs-utils.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 BN=/tmp/bshare/bn
 D=/tmp/bshare
@@ -114,7 +120,7 @@ PIDS="$PIDS $!"
 sleep 1
 
 start_server() {
-	sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
+	sudo ip netns exec ns-srv "$BN" --role=handshake,relay --relay-id "$RID" \
 		--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
 		--key "$D/srv.key" --relay-endpoint 10.50.0.10:51821 >"$D/srv.log" 2>&1 &
 	PIDS="$PIDS $!"

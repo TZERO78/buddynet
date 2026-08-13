@@ -99,17 +99,17 @@ func main() {
 	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
 	listen := flag.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr))
 	relayListenFlag := flag.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr))
-	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); a disallowed source is refused before it can occupy a connection slot, and on the relay before any crypto (empty = open to all)")
+	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); a disallowed source is refused before it can occupy a connection slot, and on the relay before any crypto. On the HANDSHAKE server empty means open to all; on the RELAY it is one of the two authorization policies (the other is --server-key) and the relay refuses to start with neither — 0.0.0.0/0 and ::/0 are refused, an open relay is not a supported configuration")
 	relayMaxSessions := flag.Int("relay-max-sessions", 0, "relay: max concurrent sessions (abuse ceiling; 0 = default 4096). Lower it for a small private relay")
 	relayMaxLegsPerIP := flag.Int("relay-max-legs-per-ip", 0, "relay: max legs one source may hold (anti-hoarding; 0 = default 64). A source is one IPv4 address or one IPv6 /64 — every address in a /64 is free to mint, so they share this budget. Lower it for a small private relay")
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
 	relayID := flag.String("relay-id", "", "handshake/relay: the relay's id, the SAME value on both (mint one with `buddynet gen-relay-id`). On the handshake server it turns on relay tickets — every paired buddy is issued a short-lived signed permit for that relay; on the relay it names which tickets to accept")
-	debug := flag.Bool("debug", false, "handshake: verbose logging of parked/dropped packets (not for production)")
+	debug := flag.Bool("debug", false, "handshake/relay: verbose logging of parked/dropped packets; on the relay it also puts SOURCE ADDRESSES in ticket-rejection lines, which a shipped relay deliberately does not log (not for production)")
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
-	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]")
+	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]. RELAY: the handshake server whose relay tickets this relay accepts — pass two comma-separated keys during a server key rotation")
 	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest)")
 	knownPeers := flag.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)")
 	lab := flag.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1.")
@@ -268,6 +268,18 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error:", cerr)
 		os.Exit(2)
 	}
+	// On the RELAY, --server-key names the handshake server(s) whose tickets it
+	// accepts — a different meaning from the buddy's "the server I pin", and one or
+	// two keys rather than exactly one. Resolved here so a typo fails before a
+	// socket is opened.
+	var relayServerKeys []ed25519.PublicKey
+	if hasRole(roles, protocol.RoleRelay) {
+		relayServerKeys, cerr = relayKeys(roles, *serverKey, *keyPath)
+		if cerr != nil {
+			fmt.Fprintln(os.Stderr, "error:", cerr)
+			os.Exit(2)
+		}
+	}
 
 	// Run every selected role concurrently; the first hard failure cancels the
 	// rest and is reported.
@@ -293,9 +305,12 @@ func main() {
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
 					Listen: relayListen(*relayListenFlag, *listen, roles), TTL: *ttl,
+					ServerKeys:   relayServerKeys,
+					RelayID:      *relayID,
 					AllowCIDRs:   allowedCIDRs,
 					MaxSessions:  *relayMaxSessions,
 					MaxLegsPerIP: *relayMaxLegsPerIP,
+					Debug:        *debug,
 				}))
 			case protocol.RoleBuddy:
 				fail("buddy", role.Buddy(ctx, bArgs.config()))
@@ -359,6 +374,74 @@ func parseCIDRs(s string) ([]netip.Prefix, error) {
 			return nil, fmt.Errorf("invalid --allow-cidr entry %q (want a CIDR like 10.0.0.0/8 or an IP)", part)
 		}
 		out = append(out, netip.PrefixFrom(addr, addr.BitLen()))
+	}
+	return out, nil
+}
+
+// hasRole reports whether r is among the selected roles.
+func hasRole(roles []protocol.Role, r protocol.Role) bool {
+	for _, have := range roles {
+		if have == r {
+			return true
+		}
+	}
+	return false
+}
+
+// relayKeys resolves which handshake server(s) the relay trusts.
+//
+// The common deployment is one VPS running --role=handshake,relay. There the
+// answer is not in doubt — the relay should accept the tickets THIS process
+// issues — so the public half of the node's own identity is used and the
+// operator only has to set --relay-id, one flag, on one command. An explicit
+// --server-key always wins, which is what a separated deployment (recommended
+// for an exposed relay) passes.
+//
+// The derivation needs a persistent --key: with an ephemeral identity the two
+// roles would not even agree on a key, so there is nothing to derive and the
+// relay falls back to whatever policy was configured explicitly.
+func relayKeys(roles []protocol.Role, serverKey, keyPath string) ([]ed25519.PublicKey, error) {
+	if strings.TrimSpace(serverKey) != "" {
+		return parseServerKeys(serverKey)
+	}
+	if !hasRole(roles, protocol.RoleHandshake) || keyPath == "" {
+		return nil, nil
+	}
+	priv, _, err := bcrypto.LoadKey(keyPath)
+	if err != nil {
+		// The handshake role refuses to start without its key and says so properly;
+		// duplicating that message here would only be a second, worse copy.
+		return nil, nil
+	}
+	log.Printf("NOTE: the relay accepts tickets from the handshake server in THIS process (--key %s). "+
+		"Pass --server-key explicitly if it should trust a different server.", keyPath)
+	return []ed25519.PublicKey{priv.Public().(ed25519.PublicKey)}, nil
+}
+
+// parseServerKeys parses the relay's --server-key: one or two base64 Ed25519
+// public keys, comma-separated. Two are allowed so a handshake-server key
+// rotation can be made before-break — the relay accepts tickets from either
+// while buddies move over.
+//
+// A relay that also runs --role=buddy shares this flag with the buddy's own
+// "pin the server I talk to", where exactly one key is meaningful; the buddy
+// therefore keeps its own strict parse, and only this side accepts a pair.
+func parseServerKeys(s string) ([]ed25519.PublicKey, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, nil // network mode, or no policy at all — role.Relay decides
+	}
+	var out []ed25519.PublicKey
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		k, err := bcrypto.DecodePubKey(part)
+		if err != nil {
+			return nil, fmt.Errorf("invalid --server-key entry %q: %w (want the base64 the server prints with `identity`)", part, err)
+		}
+		out = append(out, k)
 	}
 	return out, nil
 }
