@@ -18,6 +18,7 @@ import (
 	buddydns "github.com/tzero78/buddynet/internal/dns"
 	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/peer"
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/internal/vip"
 )
 
@@ -149,11 +150,29 @@ type node struct {
 	reg       *peer.Registry     // offline peer cache (peers.json)
 }
 
+// PunchDurMax caps --punch. A relay ticket is issued for at most ticket.MaxTTL
+// and has to cover the punch attempt PLUS the time to bind afterwards, so the
+// punch must leave the bind window intact: with a 100s punch inside a 120s
+// ticket only 20s would remain, i.e. a permit that can expire while the buddy is
+// still waiting for the punch it was issued for.
+//
+// The relay cannot enforce this — it never learns a buddy's punch duration — so
+// it is enforced HERE, where the value is configured, and it is a hard refusal
+// rather than a silent clip: quietly changing a duration an operator asked for
+// is how a setting stops meaning what it says.
+const PunchDurMax = 60 * time.Second
+
 // Buddy runs the peer until ctx is cancelled, reconnecting whenever the tunnel
 // drops.
 func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	if cfg.PunchDur == 0 {
 		cfg.PunchDur = 2 * time.Second
+	}
+	if cfg.PunchDur > PunchDurMax {
+		return fmt.Errorf("--punch %s is over the %s maximum: a relay ticket is valid for at most %s, "+
+			"so a longer punch would leave less than the intended bind window and the ticket could expire "+
+			"while the punch is still running. Refusing rather than silently shortening it",
+			cfg.PunchDur, PunchDurMax, ticket.MaxTTL)
 	}
 	if cfg.IdleTimeout < 10*time.Second {
 		cfg.IdleTimeout = 60 * time.Second

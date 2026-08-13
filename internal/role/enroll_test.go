@@ -71,7 +71,7 @@ func enrollClient(t *testing.T, srvAddr *net.UDPAddr, srvPub ed25519.PublicKey, 
 	}
 	defer cli.Close()
 
-	raw, err := buildRegister(BuddyConfig{Code: code}, nd, "tok")
+	raw, err := buildRegister(BuddyConfig{Code: code}, nd, "tok", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -220,7 +220,7 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 	// registration is processed (it lands in pending), so anything that fails
 	// below fails because of the mismatch and nothing else.
 	const ownCode = "ATTACKER-OWN-CODE"
-	ownReg, err := buildRegister(BuddyConfig{Code: ownCode}, attacker, "tok")
+	ownReg, err := buildRegister(BuddyConfig{Code: ownCode}, attacker, "tok", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +240,7 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 	// Now the impersonation. Signed by the victim's key, sent over the attacker's
 	// authenticated connection.
 	const victimCode = "VICTIM-CODE-XYZ"
-	forged, err := buildRegister(BuddyConfig{Code: victimCode}, victim, "tok")
+	forged, err := buildRegister(BuddyConfig{Code: victimCode}, victim, "tok", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestQUICRegistrationClaimingAnotherKeyIsDropped(t *testing.T) {
 	// request on it must fail.
 	nctx, ncancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer ncancel()
-	again, err := buildRegister(BuddyConfig{}, attacker, "tok")
+	again, err := buildRegister(BuddyConfig{}, attacker, "tok", "")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,12 +10,14 @@
 package relay
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
 	"time"
 
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -151,8 +153,12 @@ func ParseChallenge(pkt []byte) ([]byte, bool) {
 // spoofed source can never have a leg bound on its behalf. The SAME conn must
 // then be used to run QUIC, with the relay's address as the peer endpoint, so
 // the relay forwards the punched/QUIC packets to the partner's leg.
-func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout time.Duration) error {
+func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout time.Duration, cred *BindCred) error {
 	cookie := ""
+	// The FIRST bind deliberately carries no ticket. The relay checks the cookie
+	// before it looks at a ticket, so this one can only ever draw a challenge —
+	// sending the permit before the relay has proven reachable would put it on the
+	// wire for nothing.
 	req := MarshalBind(Bind{SessionToken: token})
 	deadline := time.Now().Add(timeout)
 	next := time.Now()
@@ -176,7 +182,7 @@ func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout ti
 			next64 := base64.RawURLEncoding.EncodeToString(c)
 			if next64 != cookie {
 				cookie = next64
-				req = MarshalBind(Bind{SessionToken: token, Cookie: cookie})
+				req = MarshalBind(cred.bind(token, cookie, c))
 				next = time.Now()
 			}
 			continue
@@ -186,7 +192,37 @@ func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout ti
 			return nil // relay acked our leg
 		}
 	}
-	return errors.New("relay did not acknowledge the session (unreachable or wrong endpoint)")
+	if cred == nil {
+		return errors.New("relay did not acknowledge the session (unreachable, wrong endpoint, or it requires a ticket this buddy does not have — see the handshake server's --relay-id)")
+	}
+	return errors.New("relay did not acknowledge the session (unreachable, wrong endpoint, or it refused the ticket — check that relay and handshake server share the same --relay-id, that the relay pins this server's key, and that both clocks are in sync)")
+}
+
+// BindCred is what a bind must present in TICKET MODE: the server-signed permit
+// exactly as it arrived, and the ephemeral private key it was issued against. A
+// nil *BindCred binds the old way, which only a relay in network mode accepts.
+//
+// The private key never leaves the buddy — that is the whole point of the
+// scheme, and the reason a captured ticket is inert.
+type BindCred struct {
+	Payload []byte // ticket payload, verbatim as received
+	Sig     []byte // the server's signature over it
+	Eph     ed25519.PrivateKey
+}
+
+// bind builds the bind to send under the given cookie. With no credentials it is
+// the plain bind; with them it carries the ticket and a fresh proof of possession
+// over THIS cookie — which is what makes the bind unusable from another address
+// or after the cookie epoch turns.
+func (c *BindCred) bind(token, cookieB64 string, cookie []byte) Bind {
+	b := Bind{SessionToken: token, Cookie: cookieB64}
+	if c == nil {
+		return b
+	}
+	b.Ticket = base64.RawURLEncoding.EncodeToString(c.Payload)
+	b.TicketSig = base64.RawURLEncoding.EncodeToString(c.Sig)
+	b.BindSig = base64.RawURLEncoding.EncodeToString(ticket.SignBind(c.Eph, c.Payload, c.Sig, cookie))
+	return b
 }
 
 func sameAddr(a, b *net.UDPAddr) bool {

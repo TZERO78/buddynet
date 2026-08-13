@@ -36,7 +36,7 @@ func TestRelayCIDRGate(t *testing.T) {
 
 	c := mustListen(t)
 	defer c.Close()
-	if err := BindLeg(c, denyDial, testSessionToken, 500*time.Millisecond); err == nil {
+	if err := BindLeg(c, denyDial, testSessionToken, 500*time.Millisecond, nil); err == nil {
 		t.Fatal("bind from a source outside --allow-cidr must be refused")
 	}
 
@@ -48,7 +48,7 @@ func TestRelayCIDRGate(t *testing.T) {
 
 	c2 := mustListen(t)
 	defer c2.Close()
-	if err := BindLeg(c2, allowDial, testSessionToken, 2*time.Second); err != nil {
+	if err := BindLeg(c2, allowDial, testSessionToken, 2*time.Second, nil); err != nil {
 		t.Fatalf("bind from an allowed source must succeed: %v", err)
 	}
 }

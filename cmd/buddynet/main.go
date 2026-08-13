@@ -474,6 +474,13 @@ func (a buddyArgs) validate() {
 		fmt.Fprintln(os.Stderr, "error: set at least one of -L, --vip-listen or -forward (otherwise the tunnel carries nothing)")
 		os.Exit(2)
 	}
+	// A punch longer than this would eat into the window a relay ticket leaves for
+	// binding, so the ticket could expire while the punch it was issued for is
+	// still running. Refused here rather than silently shortened.
+	if a.punchDur > role.PunchDurMax {
+		fmt.Fprintf(os.Stderr, "error: --punch %s is over the %s maximum (a relay ticket is short-lived and has to cover the punch AND the bind that follows it)\n", a.punchDur, role.PunchDurMax)
+		os.Exit(2)
+	}
 	if a.vipListen != "" {
 		if _, err := net.LookupPort("tcp", a.vipListen); err != nil {
 			fmt.Fprintf(os.Stderr, "error: --vip-listen %q is not a valid TCP port\n", a.vipListen)

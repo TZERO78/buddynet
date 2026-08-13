@@ -84,7 +84,7 @@ func TestRelayBindNeedsCookie(t *testing.T) {
 	// victim, which never validated: the victim must not receive the payload.
 	attacker := mustListen(t)
 	defer attacker.Close()
-	if err := BindLeg(attacker, dial, sessTok, 2*time.Second); err != nil {
+	if err := BindLeg(attacker, dial, sessTok, 2*time.Second, nil); err != nil {
 		t.Fatalf("attacker bind: %v", err)
 	}
 	attacker.WriteToUDP([]byte("laundered payload"), dial)
@@ -110,10 +110,10 @@ func TestRelayForwardsBlind(t *testing.T) {
 	defer b.Close()
 
 	const token = "pair-token-long-enough-1"
-	if err := BindLeg(a, dial, token, 2*time.Second); err != nil {
+	if err := BindLeg(a, dial, token, 2*time.Second, nil); err != nil {
 		t.Fatalf("A bind: %v", err)
 	}
-	if err := BindLeg(b, dial, token, 2*time.Second); err != nil {
+	if err := BindLeg(b, dial, token, 2*time.Second, nil); err != nil {
 		t.Fatalf("B bind: %v", err)
 	}
 

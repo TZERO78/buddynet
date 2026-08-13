@@ -174,7 +174,7 @@ func TestRelayIPv6BindRoundTripOverLoopback(t *testing.T) {
 	}
 	defer cli.Close()
 
-	if err := BindLeg(cli, srv.LocalAddr().(*net.UDPAddr), token(1), 5*time.Second); err != nil {
+	if err := BindLeg(cli, srv.LocalAddr().(*net.UDPAddr), token(1), 5*time.Second, nil); err != nil {
 		t.Fatalf("IPv6 bind round-trip failed: %v", err)
 	}
 	if n := sessionCount(s); n != 1 {
