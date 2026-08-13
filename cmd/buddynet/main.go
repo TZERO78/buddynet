@@ -41,6 +41,7 @@ import (
 	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/role"
 	"github.com/tzero78/buddynet/internal/secret"
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -104,6 +105,7 @@ func main() {
 	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
 	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke subcommands")
 	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
+	relayID := flag.String("relay-id", "", "handshake/relay: the relay's id, the SAME value on both (mint one with `buddynet gen-relay-id`). On the handshake server it turns on relay tickets — every paired buddy is issued a short-lived signed permit for that relay; on the relay it names which tickets to accept")
 	debug := flag.Bool("debug", false, "handshake: verbose logging of parked/dropped packets (not for production)")
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
@@ -145,6 +147,9 @@ func main() {
 		return
 	case flag.Arg(0) == "gen-token":
 		genToken()
+		return
+	case flag.Arg(0) == "gen-relay-id":
+		genRelayID()
 		return
 	case flag.Arg(0) == "identity":
 		printIdentity(*keyPath)
@@ -283,7 +288,7 @@ func main() {
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
 					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
 					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
-					AllowCIDRs: allowedCIDRs,
+					RelayID: *relayID, AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
@@ -527,6 +532,27 @@ func mintInviteToken() string {
 		fmt.Println(tok)
 	}
 	return tok
+}
+
+// genRelayID mints a relay id: the value that must be configured IDENTICALLY on
+// the handshake server (--relay-id, which turns on ticket issuance) and on the
+// relay (--relay-id, which names the tickets it accepts). It is not a secret —
+// it only has to be unguessable enough that a ticket for one relay cannot be
+// replayed at another by picking the right string — so unlike a token it is
+// printed plainly and needs no reveal-and-hide.
+func genRelayID() {
+	id, err := ticket.NewID()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: could not read random bytes: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(id)
+	if secret.Interactive() {
+		fmt.Fprintf(os.Stderr, "\nUse the SAME value on both sides:\n"+
+			"  handshake:  %[1]s --role=handshake ... --relay-endpoint <VPS:51821> --relay-id %[2]s\n"+
+			"  relay:      %[1]s --role=relay ... --relay-id %[2]s --server-key <SERVER_KEY>\n"+
+			"It is not a secret; a mismatch shows up as every ticket being rejected.\n", appName, id)
+	}
 }
 
 func genToken() {

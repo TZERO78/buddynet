@@ -510,7 +510,7 @@ func TestIntegrationPairingOverQUIC(t *testing.T) {
 	t.Cleanup(func() { cancel(); srvConn.Close() })
 	reg := newHSRegistry(time.Minute)
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
-	go serveControlQUIC(ctx, srvConn, reg, srvPriv, nil, "", rl, nil)
+	go serveControlQUIC(ctx, srvConn, reg, srvPriv, nil, relayAdvert{}, rl, nil)
 
 	srvAddr := srvConn.LocalAddr().(*net.UDPAddr)
 	type result struct {

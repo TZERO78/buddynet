@@ -48,7 +48,7 @@ func enrollServer(t *testing.T, allowed ...string) (*net.UDPAddr, ed25519.Public
 	t.Cleanup(func() { cancel(); srvConn.Close() })
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
 	reg := newHSRegistry(time.Minute)
-	go serveControlQUIC(ctx, srvConn, reg, srvPriv, authz, "", rl, nil)
+	go serveControlQUIC(ctx, srvConn, reg, srvPriv, authz, relayAdvert{}, rl, nil)
 
 	return srvConn.LocalAddr().(*net.UDPAddr), srvPriv.Public().(ed25519.PublicKey), path, authz, reg
 }
