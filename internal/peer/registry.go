@@ -22,12 +22,32 @@ import (
 // Registry is an in-memory roster of known peers, keyed by public key, backed
 // by an atomically-rewritten peers.json. It is safe for concurrent use.
 type Registry struct {
+	// writeMu serialises PERSISTENCE. It is taken BEFORE mu and held across the
+	// file write, so two writers can never rename their snapshots out of order —
+	// which is how an older roster used to overwrite a newer one: Upsert took its
+	// snapshot under mu, released it, and only then wrote, so a slower writer could
+	// land after a faster one and undo it. The in-memory map stayed correct, so the
+	// loss only surfaced after a restart — exactly when peers.json matters, as the
+	// offline link of the fallback chain.
+	//
+	// mu itself is NOT held across the write: it serves List()/Get()/Snapshot(),
+	// which BuddyDNS reads on every lookup, so putting disk I/O under it would
+	// trade a lost update for a stall.
+	writeMu sync.Mutex
+
 	mu        sync.Mutex
 	path      string                   // peers.json; empty = memory only
 	peers     map[string]protocol.Peer // pubkey -> peer
 	nameByKey map[string]string        // pubkey -> pinned name (TOFU)
 	keyByName map[string]string        // name   -> pubkey (uniqueness guard)
 }
+
+// duringSave is a test hook fired inside Upsert while a write is in flight —
+// after the snapshot is taken, before it reaches the disk. Production leaves it
+// nil; tests set it and restore it with t.Cleanup. It exists because the ordering
+// guarantee is otherwise only arguable: without it a regression test has to race
+// the scheduler and can pass on a broken build by luck.
+var duringSave func()
 
 // Open loads the registry from path (peers.json). A missing file is not an
 // error — it just means nothing has been learned yet. An empty path makes the
@@ -75,6 +95,14 @@ func Open(path string) (*Registry, error) {
 // a collision (two keys claiming the same name) silently drops the name from
 // the newcomer — it remains reachable by fingerprint only.
 func (r *Registry) Upsert(p protocol.Peer) error {
+	// writeMu spans BOTH the snapshot and the write. Taking it here is what makes
+	// the file ordering match the map ordering: whoever wins the race to mutate the
+	// map is also the one whose snapshot lands first, so a later writer can only
+	// ever write a SUPERSET. Releasing it before the write (as this used to, having
+	// no such lock at all) is what allowed a stale roster to overwrite a fresh one.
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
+
 	r.mu.Lock()
 	if p.LastSeen == 0 {
 		p.LastSeen = time.Now().Unix()
@@ -83,6 +111,12 @@ func (r *Registry) Upsert(p protocol.Peer) error {
 	r.peers[p.PubKey] = p
 	snapshot := r.list()
 	r.mu.Unlock()
+
+	// nil in production; a test uses it to hold a write open and prove the next
+	// writer really waits rather than racing past.
+	if duringSave != nil {
+		duringSave()
+	}
 	return r.save(snapshot)
 }
 
