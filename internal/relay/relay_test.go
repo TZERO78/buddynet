@@ -55,7 +55,7 @@ func TestParseBind(t *testing.T) {
 func TestRelayBindNeedsCookie(t *testing.T) {
 	relayConn := mustListen(t)
 	defer relayConn.Close()
-	go NewServer(2*time.Second, nil, 0, 0).Run(relayConn)
+	go New(Config{TTL: 2 * time.Second}).Run(relayConn)
 	dial := &net.UDPAddr{IP: net.IPv6loopback, Port: relayConn.LocalAddr().(*net.UDPAddr).Port}
 
 	victim := mustListen(t)
@@ -100,7 +100,7 @@ func TestRelayBindNeedsCookie(t *testing.T) {
 func TestRelayForwardsBlind(t *testing.T) {
 	relayConn := mustListen(t)
 	defer relayConn.Close()
-	go NewServer(2*time.Second, nil, 0, 0).Run(relayConn)
+	go New(Config{TTL: 2 * time.Second}).Run(relayConn)
 	relayAddr := relayConn.LocalAddr().(*net.UDPAddr)
 	dial := &net.UDPAddr{IP: net.IPv6loopback, Port: relayAddr.Port}
 
@@ -138,7 +138,7 @@ func TestRelayForwardsBlind(t *testing.T) {
 func TestRelayDropsUnboundSource(t *testing.T) {
 	relayConn := mustListen(t)
 	defer relayConn.Close()
-	go NewServer(2*time.Second, nil, 0, 0).Run(relayConn)
+	go New(Config{TTL: 2 * time.Second}).Run(relayConn)
 	relayAddr := relayConn.LocalAddr().(*net.UDPAddr)
 	dial := &net.UDPAddr{IP: net.IPv6loopback, Port: relayAddr.Port}
 
@@ -203,7 +203,7 @@ func TestChainCachedOnlyWhenNoLiveCandidates(t *testing.T) {
 // because the property must not depend on one constant staying where it is; it
 // has no mutation coverage of its own and none is claimed.
 func TestChallengeIsSmallerThanEveryAcceptedBind(t *testing.T) {
-	s := NewServer(2*time.Second, nil, 0, 0)
+	s := New(Config{TTL: 2 * time.Second})
 	chal := len(MarshalChallenge(s.freshCookie(net.IPv4(198, 51, 100, 7))))
 	for n := 1; n <= protocol.MaxFieldLen; n++ {
 		pkt := MarshalBind(Bind{SessionToken: strings.Repeat("x", n)})

@@ -52,7 +52,7 @@ func Relay(ctx context.Context, cfg RelayConfig) error {
 	}
 	go func() { <-ctx.Done(); conn.Close() }()
 
-	relay.NewServer(cfg.TTL, cfg.AllowCIDRs, cfg.MaxSessions, cfg.MaxLegsPerIP).Run(conn)
+	relay.New(relay.Config{TTL: cfg.TTL, AllowCIDRs: cfg.AllowCIDRs, MaxSessions: cfg.MaxSessions, MaxLegsPerIP: cfg.MaxLegsPerIP}).Run(conn)
 	if ctx.Err() != nil {
 		log.Print("shutting down")
 	}
