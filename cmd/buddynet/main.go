@@ -409,9 +409,12 @@ func relayKeys(roles []protocol.Role, serverKey, keyPath string) ([]ed25519.Publ
 	}
 	priv, _, err := bcrypto.LoadKey(keyPath)
 	if err != nil {
-		// The handshake role refuses to start without its key and says so properly;
-		// duplicating that message here would only be a second, worse copy.
-		return nil, nil
+		// Reported here rather than swallowed: falling through to "no policy" would
+		// send the operator looking for a missing flag when the actual problem is a
+		// key that could not be read.
+		return nil, fmt.Errorf("the relay derives the handshake key it trusts from --key %s, which could not be read: %w\n"+
+			"  Create the identity once:  %s --key %s init\n"+
+			"  Or name the server explicitly:  --server-key <SERVER_KEY>", keyPath, err, appName, keyPath)
 	}
 	log.Printf("NOTE: the relay accepts tickets from the handshake server in THIS process (--key %s). "+
 		"Pass --server-key explicitly if it should trust a different server.", keyPath)
