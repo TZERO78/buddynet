@@ -28,7 +28,7 @@ func inProcHandshake(t *testing.T) (addr, serverKeyB64 string) {
 	reg := newHSRegistry(time.Minute)
 	ctx, cancel := context.WithCancel(context.Background())
 	rl := ratelimit.New(rlGlobalRate, rlSrcRate, rlMaxSources)
-	go serveControlQUIC(ctx, conn, reg, priv, nil, "", rl, nil)
+	go serveControlQUIC(ctx, conn, reg, priv, nil, relayAdvert{}, rl, nil)
 	t.Cleanup(func() { cancel(); conn.Close() })
 	return conn.LocalAddr().String(), bcrypto.PubKeyB64(pub)
 }

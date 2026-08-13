@@ -15,6 +15,12 @@
 # can ping B's overlay VIP over bnet0 (data crosses the relayed tunnel). Needs root
 # + wg module.
 set -euo pipefail
+
+# Relay tickets: the same id on the handshake server and the relay. Fixed here
+# rather than minted so a failing run is reproducible; production mints one with
+# `buddynet gen-relay-id`. In this lab both roles are one process, so the relay
+# derives the server key it trusts from --key and only needs the id.
+RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 BN=/tmp/wgr/bn
 D=/tmp/wgr
@@ -73,7 +79,7 @@ run_buddy() { # $1 ns, $2 keyfile, $3 peerpub, $4 logfile
 echo "== handshake+relay server (advertises itself as relay) =="
 sudo ip netns exec ns-srv "$BN" --role=handshake,relay \
 	--listen 0.0.0.0:51820 --relay-listen 0.0.0.0:51821 \
-	--relay-endpoint 10.50.0.10:51821 \
+	--relay-endpoint 10.50.0.10:51821 --relay-id "$RID" \
 	--key "$D/srv.key" >"$D/srv.log" 2>&1 &
 PIDS="$PIDS $!"
 sleep 1

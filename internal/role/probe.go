@@ -81,7 +81,10 @@ func buddyProbe(ctx context.Context, cfg BuddyConfig, nd *node) error {
 		return err
 	}
 	log.Print("status: checking whether the buddy is online...")
-	partner, err := buddyRegister(conn, serverAddrs, cfg, nd, cfg.Token, 10*time.Second)
+	// The probe never binds a relay leg, so it registers without an ephemeral relay
+	// key and ignores any ticket: asking for one it would immediately discard is
+	// work for the server and a signed permit on the wire for nothing.
+	partner, _, err := buddyRegister(conn, serverAddrs, cfg, nd, cfg.Token, 10*time.Second, nil)
 	if err != nil {
 		fmt.Println("buddy is OFFLINE (no peer registered with this token)")
 		return &ProbeError{Code: ProbeOffline, Msg: "offline"}

@@ -25,6 +25,7 @@ import (
 	"github.com/tzero78/buddynet/internal/netkey"
 	"github.com/tzero78/buddynet/internal/ratelimit"
 	"github.com/tzero78/buddynet/internal/safe"
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/internal/tunnel"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
@@ -40,6 +41,16 @@ type HandshakeConfig struct {
 	// last resort — use it when this VPS also runs --role=relay (commonly on a
 	// second port). Buddies fall back to it only after a direct punch fails.
 	RelayEndpoint string
+	// RelayID is the relay's non-secret 128-bit id (--relay-id), configured
+	// IDENTICALLY here and on the relay. With it set, every paired PEER_LIST
+	// carries a signed ticket admitting that buddy to that relay; without it the
+	// server issues none, and only a relay running in network mode (--allow-cidr)
+	// will accept those buddies.
+	//
+	// It is an id rather than an address on purpose: address, DNS name and port
+	// all change, and a ticket bound to a moving value either breaks on a
+	// migration or has to be reissued for cosmetic reasons.
+	RelayID string
 	// AllowCIDRs, if non-empty, drops any datagram/connection whose source is not
 	// inside one of these networks BEFORE the cookie and any crypto — a cheap
 	// DoS pre-filter for a private/known-fleet server. Empty keeps it open to all.
@@ -153,6 +164,14 @@ type hsRegistry struct {
 	// knows a token turn that into a flood. Every other repeating line in this file
 	// is gated the same way. Released with the token in evict/reap.
 	pairedLogged map[string]struct{}
+	// sids holds the RELAY SESSION ID minted for a token the first time a ticket is
+	// issued for it. Both buddies of a pair must present the same sid to meet at
+	// the relay, and the sid is the server's to choose — that is what stops two
+	// legs from being spliced by anything a client picked. It lives exactly as long
+	// as the token bucket (released in evict/reap), so it is not new persistent
+	// state: a token that ages out and re-forms simply gets a fresh sid, and both
+	// buddies pick it up on their next poll (they re-register about once a second).
+	sids map[string]string
 	// intruderWarned records tokens for which an intrusion WARNING was already
 	// emitted, so the immediate log fires AT MOST ONCE per token even under an
 	// open-mode squat flood (the per-minute stats counters still carry the volume).
@@ -166,6 +185,7 @@ func newHSRegistry(ttl time.Duration) *hsRegistry {
 		waiting:        map[string]map[string]*hsPeer{},
 		seenPKs:        map[string]map[string]struct{}{},
 		pairedLogged:   map[string]struct{}{},
+		sids:           map[string]string{},
 		intruderWarned: map[string]struct{}{},
 		ttl:            ttl,
 	}
@@ -303,6 +323,7 @@ func (r *hsRegistry) evictStalestLocked() bool {
 	delete(r.seenPKs, victim)
 	delete(r.intruderWarned, victim)
 	delete(r.pairedLogged, victim)
+	delete(r.sids, victim)
 	return true
 }
 
@@ -339,6 +360,7 @@ func (r *hsRegistry) reap(ctx context.Context) {
 				delete(r.seenPKs, token)        // release pubkey history when the session is gone
 				delete(r.intruderWarned, token) // and its one-shot warning latch
 				delete(r.pairedLogged, token)   // and the paired-once latch
+				delete(r.sids, token)           // and the relay session id
 			}
 		}
 		r.mu.Unlock()
@@ -433,14 +455,18 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	// token included — travelled in cleartext, which is what made a token squat and
 	// the roster/candidate poisoning that follows it possible for anyone on path.
 	log.Print("handshake control plane: QUIC (source address validated by the QUIC handshake)")
-	return serveControlQUIC(ctx, conn, reg, priv, authz, cfg.RelayEndpoint, rl, cfg.AllowCIDRs)
+	adv, err := relayAdvertFor(cfg)
+	if err != nil {
+		return err
+	}
+	return serveControlQUIC(ctx, conn, reg, priv, authz, adv, rl, cfg.AllowCIDRs)
 }
 
 // serveControlQUIC runs the handshake control plane over QUIC: each accepted
 // stream is one REGISTER, answered with a signed PEER_LIST (empty until paired,
 // so a polling buddy makes progress). QUIC's handshake already validated the
 // source address, so no cookie is needed; the rate limiter still bounds load.
-func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
+func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, adv relayAdvert, rl *ratelimit.Limiter, allowed []netip.Prefix) error {
 	// The TLS handshake AUTHENTICATES every client (Ed25519 client certificate,
 	// proof of possession) but authorizes none: enrollment needs an unknown key to
 	// be able to deliver its sealed code, which a TLS-layer allowlist gate makes
@@ -465,13 +491,48 @@ func serveControlQUIC(ctx context.Context, conn *net.UDPConn, reg *hsRegistry, p
 			return err
 		}
 		safe.Go("handshake.control", func() {
-			handleControlReq(req, reg, priv, authz, relayEndpoint, rl, allowed)
+			handleControlReq(req, reg, priv, authz, adv, rl, allowed)
 		})
 	}
 }
 
+// relayAdvert is everything the server tells a paired buddy about the relay it
+// may fall back to: the endpoint to bind, and the id the ticket is minted for.
+// Both are empty when no relay is configured — BuddyNet must work P2P-only, so
+// this is a normal state and not a degraded one.
+type relayAdvert struct {
+	endpoint string
+	rid      string
+}
+
+// relayAdvertFor validates the relay configuration and reports what the server
+// will advertise. It also PRINTS the relay id, because that id is configured in
+// two places (here and on the relay) and a mismatch produces "every ticket
+// rejected" with nothing in either log to point at the cause — so both sides say
+// out loud which id they are using.
+func relayAdvertFor(cfg HandshakeConfig) (relayAdvert, error) {
+	adv := relayAdvert{endpoint: cfg.RelayEndpoint, rid: cfg.RelayID}
+	switch {
+	case adv.rid != "" && !ticket.ValidID(adv.rid):
+		return relayAdvert{}, fmt.Errorf("--relay-id %q is not a valid relay id: pass the SAME value the relay was started with "+
+			"(%d base64url characters; mint one with `buddynet gen-relay-id`)", adv.rid, base64.RawURLEncoding.EncodedLen(ticket.IDLen))
+	case adv.rid != "" && adv.endpoint == "":
+		// Tickets without an endpoint are not wrong, only useless: nothing tells the
+		// buddy where to spend them.
+		log.Printf("WARNING: --relay-id is set but --relay-endpoint is not — buddies are issued relay tickets but never told which relay to use")
+	case adv.rid == "" && adv.endpoint != "":
+		log.Printf("WARNING: --relay-endpoint %s is advertised without --relay-id: this server issues NO relay tickets. "+
+			"A relay started with --server-key will refuse these buddies; only a relay restricted by --allow-cidr alone will carry them. "+
+			"Set the same --relay-id on both sides.", adv.endpoint)
+	case adv.rid != "":
+		log.Printf("relay tickets ON: rid=%s endpoint=%s ttl=%s — the relay must be started with the SAME --relay-id and this server's public key",
+			adv.rid, adv.endpoint, ticket.MaxTTL)
+	}
+	return adv, nil
+}
+
 // handleControlReq processes one QUIC control request and replies on its stream.
-func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, relayEndpoint string, rl *ratelimit.Limiter, allowed []netip.Prefix) {
+func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.PrivateKey, authz *authorizer, adv relayAdvert, rl *ratelimit.Limiter, allowed []netip.Prefix) {
 	src, _ := req.Remote.(*net.UDPAddr)
 	if src == nil || !cidrAllowed(allowed, src.IP) {
 		// Belt and braces: the listener already refuses disallowed sources before a
@@ -554,7 +615,7 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		req.Drop("sealed pairing token does not open")
 		return
 	}
-	peers, ok := pairRegister(reg, authz, relayEndpoint, src, m)
+	peers, ok := pairRegister(reg, authz, adv.endpoint, src, m)
 	if !ok {
 		// Connection kept on purpose. "Not ok" here is usually "no partner yet" — the
 		// normal state of a buddy waiting to be paired, which polls about once a
@@ -565,8 +626,14 @@ func handleControlReq(req *tunnel.ControlRequest, reg *hsRegistry, priv ed25519.
 		req.Reply(nil)
 		return
 	}
-	// Reply even when parked (empty peers) so the polling buddy retries.
-	if b, err := json.Marshal(signedPeerList(priv, m.Token, peers)); err == nil {
+	// Reply even when parked (empty peers) so the polling buddy retries. A relay
+	// ticket is attached only to a PAIRED reply: before that there is no partner,
+	// so there is no session to authorise.
+	reply := signedPeerList(priv, m.Token, peers)
+	if len(peers) > 0 {
+		reply.Ticket = issueTicket(reg, priv, adv.rid, m, peers[0])
+	}
+	if b, err := json.Marshal(reply); err == nil {
 		req.Reply(b)
 	}
 }
@@ -845,6 +912,97 @@ func (r *hsRegistry) notePaired(token string) bool {
 	}
 	r.pairedLogged[token] = struct{}{}
 	return true
+}
+
+// sidFor returns the relay session id for a token, minting one on first use. It
+// is bounded like every other per-token map here: over the cap it returns
+// ok=false and the pairing simply gets no ticket, so the failure mode of a full
+// table is "no relay fallback", never "an unbounded map".
+func (r *hsRegistry) sidFor(token string) (string, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if sid, ok := r.sids[token]; ok {
+		return sid, true
+	}
+	if len(r.sids) >= maxTokens {
+		return "", false
+	}
+	sid, err := ticket.NewID()
+	if err != nil {
+		return "", false
+	}
+	r.sids[token] = sid
+	return sid, true
+}
+
+// issueTicket mints this buddy's relay permit for the pairing it just completed.
+// It is issued UNREQUESTED with the PEER_LIST, before the buddy has even tried
+// the direct path, for three reasons that all point the same way: asking for one
+// later would need a second control round trip at exactly the moment the direct
+// path has just failed; the stateless server would have to remember the pairing
+// to answer it (the runtime state WP4 deleted); and "my punch failed" is a claim
+// no server can verify anyway, so gating on it buys nothing.
+//
+// Issuing early is cheap because the ticket is bound to the buddy's ephemeral
+// key: one seen on the wire is inert without the matching private key. It is the
+// proof of possession that carries the security here, not the timing. A pairing
+// that then succeeds directly simply discards its ticket.
+//
+// The validity span is the relay's maximum (ticket.MaxTTL). The server cannot
+// know a buddy's --punch duration, so it cannot compute "punch + 60s bind
+// window" itself; the buddy caps --punch at punchDurMax instead, which is what
+// guarantees the intended bind window still fits inside the ticket.
+//
+// Every refusal below returns nil rather than an error: no ticket means no relay
+// fallback for this pairing, which must never take the pairing itself down.
+func issueTicket(reg *hsRegistry, priv ed25519.PrivateKey, rid string, m protocol.Message, partner protocol.Peer) *protocol.RelayTicket {
+	if rid == "" || m.EphPub == "" {
+		return nil // no relay configured, or a buddy that does not want one
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(m.EphPub)
+	if err != nil || len(raw) != ed25519.PublicKeySize {
+		hsDebugf("no ticket for token=%s: epk is not an Ed25519 public key", logTag(m.Token))
+		return nil
+	}
+	// Leg assignment must be derivable by BOTH buddies with no extra signaling, and
+	// it must differ between them — otherwise the two legs collide and neither can
+	// bind. Key order is the rule the data plane already uses (the lower key
+	// listens), so there is one ordering convention in the project, not two.
+	if m.PubKey == partner.PubKey {
+		hsDebugf("no ticket for token=%s: both peers registered the same identity key", logTag(m.Token))
+		return nil
+	}
+	leg := ticket.LegA
+	if m.PubKey > partner.PubKey {
+		leg = ticket.LegB
+	}
+	sid, ok := reg.sidFor(m.Token)
+	if !ok {
+		return nil
+	}
+	nonce, err := ticket.NewID()
+	if err != nil {
+		return nil
+	}
+	now := time.Now()
+	payload, sig, err := ticket.Sign(priv, ticket.Payload{
+		V:     ticket.FormatVersion,
+		RID:   rid,
+		SID:   sid,
+		Leg:   leg,
+		EPK:   m.EphPub,
+		IAT:   now.Unix(),
+		EXP:   now.Add(ticket.MaxTTL).Unix(),
+		Nonce: nonce,
+	})
+	if err != nil {
+		log.Printf("NOTE: could not sign a relay ticket (%v) — this pairing has no relay fallback", err)
+		return nil
+	}
+	return &protocol.RelayTicket{
+		Payload: base64.RawURLEncoding.EncodeToString(payload),
+		Sig:     base64.RawURLEncoding.EncodeToString(sig),
+	}
 }
 
 // signedPeerList builds a server-signed PEER_LIST over (token, ts, peers). An

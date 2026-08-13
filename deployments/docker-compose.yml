@@ -38,6 +38,9 @@ services:
       - /var/lib/buddynet/id.key
       # approval mode: also pass  --authorized /var/lib/buddynet/clients.txt
       # advertise the relay:       --relay-endpoint your.vps.example:${BUDDYNET_RELAY_PORT:-51821}
+      # Issue relay tickets for it (same id as the relay service below):
+      - --relay-id
+      - "${BUDDYNET_RELAY_ID:?set BUDDYNET_RELAY_ID (buddynet gen-relay-id) in .env}"
     ports:
       - "${BUDDYNET_HANDSHAKE_PORT:-51820}:${BUDDYNET_HANDSHAKE_PORT:-51820}/udp"
     volumes:
@@ -61,6 +64,14 @@ services:
       - --role=relay
       - --listen
       - "[::]:${BUDDYNET_RELAY_PORT:-51821}"
+      # AUTHORIZATION POLICY — REQUIRED, the relay refuses to start without one.
+      # BUDDYNET_SERVER_KEY is what `buddynet --key ... identity` printed for the
+      # handshake service above; BUDDYNET_RELAY_ID is `buddynet gen-relay-id`, run
+      # ONCE and set identically on both services.
+      - --server-key
+      - "${BUDDYNET_SERVER_KEY:?set BUDDYNET_SERVER_KEY (the handshake identity) in .env}"
+      - --relay-id
+      - "${BUDDYNET_RELAY_ID:?set BUDDYNET_RELAY_ID (buddynet gen-relay-id) in .env}"
     ports:
       - "${BUDDYNET_RELAY_PORT:-51821}:${BUDDYNET_RELAY_PORT:-51821}/udp"
     restart: unless-stopped

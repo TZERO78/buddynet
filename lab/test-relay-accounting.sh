@@ -36,6 +36,12 @@ NSA=bnacct-a
 NSR=bnacct-r
 PORT=51821
 MAXLEGS=64          # per-source leg cap for the first scenario
+# This lab drives the relay with a raw flood tool that holds no ticket — it is
+# testing the PER-SOURCE ACCOUNTING, not the authorization. So the relay runs in
+# network mode, which is also the only policy a lab like this can use: with
+# tickets, every one of these binds would be refused before it reached the
+# accounting that is under test. A relay must have SOME policy since v5.
+LABNET=fd00::/16
 DPORT=51822
 DMAX=64             # global session cap for the DoS scenario
 DLEGS=8             # per-source cap — a FRACTION of the global cap, mirroring the
@@ -109,6 +115,7 @@ fi
 
 say "start the relay (--relay-max-legs-per-ip $MAXLEGS)"
 ns "$NSR" "$BNBIN" --role=relay --relay-listen "[fd00:cafe::1]:$PORT" \
+    --allow-cidr "$LABNET" \
     --relay-max-legs-per-ip "$MAXLEGS" --relay-max-sessions 4096 --ttl 600s \
     > "$TMP/relay.log" 2>&1 &
 for _ in $(seq 1 20); do grep -q "action=listening" "$TMP/relay.log" 2>/dev/null && break; sleep 0.5; done
@@ -157,6 +164,7 @@ say "denial of service: can one /64 fill the GLOBAL session table?"
 sudo -n ip netns pids "$NSR" 2>/dev/null | xargs -r sudo -n kill 2>/dev/null
 sleep 1
 ns "$NSR" "$BNBIN" --role=relay --relay-listen "[fd00:cafe::1]:$DPORT" \
+    --allow-cidr "$LABNET" \
     --relay-max-legs-per-ip "$DLEGS" --relay-max-sessions "$DMAX" --ttl 600s \
     > "$TMP/relay-dos.log" 2>&1 &
 for _ in $(seq 1 20); do grep -q "action=listening" "$TMP/relay-dos.log" 2>/dev/null && break; sleep 0.5; done

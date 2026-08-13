@@ -117,40 +117,118 @@ The relay blindly forwards encrypted QUIC datagrams between two buddies when a
 direct hole-punch has failed. It sees only ciphertext — never plaintext or
 virtual IPs.
 
-### Standalone relay
+> **A relay refuses to start without an authorization policy (v5.0.0).** It
+> carries your bandwidth, and a stranger who hoards its capacity takes away the
+> fallback the two people it was built for need. Give it one of:
+>
+> - **`--server-key` + `--relay-id`** — verify **relay tickets** from your own
+>   handshake server. Recommended: a ticket follows a buddy whose address
+>   changes, which is exactly the buddy that needs a relay.
+> - **`--allow-cidr`** — serve named networks only. Supported, but a CIDR list
+>   cannot follow a residential address that moves.
+>
+> Both together are an **AND**, never an either/or. `--allow-cidr 0.0.0.0/0` and
+> `::/0` are refused with their own message: an open relay is not a supported
+> configuration, and there is no `--relay-open` switch.
+
+### Relay tickets in one minute
+
+Mint the id **once** and use the SAME value on both sides:
 
 ```bash
-buddynet --role=relay \
-  --listen [::]:51821 \
-  --key /var/lib/buddynet/id.key
+buddynet gen-relay-id            # e.g. aN_ckZY_txk-nL6BNLTKTg
 ```
+
+The handshake server then issues every paired buddy a short-lived signed permit
+for that relay, and the relay verifies it with the server's **public** key. The
+relay learns *that* a session was authorised — never who is in it. It holds no
+buddy list and no signing key.
+
+Both sides print the id they are using at startup, because a mismatch otherwise
+shows up only as "every ticket rejected" with nothing naming the cause.
 
 ### Combined handshake + relay (typical VPS setup)
 
-Run both roles on one node. Use `--relay-listen` to bind the relay on a
-different port from the handshake, and `--relay-endpoint` to advertise it to
-buddies:
+One process, one command. The relay derives the key it trusts from the handshake
+server in its own process, so the only new flag is the id:
 
 ```bash
 buddynet --role=handshake,relay \
   --listen [::]:51820 \
   --relay-listen [::]:51821 \
   --relay-endpoint vps.example:51821 \
-  --key /var/lib/buddynet/id.key \
+  --relay-id aN_ckZY_txk-nL6BNLTKTg \
+  --key /var/lib/buddynet/id.key
 ```
 
 When `--relay-endpoint` is set, every `PEER_LIST` sent to buddies includes the
 relay address. Buddies try direct hole-punch first; if that fails within
-`--punch` (default 2 s), they fall back to the relay automatically.
+`--punch` (default 2 s, max 60 s), they fall back to the relay automatically.
+
+### Standalone relay (separated — recommended when the relay is exposed)
+
+```bash
+buddynet --role=relay \
+  --listen [::]:51821 \
+  --server-key <SERVER_KEY> \
+  --relay-id aN_ckZY_txk-nL6BNLTKTg
+```
+
+`<SERVER_KEY>` is what `buddynet --key ... identity` prints on the handshake
+server. The relay needs **no identity key of its own** and writes nothing.
+
+> **Combined and separated are not equivalent, and the difference is a security
+> one.** `--role=handshake,relay` is one process, so the server's **signing key
+> sits in the same memory that parses relay packets**: code execution reached
+> through the relay could then mint tickets — worse than abusing a relay, because
+> it forges authorisation for every relay that trusts that key. In the separated
+> setup (two processes, ideally two users, ideally two hosts) the relay holds no
+> signing key at all, and compromising it yields no ability to authorise
+> anything. Combined stays first-class and is what most small VPS setups will
+> run; choose it knowing what it costs.
+
+### Rotating the handshake server key
+
+Pass **two** keys to the relay (`--server-key OLD,NEW`) while buddies move over,
+then drop the retired one. The relay accepts tickets signed by either during the
+window.
+
+### Clocks
+
+Relay and handshake server must agree on the time within **10 s**. NTP handles
+it; when it breaks, *every* ticket is refused and the relay logs a line naming
+both possible causes — the clock, or a wrongly-issued ticket. It genuinely cannot
+tell them apart, so it does not claim to.
+
+### What the relay logs
+
+A shortened session id, the leg, and a reason. That is enough to correlate the
+two legs of one session in one log and deliberately not enough to link a session
+to a buddy. Tickets, signatures, cookies and ephemeral keys are never logged, and
+**source addresses only under `--debug`** — a relay that prints who talks to whom
+has given up the property this design exists to protect. Debugging is harder for
+it; that is the trade.
 
 ### Relay flags
 
 | Flag | Description |
 |------|-------------|
+| `--server-key KEY[,KEY2]` | Handshake server(s) whose relay tickets this relay accepts. Two during a key rotation. One of the two authorization policies. |
+| `--relay-id ID` | This relay's id, the SAME value on the handshake server (`buddynet gen-relay-id`). Required with `--server-key`. |
+| `--allow-cidr CIDRS` | Only these source networks may bind a leg. The other authorization policy; ANDed with tickets when both are set. `0.0.0.0/0`, `::/0` refused. |
 | `--relay-listen ADDR` | Relay listen address when combined with another role. Default `[::]:51821`. |
-| `--relay-endpoint HOST:PORT` | Advertised to buddies as the relay-of-last-resort. Set when the handshake server also runs relay. |
-| `--allow-cidr CIDRS` | Drop relay datagrams from sources outside these networks (same syntax as above). |
-| `--ttl DURATION` | Idle timeout for relay sessions. Default 60 s. |
+| `--relay-endpoint HOST:PORT` | (handshake) Advertised to buddies as the relay-of-last-resort. |
+| `--ttl DURATION` | Idle timeout for relay sessions. Default 60 s. A session holding only one leg expires after an absolute 60 s regardless. |
+| `--relay-max-sessions N` | Concurrent session ceiling (default 4096). |
+| `--relay-max-legs-per-ip N` | Legs one source may hold (default 64; a source is one IPv4 address or one IPv6 /64). |
+| `--debug` | Also log source addresses on rejections. Not for production. |
+
+### No relay at all is a supported setup
+
+BuddyNet works P2P-only: a handshake server with no relay configuration is fully
+functional, and no relay port needs to be open anywhere. When the direct path
+fails and no relay is configured, the buddy says exactly that instead of timing
+out silently.
 
 ---
 

@@ -10,12 +10,14 @@
 package relay
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
 	"time"
 
+	"github.com/tzero78/buddynet/internal/ticket"
 	"github.com/tzero78/buddynet/pkg/protocol"
 )
 
@@ -61,14 +63,41 @@ const MinSessionTokenLen = 16
 
 // Bind is the control message a buddy sends a relay to claim one leg of a
 // session. Two legs presenting the same SessionToken are spliced together. The
-// token is short-lived and unguessable, minted by the buddy that initiates the
-// session and handed to the partner in a CONNECT, so only the intended pair can
-// join. The relay echoes the bind back as an ack. Cookie carries back the relay's
+// relay echoes the bind back as an ack. Cookie carries back the relay's
 // address-validation challenge (base64); it is empty on the first bind.
+//
+// In TICKET MODE (the relay was given a handshake server's public key) the three
+// ticket fields are mandatory and SessionToken must equal the session id inside
+// the ticket: the SERVER names the session, so two legs can only meet if it put
+// them together. In network mode (--allow-cidr alone) they are absent and the
+// token is the buddy-derived value it has always been.
 type Bind struct {
 	SessionToken string `json:"s"`
 	Cookie       string `json:"c,omitempty"`
+	// Ticket and TicketSig are the server-signed permit, base64url, passed through
+	// verbatim from the PEER_LIST — the relay verifies the signature over exactly
+	// these bytes before parsing them.
+	Ticket    string `json:"t,omitempty"`
+	TicketSig string `json:"ts,omitempty"`
+	// BindSig is the proof of possession: a signature by the EPHEMERAL private key
+	// the ticket names, over the ticket and THIS relay's current cookie. It is what
+	// makes a captured ticket (or a captured bind) worthless to anyone else.
+	BindSig string `json:"b,omitempty"`
 }
+
+// Wire bounds for the ticket-carrying fields, checked before anything is
+// decoded. A bind is refused outright above MaxBindLen, so an oversized
+// datagram costs one length comparison rather than a JSON parse.
+const (
+	// MaxBindLen bounds the whole bind datagram. A real ticketed bind is ~520
+	// bytes; the headroom is for a future field, not for a parser to chew on.
+	MaxBindLen = 1024
+	// maxTicketB64 is the base64url length of the largest ticket payload the
+	// verifier will look at (internal/ticket caps the decoded form at 512).
+	maxTicketB64 = 700
+	// maxSigB64 bounds a base64url Ed25519 signature (64 bytes -> 86 chars).
+	maxSigB64 = 96
+)
 
 // MarshalBind encodes a bind control datagram: BindPrefix || JSON(Bind).
 func MarshalBind(b Bind) []byte {
@@ -80,14 +109,19 @@ func MarshalBind(b Bind) []byte {
 
 // ParseBind decodes a bind control datagram, reporting ok=false for anything
 // that is not one (i.e. QUIC data to forward, or a challenge).
+//
+// This is step 1 of the relay's fixed check order: every field is length-bounded
+// here, before any of it is looked at, so an unvalidated source can never make
+// the relay decode a large blob — let alone verify a signature over one.
 func ParseBind(pkt []byte) (Bind, bool) {
-	if len(pkt) < len(BindPrefix) || string(pkt[:len(BindPrefix)]) != BindPrefix {
+	if len(pkt) < len(BindPrefix) || len(pkt) > MaxBindLen || string(pkt[:len(BindPrefix)]) != BindPrefix {
 		return Bind{}, false
 	}
 	var b Bind
 	if json.Unmarshal(pkt[len(BindPrefix):], &b) != nil ||
 		len(b.SessionToken) < MinSessionTokenLen ||
-		len(b.SessionToken) > protocol.MaxFieldLen || len(b.Cookie) > protocol.MaxFieldLen {
+		len(b.SessionToken) > protocol.MaxFieldLen || len(b.Cookie) > protocol.MaxFieldLen ||
+		len(b.Ticket) > maxTicketB64 || len(b.TicketSig) > maxSigB64 || len(b.BindSig) > maxSigB64 {
 		return Bind{}, false
 	}
 	return b, true
@@ -119,8 +153,12 @@ func ParseChallenge(pkt []byte) ([]byte, bool) {
 // spoofed source can never have a leg bound on its behalf. The SAME conn must
 // then be used to run QUIC, with the relay's address as the peer endpoint, so
 // the relay forwards the punched/QUIC packets to the partner's leg.
-func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout time.Duration) error {
+func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout time.Duration, cred *BindCred) error {
 	cookie := ""
+	// The FIRST bind deliberately carries no ticket. The relay checks the cookie
+	// before it looks at a ticket, so this one can only ever draw a challenge —
+	// sending the permit before the relay has proven reachable would put it on the
+	// wire for nothing.
 	req := MarshalBind(Bind{SessionToken: token})
 	deadline := time.Now().Add(timeout)
 	next := time.Now()
@@ -144,7 +182,7 @@ func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout ti
 			next64 := base64.RawURLEncoding.EncodeToString(c)
 			if next64 != cookie {
 				cookie = next64
-				req = MarshalBind(Bind{SessionToken: token, Cookie: cookie})
+				req = MarshalBind(cred.bind(token, cookie, c))
 				next = time.Now()
 			}
 			continue
@@ -154,7 +192,37 @@ func BindLeg(conn *net.UDPConn, relayAddr *net.UDPAddr, token string, timeout ti
 			return nil // relay acked our leg
 		}
 	}
-	return errors.New("relay did not acknowledge the session (unreachable or wrong endpoint)")
+	if cred == nil {
+		return errors.New("relay did not acknowledge the session (unreachable, wrong endpoint, or it requires a ticket this buddy does not have — see the handshake server's --relay-id)")
+	}
+	return errors.New("relay did not acknowledge the session (unreachable, wrong endpoint, or it refused the ticket — check that relay and handshake server share the same --relay-id, that the relay pins this server's key, and that both clocks are in sync)")
+}
+
+// BindCred is what a bind must present in TICKET MODE: the server-signed permit
+// exactly as it arrived, and the ephemeral private key it was issued against. A
+// nil *BindCred binds the old way, which only a relay in network mode accepts.
+//
+// The private key never leaves the buddy — that is the whole point of the
+// scheme, and the reason a captured ticket is inert.
+type BindCred struct {
+	Payload []byte // ticket payload, verbatim as received
+	Sig     []byte // the server's signature over it
+	Eph     ed25519.PrivateKey
+}
+
+// bind builds the bind to send under the given cookie. With no credentials it is
+// the plain bind; with them it carries the ticket and a fresh proof of possession
+// over THIS cookie — which is what makes the bind unusable from another address
+// or after the cookie epoch turns.
+func (c *BindCred) bind(token, cookieB64 string, cookie []byte) Bind {
+	b := Bind{SessionToken: token, Cookie: cookieB64}
+	if c == nil {
+		return b
+	}
+	b.Ticket = base64.RawURLEncoding.EncodeToString(c.Payload)
+	b.TicketSig = base64.RawURLEncoding.EncodeToString(c.Sig)
+	b.BindSig = base64.RawURLEncoding.EncodeToString(ticket.SignBind(c.Eph, c.Payload, c.Sig, cookie))
+	return b
 }
 
 func sameAddr(a, b *net.UDPAddr) bool {

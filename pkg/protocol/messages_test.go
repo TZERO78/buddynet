@@ -40,7 +40,7 @@ func TestPeerListSignVerify(t *testing.T) {
 
 func TestRegistrationPayloadStable(t *testing.T) {
 	base := Message{Ver: Version, Role: RoleBuddy, Token: "t", ID: "id", PubKey: "pk",
-		VirtualIP: "10.66.1.2", Name: "alice", Ts: 7, Nonce: "nnnn", CodeEnc: "ce"}
+		VirtualIP: "10.66.1.2", Name: "alice", Ts: 7, Nonce: "nnnn", CodeEnc: "ce", EphPub: "epk"}
 	a := RegistrationPayload(base)
 	if string(a) != string(RegistrationPayload(base)) {
 		t.Fatal("registration payload not reproducible")
@@ -58,6 +58,10 @@ func TestRegistrationPayloadStable(t *testing.T) {
 		"ts":         func(m *Message) { m.Ts++ },
 		"nonce":      func(m *Message) { m.Nonce = "mmmm" },
 		"code_enc":   func(m *Message) { m.CodeEnc = "ce2" },
+		// The ephemeral relay key is the one whose omission would be exploitable
+		// rather than merely sloppy: the server signs it into a relay ticket, so an
+		// on-path swap would yield a usable permit for someone else's session.
+		"epk": func(m *Message) { m.EphPub = "epk2" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			m := base

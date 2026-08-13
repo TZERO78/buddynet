@@ -13,10 +13,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > and v8 side by side on two ports and migrate pair by pair (see *Migrating a
 > running server* in [docs/PROTOCOL.md](docs/PROTOCOL.md)).
 >
+> **Also breaking: a relay refuses to start without an authorization policy.**
+> `--role=relay` now needs `--server-key` (verify tickets from your handshake
+> server) or `--allow-cidr` (serve named networks), or both. A relay carries your
+> bandwidth, and a stranger who hoards its capacity takes away the fallback the
+> two people it was built for need. See *Relay authorization* below.
+>
 > **Also breaking, `--wireguard` only: traffic arriving on `bnetN` is no longer
 > forwarded anywhere.** `--expose` now covers this host and nothing behind it. If
 > you route a LAN machine to a buddy through this node — or a buddy into your LAN —
 > that stops working; see *A buddy is no longer routed THROUGH your host* below.
+
+### Added (Breaking) — relay authorization
+
+- **Relay tickets: a relay no longer takes anyone's word for a session.** The
+  handshake server issues every paired buddy a short-lived permit signed with its
+  identity key, and the relay verifies it with the matching **public** key. The
+  relay learns *that* a session was authorised and nothing about who is in it —
+  no buddy list, no identity in the bind, no record of who talks to whom. It
+  holds no signing key, so compromising it yields no ability to authorise a
+  session anywhere.
+
+  Turn it on with **one flag on each side**: `buddynet gen-relay-id` once, then
+  the same `--relay-id` on the handshake server and on the relay. On the usual
+  one-VPS `--role=handshake,relay` the relay derives the key it trusts from the
+  server in its own process, so that id is all you add.
+
+  A bare ticket would be a bearer token, so each buddy also mints a **fresh
+  ephemeral key per connection attempt** (`epk` on the `REGISTER`, covered by the
+  registration signature) and signs the bind with it, over the relay's own
+  address-bound, rotating cookie. A captured ticket — or a whole captured bind —
+  is inert without that private key, which never leaves the buddy.
+
+  Details, including the exact lifetime arithmetic (worst case 140 s, not 120)
+  and the check order on the relay's permanently open UDP port, in
+  [docs/PROTOCOL.md](docs/PROTOCOL.md); operator setup in
+  [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+- **A relay refuses to start without a policy**, and `--allow-cidr 0.0.0.0/0` (or
+  `::/0`) is refused with its own message rather than accepted as one. There is
+  deliberately no `--relay-open`: an "I know what I am doing" switch ends up in
+  production. Both policies together are an AND — the CIDR list is hardening on
+  top of tickets, never an alternative that a ticket bypasses.
+
+  **This is the change that will stop an existing relay from starting.** Add
+  `--server-key`/`--relay-id`, or `--allow-cidr`. Every shipped artifact is
+  updated: `deployments/docker-compose.yml`, `deployments/systemd/buddynet-relay.service`
+  (as an overridable `BUDDYNET_RELAY_POLICY=`), and the labs.
+
+- **`buddynet gen-relay-id`** mints the id. It is configuration, not a secret,
+  and both sides print theirs at startup — a mismatch otherwise surfaces only as
+  "every ticket rejected" with nothing in either log naming the cause.
+
+- **New operational dependency: clocks.** Relay and handshake server must agree
+  within 10 s. NTP handles it, it is invisible until it breaks, and then every
+  ticket is refused — so the relay logs a distinguishable reason that names both
+  possible causes (clock skew *or* a wrongly-issued ticket). It cannot tell them
+  apart, and does not pretend to.
+
+- **`--punch` is capped at 60 s** and refused above it at startup rather than
+  silently clipped: a ticket is valid for at most 120 s and has to cover the
+  punch *and* the bind that follows it.
+
+- **A half-open relay session now expires after an absolute 60 s.** Its idle
+  timer is refreshed by any packet from a bound source, so one leg plus a trickle
+  of traffic used to hold a session slot indefinitely with no partner ever
+  arriving.
+
+- **When the direct path fails and no relay is configured, the buddy says so.**
+  It does not claim a relay would have helped — it cannot know that — but
+  "no path: the direct connection failed and no relay is configured" is the
+  difference between an operator who knows what to do and one who concludes
+  BuddyNet is broken.
 
 ### Removed (Breaking)
 
