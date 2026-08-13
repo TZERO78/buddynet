@@ -24,7 +24,7 @@ import (
 // REGISTER travels inside TLS 1.3 rather than in the clear. Closing the control
 // client leaves the socket open, so the caller then hole-punches and runs the peer
 // tunnel on the very same mapping.
-func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, nd *node, rendezvous string, timeout time.Duration) (protocol.Peer, error) {
+func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfig, nd *node, rendezvous string, timeout time.Duration, cred *relayCred) (protocol.Peer, *protocol.RelayTicket, error) {
 	priv, serverPub := nd.priv, nd.serverPub
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -41,7 +41,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		}
 	}
 	if cli == nil {
-		return protocol.Peer{}, fmt.Errorf("QUIC control dial failed (is the server on --quic? wrong --server-key?): %w", derr)
+		return protocol.Peer{}, nil, fmt.Errorf("QUIC control dial failed (is the server on --quic? wrong --server-key?): %w", derr)
 	}
 	defer cli.Close() // leaves the UDP socket open for hole punching
 
@@ -52,9 +52,9 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		// transport reuses a single connection, but each stream must carry its own
 		// nonce or the server sees the second poll as a replay. No cookie here —
 		// QUIC's own handshake validated the source address.
-		reg, berr := buildRegister(cfg, nd, rendezvous)
+		reg, berr := buildRegister(cfg, nd, rendezvous, cred.epk())
 		if berr != nil {
-			return protocol.Peer{}, berr
+			return protocol.Peer{}, nil, berr
 		}
 		rctx, rcancel := context.WithTimeout(ctx, 5*time.Second)
 		resp, err := cli.Roundtrip(rctx, reg)
@@ -63,15 +63,18 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 			var r protocol.Message
 			if json.Unmarshal(resp, &r) == nil && r.Type == protocol.TypePeerList {
 				if r.Ver != protocol.Version {
-					return protocol.Peer{}, fmt.Errorf("incompatible protocol: server speaks v%d, we speak v%d — update buddynet", r.Ver, protocol.Version)
+					return protocol.Peer{}, nil, fmt.Errorf("incompatible protocol: server speaks v%d, we speak v%d — update buddynet", r.Ver, protocol.Version)
 				}
 				peers := canonicalPeers(r.Peers)
 				sig, derr := base64.StdEncoding.DecodeString(r.Sig)
 				if derr != nil || !ed25519.Verify(serverPub, protocol.PeerListPayload(rendezvous, r.Ts, peers), sig) {
-					return protocol.Peer{}, errors.New("server signature did not verify (wrong --server-key, or MITM)")
+					return protocol.Peer{}, nil, errors.New("server signature did not verify (wrong --server-key, or MITM)")
 				}
 				if d := time.Since(time.Unix(r.Ts, 0)); d <= 60*time.Second && d >= -60*time.Second && len(peers) > 0 {
-					return peers[0], nil
+					// The ticket rides along with the roster and is returned unparsed: it
+					// carries its own signature by the same key, and the relay verifies it
+					// over the exact bytes it receives.
+					return peers[0], r.Ticket, nil
 				} else if d > 60*time.Second || d < -60*time.Second {
 					noteSkew(d, &skewNoted)
 				}
@@ -86,7 +89,7 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 		case <-time.After(time.Second):
 		}
 	}
-	return protocol.Peer{}, errors.New("timed out waiting for partner to register with the same token")
+	return protocol.Peer{}, nil, errors.New("timed out waiting for partner to register with the same token")
 }
 
 // noteSkew logs a one-time diagnostic when the server's signature verified but
@@ -110,7 +113,7 @@ func noteSkew(d time.Duration, noted *bool) {
 // Every caller must call this per ATTEMPT, never once per session: the server
 // rejects a repeated (PubKey,Nonce) as a replay, which is exactly what a
 // re-marshalled cached registration would look like.
-func buildRegister(cfg BuddyConfig, nd *node, rendezvous string) ([]byte, error) {
+func buildRegister(cfg BuddyConfig, nd *node, rendezvous, epk string) ([]byte, error) {
 	nonce, err := protocol.NewNonce()
 	if err != nil {
 		return nil, fmt.Errorf("registration nonce: %w", err)
@@ -126,6 +129,10 @@ func buildRegister(cfg BuddyConfig, nd *node, rendezvous string) ([]byte, error)
 		Name:      cfg.Name,
 		Ts:        time.Now().Unix(),
 		Nonce:     nonce,
+		// Signed like everything else the server acts on: the server puts this key
+		// into the relay ticket, so an on-path swap would hand the swapper a usable
+		// permit for this session.
+		EphPub: epk,
 	}
 	if cfg.Code != "" {
 		// Sealed BEFORE signing: CodeEnc is covered by the signature, so a captured

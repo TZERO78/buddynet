@@ -56,11 +56,11 @@ func TestBuildRegisterIsFreshPerAttempt(t *testing.T) {
 	nd, srvPriv := testNode(t)
 	cfg := BuddyConfig{Name: "alice"}
 
-	first, err := buildRegister(cfg, nd, "rendezvous")
+	first, err := buildRegister(cfg, nd, "rendezvous", "")
 	if err != nil {
 		t.Fatalf("buildRegister: %v", err)
 	}
-	second, err := buildRegister(cfg, nd, "rendezvous")
+	second, err := buildRegister(cfg, nd, "rendezvous", "")
 	if err != nil {
 		t.Fatalf("buildRegister: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestBuildRegisterIsFreshPerAttempt(t *testing.T) {
 func TestBuildRegisterSealsTokenAndBindsIdentity(t *testing.T) {
 	nd, srvPriv := testNode(t)
 
-	raw, err := buildRegister(BuddyConfig{Name: "alice"}, nd, "secret-rendezvous")
+	raw, err := buildRegister(BuddyConfig{Name: "alice"}, nd, "secret-rendezvous", "")
 	if err != nil {
 		t.Fatalf("buildRegister: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestBuildRegisterSealsTokenAndBindsIdentity(t *testing.T) {
 // cannot be lifted onto another key's registration.
 func TestEnrollmentCodeIsBoundToTheSigningKey(t *testing.T) {
 	victim, srvPriv := testNode(t)
-	raw, err := buildRegister(BuddyConfig{Code: "ENROLL-ME"}, victim, "tok")
+	raw, err := buildRegister(BuddyConfig{Code: "ENROLL-ME"}, victim, "tok", "")
 	if err != nil {
 		t.Fatalf("buildRegister: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestEnrollmentCodeIsBoundToTheSigningKey(t *testing.T) {
 	// An attacker registers under ITS OWN key and grafts on the captured code.
 	attacker, _ := testNode(t)
 	attacker.serverPub = victim.serverPub
-	rawAtk, err := buildRegister(BuddyConfig{}, attacker, "tok")
+	rawAtk, err := buildRegister(BuddyConfig{}, attacker, "tok", "")
 	if err != nil {
 		t.Fatalf("buildRegister: %v", err)
 	}
@@ -146,7 +146,7 @@ func TestEnrollmentCodeIsBoundToTheSigningKey(t *testing.T) {
 
 func mustBuild(t *testing.T, nd *node) []byte {
 	t.Helper()
-	raw, err := buildRegister(BuddyConfig{}, nd, "tok")
+	raw, err := buildRegister(BuddyConfig{}, nd, "tok", "")
 	if err != nil {
 		t.Fatalf("buildRegister: %v", err)
 	}
