@@ -97,7 +97,14 @@ func TestQUICEnrollmentLifecycle(t *testing.T) {
 	if enrollClient(t, srvAddr, srvPub, stranger, "") {
 		t.Fatal("an unknown client without an enrollment code must be refused")
 	}
-	if len(authz.pend) != 0 {
+	// Under the lock: the server goroutine writes a.pend from its own goroutine,
+	// so reading the map bare races it (the race detector catches this on a loaded
+	// CI runner and rarely on a quiet laptop). Every other assertion on authz
+	// internals in these tests already takes the lock; this one did not.
+	authz.mu.RLock()
+	pending := len(authz.pend)
+	authz.mu.RUnlock()
+	if pending != 0 {
 		t.Fatal("a codeless stranger must not create a pending enrollment")
 	}
 
