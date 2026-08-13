@@ -24,7 +24,7 @@ No VPS required: the containers simulate a full deployment — server, Peer A, a
 
 | Container  | Role             | What it does |
 |------------|------------------|--------------|
-| `server`   | `handshake,relay`| Matchmaking + blind relay fallback. Equivalent to a VPS deployment. |
+| `server`   | `handshake,relay`| Matchmaking + blind relay fallback (with relay tickets: `--relay-id`). Equivalent to a VPS deployment. |
 | `buddy-a`  | `buddy`          | Runs a busybox httpd on `:7777`; forwards incoming tunnel streams to it. |
 | `buddy-b`  | `buddy`          | Listens on `:7070` (host-mapped); forwards connections through the tunnel to buddy-a. |
 
@@ -166,6 +166,26 @@ that the whole `/64` shares one leg budget, that a *different* `/64` is still
 admitted, and that one `/64` cannot fill the global session table and lock an
 unrelated prefix out. See `pentest/README.md` for why the probe's `relay-hoard`
 scene does not cover this.
+
+## Relay ticket test (v5: a relay serves only sessions your server authorised)
+
+Needs root for network namespaces; no Docker, no `lab/.env`, no WireGuard module:
+
+```bash
+sudo -v && ./test-relay-tickets.sh              # → RESULT: PASS (10 checks)
+```
+
+Three namespaces on a bridge with the **direct** A↔B path firewalled off, so the
+relay is the only way through — and scenario 0 asserts that block first, because
+without it every later scenario could pass while the buddies quietly paired
+directly.
+
+The A/B is internal and total: scenario 1 pairs through the relay and pulls a real
+HTTP response across it; scenario 2 changes **one thing** — the relay's
+`--relay-id` — and the same buddies with the same tickets are refused, with the
+reason in the relay log. It also checks that a relay with no policy (and one with
+`--allow-cidr 0.0.0.0/0`) refuses to start, that rejection lines carry no source
+addresses, and that a buddy with no relay configured says so instead of timing out.
 
 ## Forward-path test (finding M-1: `--expose` is not a route into your LAN)
 

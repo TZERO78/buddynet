@@ -31,7 +31,7 @@ three roles; in a buddy the relay and handshake code sit dormant as fallback.
 | Role | Needs | Job |
 |---|---|---|
 | `buddy` | nothing (NAT is fine) | Find each partner, bring up a tunnel along the fallback chain (one per buddy), forward TCP. |
-| `relay` | public IP | Blindly forward encrypted datagrams between two session legs. |
+| `relay` | public IP | Blindly forward encrypted datagrams between two session legs, for sessions a named handshake server authorised. |
 | `handshake` | public IP | Learn peer endpoints, pair peers by token, hand back a **signed** `PEER_LIST`. No data flows through it. |
 
 A node may run **several roles at once**, comma-separated:
@@ -117,6 +117,25 @@ type Transport interface {
   it forwards QUIC). Built over raw netlink in [`internal/wg`](../internal/wg) +
   [`internal/role/wgpath.go`](../internal/role/wgpath.go). See
   **[WIREGUARD.md](WIREGUARD.md)**.
+
+## Why a relay is authorized but still blind
+
+Two requirements that sound opposed: a relay must not serve strangers (it carries
+the operator's bandwidth, and a stranger can hoard the capacity the pair needs),
+and it must not learn who talks to whom.
+
+A **ticket** satisfies both. The handshake server signs a short-lived permit for
+each paired buddy; the relay verifies it with the server's public key. It learns
+*that* the session was authorised — not who is in it. The alternative designs were
+rejected for exactly this reason: a buddy list on the relay would need durable
+identities in the bind (and would put runtime state on a server), and an
+`--relay-open` switch would end up in production.
+
+The permit is bound to an ephemeral key the buddy mints per attempt and must sign
+with, so it is not a bearer token: capturing it, or the whole bind, gains nothing.
+The relay holds only a **public** key — it can withhold service, never authorise a
+session. Full format in [PROTOCOL.md](PROTOCOL.md), operator setup in
+[OPERATIONS.md](OPERATIONS.md).
 
 ## Why the relay stays blind
 

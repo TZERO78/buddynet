@@ -241,6 +241,15 @@ sudo -u buddynet-handshake buddynet --role=handshake \
     --key /var/lib/buddynet-handshake/id.key init
 
 sudo systemctl enable --now buddynet-handshake
+
+# ONCE: mint the relay id (not a secret) and put the SAME value on both units.
+buddynet gen-relay-id                             # → RELAY_ID
+#   sudo systemctl edit buddynet-handshake
+#     [Service]
+#     Environment=BUDDYNET_RELAY_ARGS=--relay-endpoint vps.example:51821 --relay-id RELAY_ID
+#   sudo systemctl edit buddynet-relay
+#     [Service]
+#     Environment=BUDDYNET_RELAY_POLICY=--server-key SERVER_KEY --relay-id RELAY_ID
 sudo systemctl enable --now buddynet-relay        # optional but recommended fallback
 
 # Print the key again later — `identity` only READS it:
@@ -257,9 +266,21 @@ journalctl --namespace=buddynet -u buddynet-handshake -f
 # look for: HANDSHAKE: action=listening addr=[::]:51820 ...
 ```
 
+> **The relay refuses to start without an authorization policy.** Give it
+> `--server-key <SERVER_KEY> --relay-id <RELAY_ID>` (verify tickets from the
+> handshake server above — recommended, it follows a buddy whose address changes)
+> or `--allow-cidr` (named networks only). `0.0.0.0/0` is refused. Without a
+> policy, anyone on the internet can spend your bandwidth and hoard the capacity
+> your own fallback needs.
+
 > **Running both roles in one process instead?** You can skip the separate relay
-> unit and run `--role=handshake,relay` with `--relay-endpoint vps.example:51821`
-> so buddies learn the relay address automatically. See
+> unit and run `--role=handshake,relay --relay-endpoint vps.example:51821
+> --relay-id RELAY_ID`; the relay then trusts the handshake server in its own
+> process, so no `--server-key` is needed. **The trade is blast radius:** one
+> process means the server's signing key sits in the memory that parses relay
+> packets, so code execution through the relay could mint tickets. Two units keep
+> the relay holding no signing key at all — prefer them when the relay faces the
+> public internet. See
 > [OPERATIONS.md — Combined handshake + relay](OPERATIONS.md#combined-handshake--relay-typical-vps-setup).
 
 ---
