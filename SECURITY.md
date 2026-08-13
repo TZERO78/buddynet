@@ -694,13 +694,18 @@ before trusting a download:
 
 ```bash
 cosign verify-blob --bundle buddynet-linux-amd64.bundle \
-  --certificate-identity-regexp '^https://github.com/TZERO78/buddynet' \
+  --certificate-identity-regexp '^https://github\.com/TZERO78/buddynet/\.github/workflows/release\.yml@refs/tags/v[0-9]+\.[0-9]+\.[0-9]+$' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   buddynet-linux-amd64
 ```
 
-The identity regexp ties the signature to this repository's workflow, and the OIDC
-issuer to GitHub's Actions token — a binary signed by anything else fails.
+The identity regexp ties the signature to **this repository's release workflow at
+a SemVer tag**, and the OIDC issuer to GitHub's Actions token — a binary signed by
+anything else fails. The anchors and escapes matter: an unanchored
+`^https://github.com/TZERO78/buddynet` would also accept any other workflow in
+this repo, any branch instead of a tag, and any same-owner repository whose name
+merely *starts* with `buddynet` (there is no `/` after it), and the unescaped dots
+would match any character.
 (Releases through v1.1.0 used separate `.sig`/`.pem`; v1.1.2 onward uses the
 `.bundle`.) The Unraid plugin pins the published binary's SHA-256 and refuses to
 install on a mismatch.

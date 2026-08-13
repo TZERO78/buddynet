@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v5.0.0] — 2026-08-13
 
 > **Breaking: `protocol.Version` 7 → 8, and two flags are gone.** A v4 buddy
 > cannot pair with a v5 handshake server, or the other way round — a MAJOR
@@ -447,6 +447,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Found by the network-namespace lab after the fix above, not by the unit tests;
   both cases are covered by regression tests now.
 
+## [v4.1.1] — 2026-08-13
+
+A single security fix for the v4 line, released before v5 so the v4 branch was
+not left carrying an unauthenticated remote DoS while v5 was still in progress:
+**one IPv6 /64 could exhaust a public relay**. It is described in full under
+v5.0.0 above (*One IPv6 /64 could exhaust a public relay*, and *A refused bind no
+longer costs a global session slot*), because v5.0.0 contains the same fix — the
+text is not repeated here rather than drifting into two versions of one story.
+
+The Unraid plugin was pinned to this release in the same step: installs had still
+been pulling the v4.0.0 binary, so they carried the DoS until the plugin moved.
+
 ## [v4.0.0] — 2026-08-11
 
 > **Breaking: `protocol.Version` 6 → 7, with no compatibility shim.** A v3.x
@@ -811,7 +823,10 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v3.0.0...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.0.0...HEAD
+[v5.0.0]: https://github.com/TZERO78/buddynet/compare/v4.1.1...v5.0.0
+[v4.1.1]: https://github.com/TZERO78/buddynet/compare/v4.1.0...v4.1.1
+[v4.0.0]: https://github.com/TZERO78/buddynet/compare/v3.0.1...v4.0.0
 [v3.0.0]: https://github.com/TZERO78/buddynet/compare/v2.3.0...v3.0.0
 [v2.3.0]: https://github.com/TZERO78/buddynet/compare/v2.2.1...v2.3.0
 [v2.2.1]: https://github.com/TZERO78/buddynet/compare/v2.2.0...v2.2.1
