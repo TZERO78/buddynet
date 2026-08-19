@@ -35,20 +35,29 @@ never travels in the clear. See [OPERATIONS.md](OPERATIONS.md).
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
     --invite --forward 127.0.0.1:873
-# prints a one-time TOKEN and waits for the buddy to join
+# prints a one-time INVITE and waits for the buddy to join
 ```
+
+Hand the invite over on a channel you trust (phone, Signal): it carries this
+node's public key, so the joiner pins this identity from it.
 
 **Joiner** (the machine doing the backup):
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
-    --join=TOKEN -L 127.0.0.1:9000 &
+    --join=INVITE -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
-`--invite` mints a **one-time** token; `--join` consumes it. It is valid only
+`--invite` mints a **one-time** invite; `--join` consumes it. It is valid only
 until the first pairing (`--invite-timeout`, default 15 min) — a stolen invite is
 worthless afterwards.
+
+The joiner is done at that point: the key inside the invite is pinned, so nothing
+is asked of it. The inviter asks once for the six-character code shown on the
+joiner's screen — call your buddy and type it in. It deliberately does not show
+its own code, so the code can only come from that call. See
+[INVITE.md](INVITE.md).
 
 ### Reconnecting
 

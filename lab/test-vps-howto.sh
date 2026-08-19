@@ -117,7 +117,7 @@ docker run -d --name howto-inviter --network "$NET" \
   --role=buddy --key /var/lib/buddynet/id.key --server server:51820 --server-key "$KEY" \
   --peer-key "$BPUB" --forward 127.0.0.1:7777 --invite --no-interactive >/dev/null 2>&1
 TOK=""
-for i in $(seq 1 30); do TOK=$(docker logs howto-inviter 2>&1 | grep -m1 -oE '^[A-Za-z0-9_-]{40,}$'); [ -n "$TOK" ] && break; sleep 0.5; done
+for i in $(seq 1 30); do TOK=$(docker logs howto-inviter 2>&1 | grep -m1 -oE '^bnet1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'); [ -n "$TOK" ] && break; sleep 0.5; done
 [ -n "$TOK" ] && ok "machine A minted a one-time invite token" || no "no invite token minted"
 
 # Machine B: join with the token, pin A, forward :9099 → A.

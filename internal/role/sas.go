@@ -27,8 +27,19 @@ const sasLabel = "buddynet-sas-v1"
 
 // promptSAS is the indirection the connect paths call, so a test can drive the
 // REJECTED and TIMED-OUT branches — the ones that must leave nothing persisted —
-// without a terminal. Production always runs PromptSAS; only tests reassign it.
-var promptSAS = PromptSAS
+// without a terminal. blind selects which half of the asymmetric invite flow
+// this side runs (see PromptSASBlind). Production always runs the real prompts;
+// only tests reassign it.
+var promptSAS = func(sas string, blind bool, timeout time.Duration) error {
+	if blind {
+		return PromptSASBlind(sas, timeout)
+	}
+	return PromptSAS(sas, timeout)
+}
+
+// showSAS is the same indirection for the display-only side, which has nothing
+// to verify and therefore never blocks.
+var showSAS = ShowSAS
 
 // sasAlphabet is Crockford base32 — digits and letters with the easily confused
 // I, L, O and U removed, so a 6-character code is unambiguous to read aloud or
@@ -84,6 +95,10 @@ func ComputeSAS(myPub, peerPub ed25519.PublicKey, sessionID []byte) string {
 // contact, so the check is mutual: each reads its own code and types the other's.
 // The prompt goes to stderr (so a piped stdout stays clean); the code is read from
 // stdin.
+//
+// This is the SYMMETRIC fallback, used when neither side pinned the other from
+// an invite blob (a bare legacy token). It shows this side's code as well as
+// asking for one, which is what PromptSASBlind exists to avoid — see there.
 func PromptSAS(sas string, timeout time.Duration) error {
 	fmt.Fprintf(os.Stderr, `
 🔑 Safety check — first contact with this buddy.
@@ -105,6 +120,61 @@ Type your buddy's code: `, sas, timeout)
 	}
 	fmt.Fprintln(os.Stderr, "code does not match — aborting (key NOT trusted).")
 	return ErrSASRejected
+}
+
+// PromptSASBlind asks for the buddy's code WITHOUT showing this side's own code,
+// and is the inviter's half of the key-bound invite flow.
+//
+// The symmetric prompt above has one weak spot: both ends derive the SAME code,
+// so a lazy human can read the code off their own screen and type it back
+// without ever calling their buddy. That bypass is not academic — under a man in
+// the middle each side sees a code that matches only its own screen, so
+// self-copying is exactly what makes the attack succeed on both ends at once.
+//
+// The invite blob removes it by making the two sides asymmetric. The joining
+// buddy pinned the inviter's key from the blob, so it has nothing to verify and
+// merely DISPLAYS the code (ShowSAS). The inviter is the only side that
+// verifies, and it never sees its own code — so there is nothing to copy, and
+// the only way to produce the right six characters is to have heard them from
+// the buddy over the trusted channel. Rejection semantics are identical to
+// PromptSAS: a mismatch, an empty line or a timeout leaves the key untrusted.
+func PromptSASBlind(sas string, timeout time.Duration) error {
+	fmt.Fprintf(os.Stderr, `
+🔑 Safety check — your buddy is joining with your invite.
+   Call them over a trusted channel (phone, Signal) and ask for the code shown
+   on THEIR screen, then type it here. Your own code is deliberately not shown:
+   the code has to come from your buddy, not from this screen.
+
+   No answer within %s counts as a mismatch (abort).
+Type the code your buddy reads to you: `, timeout)
+
+	line, err := readSASLine(timeout)
+	if err != nil {
+		return err
+	}
+	if sasMatches(line, sas) {
+		return nil
+	}
+	fmt.Fprintln(os.Stderr, "code does not match — aborting (key NOT trusted).")
+	return ErrSASRejected
+}
+
+// ShowSAS displays this side's code for the human to read out, and returns
+// immediately — it is the joining buddy's half of the key-bound invite flow.
+// That side already pinned the inviter's key from the invite blob, so it has
+// nothing left to confirm and must not be asked to: any prompt here would be the
+// reflex-confirm this design exists to remove, and a human who can see a code
+// AND type one is a human who can copy their own. Displaying only keeps the
+// single human step on the inviter's side.
+func ShowSAS(sas string) {
+	fmt.Fprintf(os.Stderr, `
+🔑 Your buddy's identity is already verified — you pinned their key from the
+   invite, so there is nothing for you to check here.
+   They still have to verify YOU. Read them this code over the phone:
+
+        your code:  %s
+
+`, sas)
 }
 
 // sasMatches reports whether a human-typed code equals the expected SAS after

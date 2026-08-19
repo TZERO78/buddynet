@@ -113,13 +113,16 @@ buddynet --role=handshake,relay \
 
 ```bash
 buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --invite --forward 127.0.0.1:873
-# prints a one-time TOKEN, then waits for your buddy to join
+# prints a one-time INVITE, then waits for your buddy to join
 ```
+
+Hand the invite over on a channel you trust (phone, Signal). It carries this
+machine's public key, so your buddy pins **your** identity straight from it.
 
 **3 — Joiner** (the machine doing the backup):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=TOKEN -L 127.0.0.1:9000 &
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=INVITE -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
@@ -196,18 +199,23 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 
 ## Security
 
-- Pin the server with `--server-key` and your buddy with `--peer-key` (each
-  buddy prints its identity at startup). Without `--peer-key`, trust-on-first-use
-  is used — but on that first connect both sides show a **Short Authentication
-  String**: a 6-character code (e.g. `K7QX2M`) derived from both keys and the
-  live TLS session. Call your buddy over a trusted channel (phone, Signal), read
-  them your code and type in theirs (both sides do — it is mutual). A man in the
-  middle makes the two sides show a *different* code, so it will not match and you
-  catch it before any key is trusted. After that the key
-  is pinned and checked silently. For daemons set `--no-interactive` and pin with
-  `--peer-key` (an unknown key is then refused, never learned blind).
-- The token is a **bearer secret** — keep it off the command line (use a `0600`
-  file or `--join`).
+- Pin the server with `--server-key`. Your buddy pins **itself**: the invite from
+  `--invite` is `bnet1.<token>.<inviter-key>`, so `--join` learns the inviter's
+  identity from the channel you already trust (phone, Signal) and refuses anyone
+  else — a hostile handshake server cannot swap in a different buddy, and nobody
+  has to compare anything.
+- The other direction takes **one** human step, and it is built so it cannot be
+  clicked away: the joiner **displays** a 6-character code (e.g. `K7QX2M`, derived
+  from both keys and the live session), and the inviter **types it in without
+  being shown its own**. There is nothing on the inviter's screen to copy, so the
+  code can only have come from the phone call. A man in the middle makes the two
+  sides derive different codes, so it will not match.
+- `--peer-key` pins a buddy by hand and is the choice for unattended nodes — then
+  neither side prompts. Without a pin on either side, first contact falls back to
+  comparing that code mutually. For daemons set `--no-interactive` (an unknown
+  key is then refused, never learned blind).
+- The invite is a **bearer secret** — keep it off the command line (use a `0600`
+  file or `BUDDYNET_JOIN`).
 - Optional allowlist (approval mode) on the handshake server, with sealed
   enrollment codes so a code can't be read off the wire.
 - The bootstrap server is hardened against abuse: source-address validation,
@@ -240,7 +248,7 @@ its honest limits — is in **[SECURITY.md](SECURITY.md)**.
 | [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md) | **BuddyShare**: scoped folder sharing + mutual backup over SMB |
 | [docs/WIREGUARD.md](docs/WIREGUARD.md) | The kernel-WireGuard data plane and scoped exposure (`--expose`) |
 | [docs/PEERS.md](docs/PEERS.md) | **MultiPeer** (many buddies): `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
-| [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, SAS, session secrets, TOFU, re-auth |
+| [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, key-bound invites, SAS, session secrets, TOFU, re-auth |
 | [docs/APPROVAL.md](docs/APPROVAL.md) | Server-side client allowlist and enrollment codes |
 | [docs/BUDDYDNS.md](docs/BUDDYDNS.md) | `.buddy` names and the stub resolver |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | QUIC, IP allowlists, relay setup, lazy tunnel, log schema |

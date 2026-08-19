@@ -221,7 +221,7 @@ func TestRejectedSASPersistsNothing(t *testing.T) {
 
 			// Drive the SAS prompt to the failing verdict for this subtest.
 			saved := promptSAS
-			promptSAS = func(string, time.Duration) error { return verdict }
+			promptSAS = func(string, bool, time.Duration) error { return verdict }
 			t.Cleanup(func() { promptSAS = saved })
 
 			ctx, cancel := context.WithCancel(context.Background())

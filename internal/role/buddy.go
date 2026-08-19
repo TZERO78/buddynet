@@ -16,6 +16,7 @@ import (
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	buddydns "github.com/tzero78/buddynet/internal/dns"
+	"github.com/tzero78/buddynet/internal/invite"
 	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/peer"
 	"github.com/tzero78/buddynet/internal/ticket"
@@ -73,6 +74,21 @@ type BuddyConfig struct {
 	// than learned blindly — pin it with --peer-key instead.
 	Interactive bool
 	SASTimeout  time.Duration // how long to wait for SAS confirmation (default 30s)
+
+	// SASShow and Inviting select this node's half of the asymmetric first
+	// contact that a key-bound invite blob makes possible (see internal/invite).
+	// Exactly one side sets each, and with neither set the flow is the symmetric
+	// legacy one (a bare token: both ends show a code and type one).
+	//
+	// SASShow is set on the JOINING side, which pinned the inviter's key from the
+	// blob and therefore has nothing to verify: it only DISPLAYS its code for the
+	// inviter to hear. Inviting is set by --invite: this node prints the blob
+	// (which needs the identity, hence here and not in main) and is the only side
+	// that verifies — and it does so WITHOUT seeing its own code, so what it
+	// types can only have come from the buddy over the trusted channel, not off
+	// its own screen. One human step, both directions covered.
+	SASShow  bool
+	Inviting bool
 
 	// Ephemeral marks an --invite/--join pairing: the Token is a short-lived,
 	// one-time invite. On the first SAS-confirmed pairing a long-lived session
@@ -199,6 +215,16 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	myVIP := bcrypto.VirtualIPString(priv.Public().(ed25519.PublicKey))
 	myID := randomID()
 	log.Printf("buddynet buddy — identity %s vip=%s id=%s", myPub, myVIP, myID)
+
+	// --invite: print the invite blob now that the identity is known. It carries
+	// the rendezvous token AND this node's public key, so the joining buddy pins
+	// us straight from the trusted channel the invite travels over — no server,
+	// however hostile, gets to name who is on this end. Printed here rather than
+	// where the token is minted because the key is only settled once it has been
+	// loaded (or, for an ephemeral node, generated).
+	if cfg.Inviting {
+		showInvite(invite.Mint(cfg.Token, priv.Public().(ed25519.PublicKey)))
+	}
 	if cfg.ReauthInterval == 0 {
 		log.Print("NOTE: --reauth-interval is 0 (off): once a DIRECT tunnel is up the handshake server " +
 			"is no longer in the path, so a server-side revocation or token rotation will NOT tear it down. " +

@@ -38,6 +38,7 @@ import (
 	"time"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
+	binvite "github.com/tzero78/buddynet/internal/invite"
 	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/role"
 	"github.com/tzero78/buddynet/internal/secret"
@@ -126,8 +127,8 @@ func main() {
 	sasTimeout := flag.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)")
 	inviteTimeout := flag.Duration("invite-timeout", 15*time.Minute, "buddy: give up the first pairing (--invite/--join) after this long; the invite token is one-time")
 	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)")
-	invite := flag.Bool("invite", false, "buddy: mint a ONE-TIME invite token (valid until first pairing, see --invite-timeout), print it, and wait; afterwards reconnects use a stored session secret")
-	join := flag.String("join", "", "buddy: join with the one-time invite token your buddy gave you; on success a session secret is stored for reconnects")
+	invite := flag.Bool("invite", false, "buddy: mint a ONE-TIME invite (valid until first pairing, see --invite-timeout), print it, and wait. The invite carries this node's public key, so your buddy pins YOUR identity from it — hand it over on a channel you trust. Afterwards reconnects use a stored session secret")
+	join := flag.String("join", "", "buddy: join with the one-time invite your buddy gave you. A key-bearing invite pins them automatically (no code to compare on this side); a bare token falls back to first-contact verification. On success a session secret is stored for reconnects")
 	name := flag.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars")
 	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
 	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
@@ -223,9 +224,18 @@ func main() {
 	// squat the pairing, for as long as the pair existed).
 	token := ""
 	ephemeral := false
+	// sasShow marks the joining side of a KEY-BOUND invite: the blob pinned the
+	// inviter, so this side has nothing left to verify and only shows its code
+	// for the inviter to type. See role.BuddyConfig.SASShow.
+	sasShow := false
 	if hasBuddy {
 		if *join != "" {
-			token = *join
+			tok, pin, show, jerr := resolveJoin(*join, *peerKey)
+			if jerr != nil {
+				fmt.Fprintf(os.Stderr, "error: %v\n", jerr)
+				os.Exit(2)
+			}
+			token, *peerKey, sasShow = tok, pin, show
 			ephemeral = true
 		}
 		if *invite {
@@ -242,6 +252,7 @@ func main() {
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
 		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
 		ephemeral: ephemeral, inviteTimeout: *inviteTimeout,
+		inviting: *invite, sasShow: sasShow,
 		reauthInterval: *reauthInterval,
 		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
 		expose: *expose,
@@ -475,6 +486,7 @@ type buddyArgs struct {
 	peersFile                                                               string
 	localListen, forward, vipListen, name, expose                           string
 	lab, status, interactive, ephemeral, dns, lazy, wireguard               bool
+	inviting, sasShow                                                       bool
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
 
@@ -500,6 +512,7 @@ func (a buddyArgs) config() role.BuddyConfig {
 		PunchDur: a.punchDur, IdleTimeout: a.idleTimeout, Status: a.status,
 		Interactive: a.interactive, SASTimeout: a.sasTimeout,
 		Ephemeral: a.ephemeral, InviteTimeout: a.inviteTimeout,
+		Inviting: a.inviting, SASShow: a.sasShow,
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
 		WireGuard: a.wireguard, Expose: a.exposeScope(),
@@ -609,20 +622,44 @@ func runBuddy(ctx context.Context, a buddyArgs) {
 	os.Exit(1) // local failure (socket / DNS)
 }
 
-// mintInviteToken mints a fresh pairing token, shows it (reveal-and-hide on a
-// terminal, plain when piped), and returns it so the inviting buddy keeps
-// running and waits for the partner to join.
+// resolveJoin turns the value of --join into the rendezvous token plus, when the
+// invite carries one, the inviter's key to pin. sasShow reports that the pin came
+// from the invite, which is what makes this side the DISPLAY half of first
+// contact (nothing to verify here; see role.BuddyConfig.SASShow).
+//
+// A key-bearing invite is what removes the human from this direction entirely: it
+// arrived over a channel the user already trusts, so the identity on it beats
+// anything the handshake server has to say. A bare token (an older inviter) is
+// still accepted and pairs by trust-on-first-use — but a MALFORMED invite is an
+// error, never a silent downgrade to that weaker path.
+func resolveJoin(join, peerKey string) (token, pin string, sasShow bool, err error) {
+	tok, inviterPub, perr := binvite.Parse(join)
+	if perr != nil {
+		return "", "", false, fmt.Errorf("--join: %w\n"+
+			"  Paste the invite EXACTLY as your buddy sent it — a truncated or edited one is\n"+
+			"  refused rather than falling back to the weaker unpinned path", perr)
+	}
+	if inviterPub == nil {
+		return tok, peerKey, false, nil // bare token from an older inviter
+	}
+	pinned := bcrypto.PubKeyB64(inviterPub)
+	if peerKey != "" && peerKey != pinned {
+		return "", "", false, fmt.Errorf("--peer-key does not match the key inside the invite.\n"+
+			"  invite:     %s\n  --peer-key: %s\n"+
+			"  One of the two is not your buddy — refusing rather than picking one", pinned, peerKey)
+	}
+	return tok, pinned, true, nil
+}
+
+// mintInviteToken mints a fresh one-time rendezvous token for --invite. It only
+// returns it: the invite the human actually hands over is the BLOB (token plus
+// this node's public key), and that is printed by role.Buddy, which is the first
+// place the identity key is settled — for an ephemeral node it does not exist
+// until then. See internal/invite.
 func mintInviteToken() string {
 	tok, err := secret.NewToken()
 	if err != nil {
 		log.Fatalf("could not mint token: %v", err)
-	}
-	if secret.Interactive() {
-		fmt.Fprint(os.Stderr, "Invite token (give the SAME value to your buddy as --join). It's a bearer secret:\n")
-		secret.RevealUntilKey(tok)
-		fmt.Fprintln(os.Stderr, "Token hidden — now waiting for your buddy to join...")
-	} else {
-		fmt.Println(tok)
 	}
 	return tok
 }
@@ -879,11 +916,14 @@ QUICK START — connect two machines
   2) On machine A, expose a local service (e.g. an rsync daemon on :873):
        %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
             --invite -forward 127.0.0.1:873
-     It prints a ONE-TIME invite token — hand it to B over a trusted channel.
+     It prints a ONE-TIME invite — hand it to B over a channel you trust (phone,
+     Signal). The invite carries A's key, so B pins A's identity straight from it.
 
   3) On machine B, reach A's service locally (here on :9000):
        %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
-            --join=TOKEN -L 127.0.0.1:9000
+            --join=INVITE -L 127.0.0.1:9000
+     B is now done. A asks once for the six-character code shown on B's screen —
+     call B and type it in. That single step verifies B; A was already pinned.
 
 MANY BUDDIES (MultiPeer) — one node, several tunnels at once
 
@@ -914,11 +954,17 @@ COMMANDS
   %[1]s version
 
 SECURITY — please read
-  • Pin your buddy with --peer-key (each buddy prints its identity at startup).
-    Without a pin, first contact is verified by a Short Authentication String
-    you compare out of band, then remembered in --known-peers.
-  • The invite token is one-time and retired after the first pairing; reconnects
-    use the stored session secret, so it never has to be kept around.
+  • An invite from --invite carries the inviter's public key, so --join pins it
+    without anyone comparing anything: a hostile handshake server cannot put a
+    different identity on that end. The inviter verifies the joiner by typing the
+    six-character code the joiner displays — one human step, and it cannot be
+    click-confirmed away.
+  • --peer-key pins a buddy explicitly and is still the strongest option for
+    unattended nodes (no human, no prompt). Without either, first contact falls
+    back to comparing a Short Authentication String out of band, then remembers
+    the key in --known-peers.
+  • The invite is one-time and retired after the first pairing; reconnects use the
+    stored session secret, so it never has to be kept around.
 
 TRANSPORT
   The handshake control plane is encrypted with QUIC/TLS 1.3 BY DEFAULT: the
