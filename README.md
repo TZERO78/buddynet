@@ -4,22 +4,26 @@
 [![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Latest release](https://img.shields.io/github/v/release/TZERO78/buddynet?sort=semver)](https://github.com/TZERO78/buddynet/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Pentest: 14/14 defenses hold](https://img.shields.io/badge/pentest-14%2F14%20defenses%20hold-brightgreen)](lab/pentest/README.md)
+[![Self-pentest: 14/14 defenses hold](https://img.shields.io/badge/self--pentest-14%2F14%20defenses%20hold-brightgreen)](lab/pentest/README.md)
 
-> **Self-hosted P2P overlay. One binary. Your VPS coordinates — but never sees —
-> your traffic. No Tailscale account needed.**
+> **A small, self-hosted P2P overlay for trusted groups. One binary, your own
+> coordinator, direct encrypted tunnels, and an authorized blind-relay fallback.
+> The coordinator may forward ciphertext, but it never sees plaintext. No
+> Tailscale account required.**
 
 ![BuddyNet deployment walkthrough — the VPS runs the coordinator, machine A mints a one-time invite, machine B joins behind its own NAT, and a direct hole-punched tunnel comes up](media/deploy-demo.gif)
 
-<sup>Stand it up in three steps, live: the VPS runs the coordinator (`--role=handshake,relay`), machine A mints a one-time invite, machine B joins behind its own NAT, and the tunnel is `via="direct P2P"` — hole-punched, no port-forwarding, no traffic through the server. Reproduce: `lab/demo-deploy.sh`.</sup>
+<sup>Stand it up in three steps, live: the VPS runs the coordinator (`--role=handshake,relay`), machine A mints a one-time invite, machine B joins behind its own NAT, and the tunnel is `via="direct P2P"` — hole-punched, no port-forwarding, no relay in the path. Reproduce: `lab/demo-deploy.sh`.</sup>
 
 BuddyNet gives every node a stable identity and a deterministic virtual IP, finds
 peers through a tiny bootstrap server, and brings up a direct (hole-punched)
 encrypted tunnel — falling back to a blind relay only when a direct path is
 impossible. Point `rsync`, `borg`, or `ssh` at a local socket and it travels
-straight to your buddy — and a single node can hold **many tunnels at once**
+straight to your buddy — and a single node can hold **several tunnels at once**
 ([MultiPeer](docs/PEERS.md)), routing to each buddy by name. The coordination
-server is a VPS *you* own, and it never sees your traffic.
+server is a VPS *you* own. It never sees plaintext: on a direct path it carries
+no tunnel data at all, and when a direct path can't be punched it forwards
+encrypted packets it cannot read.
 
 ```
 buddynet --role=buddy       # ordinary peer; NAT is fine
@@ -30,23 +34,51 @@ buddynet --role=handshake   # bootstrap/matchmaking server on a VPS
 There is **no auto-detection** — you always set `--role`. Every binary carries
 all three roles; in a buddy the relay and handshake code sit dormant as fallback.
 
-## Why BuddyNet?
+## Where BuddyNet fits
+
+These are differences in **scope and shape**, not a scoreboard — Tailscale,
+Netbird and plain WireGuard are mature projects solving a larger problem, and
+each of them does things BuddyNet does not.
 
 | | BuddyNet | Tailscale | Netbird | WireGuard |
 |---|---|---|---|---|
-| Coordination server | **Your VPS** | Tailscale Inc. | Self-hostable | None |
-| Traffic through server | ❌ Never | ❌ Never | ❌ Never | N/A (no server) |
+| Coordination server | **Yours, self-hosted** | Tailscale Inc. | Self-hostable | None |
+| Plaintext visible to the server | ❌ Never | ❌ Never | ❌ Never | N/A (no server) |
 | Zero-config NAT traversal | ✅ | ✅ | ✅ | ❌ Manual |
 | One binary, all roles | ✅ | ❌ | ❌ | ✅ |
-| Sealed token on wire | ✅ v2.2 | N/A | N/A | N/A |
-| Supply chain (cosign+SBOM) | ✅ | ✅ | ❌ | N/A |
+| Designed for | Small trusted groups | Fleets / enterprise | Fleets / teams | Anything, manually |
+| Managed global relay network | ❌ (you run yours) | ✅ | ✅ | N/A |
+| Commercial support / SLA | ❌ | ✅ | ✅ | ❌ |
 | Unraid plugin | ✅ | ✅ | ❌ | ❌ |
-| Live pentest results | ✅ [in repo](lab/pentest/README.md) | ❌ | ❌ | N/A |
 
-> **BuddyNet is not a mesh VPN.**
-> It is built for small, trusted groups of up to **48 peers**. If you need more
-> than 48 simultaneous connections, use a solution designed for large-scale
-> meshes — that is deliberately not what BuddyNet aims to be.
+> **BuddyNet is not a large-scale mesh management platform.** It is intentionally
+> smaller in scope than Tailscale and similar platforms: designed for personal
+> networks, families, friends, and small teams that want a transparent
+> self-hosted overlay without an enterprise control plane. We recommend no more
+> than **16 buddies per node**. The enforced limit of **48 peers** is a safety
+> ceiling, not a capacity target. For large fleets, centralized policy
+> management, global relay availability, or enterprise support, use a platform
+> designed for that scale.
+
+### What BuddyNet deliberately does not have
+
+The small scope is a design choice, not a gap on a roadmap:
+
+- **No enterprise identity platform.** No SSO, no directory integration, no
+  org-wide policy engine — identity is one Ed25519 key per node, pinned by hand
+  or through an invite.
+- **No global relay network.** There is no fleet of DERP-style servers behind
+  BuddyNet. The only relay in your setup is the one you started.
+- **No large fleet-management system.** No dashboard, no central inventory, no
+  push of config to hundreds of devices.
+- **No commercial availability guarantee.** No SLA, no support contract, no paid
+  tier — this is an MIT-licensed side project.
+- **The operator owns and maintains the coordinator.** Patching, backups, the key
+  file, uptime and firewalling of that VPS are your job. Nobody does it for you
+  — and nobody else can reach into it either.
+
+BuddyNet is tested and optimized for small networks — a handful of machines
+between people who know each other — not for hundreds or thousands of devices.
 
 ## What you need
 
@@ -58,8 +90,8 @@ so the buddies can always find it.
 You have two ways to provide it:
 
 - **A small VPS** with a fixed public IP. The usual setup: run
-  `--role=handshake,relay` on a cheap VPS *you* own. It coordinates and relays
-  ciphertext only — it never sees your traffic. This is the
+  `--role=handshake,relay` on a cheap VPS *you* own. It coordinates, and when a
+  direct path fails it relays ciphertext — it never sees plaintext. This is the
   [Quickstart](#quickstart-two-sites-one-vps) below; for a full step-by-step
   walkthrough (install, hardened firewall, systemd, maintenance) see
   **[docs/VPS-HOWTO.md](docs/VPS-HOWTO.md)**.
@@ -133,15 +165,18 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
 
 ## MultiPeer — one hub, many buddies
 
-One node can hold **many tunnels at once** ([`--peers-file`](docs/PEERS.md)):
+One node can hold **several tunnels at once** ([`--peers-file`](docs/PEERS.md)):
 each buddy is pinned by key, reachable by name via BuddyDNS (`<name>.buddy →
 10.66.X.Y`), and self-managed with the `peers` CLI — `list`, `add` (invite), and
 `remove` (revoke, drops the manifest entry **and** the session). No central
 authority: throw one buddy out and the rest keep tunneling, untouched.
 
-A node maintains **up to 48 buddies** — a deliberate design limit for a personal
-overlay, enforced fail-closed (see [docs/PEERS.md](docs/PEERS.md)). For a larger
-mesh, use a solution built for that.
+**Sizing, honestly:** we recommend **no more than 16 buddies per node**. That is
+the range BuddyNet is tested and tuned for. The **48-peer limit** enforced
+fail-closed in the code (see [docs/PEERS.md](docs/PEERS.md)) is a hard safety
+ceiling — a guardrail so a bad manifest can't bring up an unbounded number of
+tunnels — **not** a recommended deployment size. If you need more, use a
+platform built for fleets.
 
 ![BuddyNet MultiPeer demo — one hub holding five buddy tunnels: list them, reach them by name via BuddyDNS, revoke one, the rest keep tunneling](media/multipeer-demo.gif)
 
@@ -171,7 +206,8 @@ revoke and honest caveats: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md).
   `10.66.X.Y` where `X,Y = SHA-256(pubkey)[0:2]`. No DHCP, nobody assigns IPs.
 - **Signed matchmaking.** The handshake server learns peers' public endpoints,
   pairs two that share a token, and hands back a **signed** `PEER_LIST`. No
-  tunnel data ever flows through it.
+  tunnel data flows over the matchmaking path; relaying is a separate role, and
+  it only ever sees ciphertext.
 - **Encrypted control plane.** Matchmaking runs over QUIC/TLS 1.3, always — the
   pairing token stays encrypted in transit. QUIC also validates source addresses
   structurally (no extra round-trip), so the server is never a reflector.
@@ -230,15 +266,25 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   rotation takes effect within the interval (off by default; see
   [SECURITY.md](SECURITY.md#revoking-access)).
 
+**What the security boundary covers.** BuddyNet protects connections between
+non-compromised hosts against network attackers, unauthorized relay use,
+interception, replay, and identity substitution. Like any VPN, it cannot protect
+a device after its operating system or administrator account has already been
+compromised, and it cannot stop a volumetric attack that saturates the server's
+upstream connection.
+
 The full threat model — what BuddyNet protects against, the trust hierarchy, and
 its honest limits — is in **[SECURITY.md](SECURITY.md)**.
 
-> **Live-pentested (by us).** The repository includes a
+> **Self-pentested, and published as such.** The repository includes a
 > [structural attack tool and full results](lab/pentest/README.md) — 16 tests, 14
 > defenses verified against a live lab instance, 1 N/A, 1 low finding (stale VIP
 > after `kill -9`, fixed in v2.2.0). No critical or high findings. This is our own
 > structural testing, **not** an independent third-party audit — bugs can always
-> remain. Found one? Please open an issue; we're grateful for every report.
+> remain. We publish it because we think tests belong in the open — not as
+> evidence that BuddyNet is more secure than projects that test privately or
+> hire auditors instead. Found one? Please open an issue; we're grateful for
+> every report.
 
 ## Documentation
 
@@ -309,7 +355,7 @@ additive on the v1 wire format, virtual IPs, and fallback chain.
 
 **Security posture**
 
-- **v2.2.0: live pentested by us — 14/14 applicable defenses verified, no
+- **v2.2.0: self-pentested — 14/14 applicable defenses verified, no
   critical/high findings** (our own structural testing, not an independent audit).
   Full report: [lab/pentest/README.md](lab/pentest/README.md).
 - `govulncheck` in CI, Dependabot for dependency updates.
