@@ -257,11 +257,17 @@ func (s *Server) statsLoop() {
 	}
 }
 
-// warnHoardLocked logs a per-source leg-cap WARNING at most once per
-// statsInterval, so a source hammering the cap cannot flood the log (the counter
-// carries the volume). acct is the accounting key (exact IPv4, or an IPv6 /64),
-// which is what the operator needs to see — the individual address inside a /64
-// is not the actor. Caller holds s.mu.
+// warnHoardLocked logs a leg-cap WARNING at most once per statsInterval per
+// source, so a source hammering the cap cannot flood the log (the counter carries
+// the volume). Caller holds s.mu.
+//
+// The accounting key (exact IPv4, or an IPv6 /64) is the source address, so it
+// appears ONLY under --debug, like every other address the relay logs. This line
+// used to print it unconditionally, which contradicted the guarantee stated in
+// docs/OPERATIONS.md and in rejectTicket: a shipped relay log does not say who
+// used it. Without --debug the operator still learns that a source is at the cap
+// and can act on it (the ceilings, or --allow-cidr); which source it was needs a
+// deliberate flag, which is the trade the rest of the logging already makes.
 func (s *Server) warnHoardLocked(acct string) {
 	now := time.Now()
 	if last, ok := s.hoardWarned[acct]; ok && now.Sub(last) < statsInterval {
@@ -278,7 +284,13 @@ func (s *Server) warnHoardLocked(acct string) {
 		}
 	}
 	s.hoardWarned[acct] = now
-	log.Printf("SECURITY: event=leg-cap-hit src=%s detail=%q", acct, "one source holds the max legs; possible session hoarding")
+	if s.debug {
+		log.Printf("SECURITY: event=leg-cap-hit src=%s detail=%q", acct,
+			"one source holds the max legs; possible session hoarding")
+		return
+	}
+	log.Printf("SECURITY: event=leg-cap-hit detail=%q",
+		"one source holds the max legs; possible session hoarding (run with --debug to log which)")
 }
 
 // Config is a relay's authorization policy and abuse ceilings. The zero value is
@@ -367,32 +379,57 @@ func (s *Server) ticketMode() bool { return len(s.serverKeys) > 0 }
 // captured cookie to its source address.
 const cookieEpoch = 30 * time.Second
 
-// computeCookie is HMAC(cookieKey, epoch || canonical-ip), truncated to CookieLen.
-// Binding to the source IP is what makes it prove return-routability: only a host
-// that actually received the challenge at that address can echo a matching value.
-func (s *Server) computeCookie(ip net.IP, epoch int64) []byte {
+// computeCookie is HMAC(cookieKey, epoch || canonical-ip || port), truncated to
+// CookieLen. Binding to the source ADDRESS is what makes it prove
+// return-routability: only a host that actually received the challenge at that
+// address can echo a matching value.
+//
+// The port is part of the input, not just the IP. Everything else that identifies
+// a leg — the session map, byAddr, the migration check — compares full IP:PORT
+// addresses, so an IP-only cookie would be the one place where two different
+// addresses look alike. That gap was reachable: an on-path observer sharing the
+// public IP (same NAT or LAN) could replay a captured bind verbatim from a
+// different source port, and because the cookie still validated and the proof of
+// possession covers exactly that cookie, the relay would read it as a legitimate
+// NAT migration and move the leg to the attacker's port. No plaintext is exposed
+// — the tunnel is end-to-end encrypted — but the buddy's traffic is redirected,
+// which is a denial of service and a metadata leak.
+//
+// The port costs a legitimate mover nothing: a bind that arrives from a new
+// address simply draws a challenge carrying the cookie for THAT address, and the
+// buddy re-signs the proof over it with the ephemeral key it holds. BindLeg's
+// first bind never carries a cookie anyway, so this is the same round trip as
+// before — an attacker without the ephemeral private key cannot produce that
+// signature at all.
+//
+// Both inputs are fixed-width (16 bytes of IPv6-mapped address, 2 of port), so
+// no two addresses can produce the same MAC input.
+func (s *Server) computeCookie(src *net.UDPAddr, epoch int64) []byte {
 	mac := hmac.New(sha256.New, s.cookieKey)
 	var e [8]byte
 	binary.BigEndian.PutUint64(e[:], uint64(epoch))
 	mac.Write(e[:])
-	mac.Write(ip.To16())
+	mac.Write(src.IP.To16())
+	var port [2]byte
+	binary.BigEndian.PutUint16(port[:], uint16(src.Port))
+	mac.Write(port[:])
 	return mac.Sum(nil)[:CookieLen]
 }
 
-// freshCookie mints a cookie for the current epoch and source IP.
-func (s *Server) freshCookie(ip net.IP) []byte {
-	return s.computeCookie(ip, time.Now().UnixNano()/int64(cookieEpoch))
+// freshCookie mints a cookie for the current epoch and source address.
+func (s *Server) freshCookie(src *net.UDPAddr) []byte {
+	return s.computeCookie(src, time.Now().UnixNano()/int64(cookieEpoch))
 }
 
 // validCookie accepts a base64 cookie matching the current or previous epoch for
-// ip, compared in constant time, and returns the RAW cookie bytes. An
-// empty/garbage cookie is rejected.
+// the full source address, compared in constant time, and returns the RAW cookie
+// bytes. An empty/garbage cookie is rejected.
 //
 // The bytes are returned because the ticket-mode proof of possession is signed
 // over exactly this value: it is the only thing in a bind that is fresh,
 // relay-chosen and bound to the source address, which is what makes a captured
 // bind worthless from anywhere else or after the epoch turns.
-func (s *Server) validCookie(b64 string, ip net.IP) ([]byte, bool) {
+func (s *Server) validCookie(b64 string, src *net.UDPAddr) ([]byte, bool) {
 	if b64 == "" {
 		return nil, false
 	}
@@ -401,7 +438,7 @@ func (s *Server) validCookie(b64 string, ip net.IP) ([]byte, bool) {
 		return nil, false
 	}
 	now := time.Now().UnixNano() / int64(cookieEpoch)
-	if hmac.Equal(got, s.computeCookie(ip, now)) || hmac.Equal(got, s.computeCookie(ip, now-1)) {
+	if hmac.Equal(got, s.computeCookie(src, now)) || hmac.Equal(got, s.computeCookie(src, now-1)) {
 		return got, true
 	}
 	return nil, false
@@ -493,7 +530,7 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 	// Return-routability: an unvalidated bind only ever draws a (smaller-than-the-
 	// bind) challenge, never state. A spoofed source never receives the challenge,
 	// so it can never echo a valid cookie — closing reflection before any binding.
-	cookie, ok := s.validCookie(b.Cookie, src.IP)
+	cookie, ok := s.validCookie(b.Cookie, src)
 	if !ok {
 		s.statChallenged.Add(1)
 		// Answer only when the challenge is STRICTLY SMALLER than the bind that
@@ -502,7 +539,7 @@ func (s *Server) bind(conn *net.UDPConn, b Bind, src *net.UDPAddr, reqLen int) {
 		// "smaller than the bind, never an amplifier" property held for realistic
 		// tokens but not for the smallest accepted one. A real bind carries a
 		// 22-character token (38 bytes), leaving 15 bytes of headroom.
-		if chal := MarshalChallenge(s.freshCookie(src.IP)); len(chal) < reqLen {
+		if chal := MarshalChallenge(s.freshCookie(src)); len(chal) < reqLen {
 			conn.WriteToUDP(chal, src)
 		}
 		return

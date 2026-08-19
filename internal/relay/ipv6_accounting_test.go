@@ -80,7 +80,7 @@ func doBind(t *testing.T, s *Server, conn *net.UDPConn, tok string, src *net.UDP
 // value the relay would have handed out in a challenge, so the bind proves
 // return-routability exactly as a real buddy's second bind does.
 func validCookieFor(s *Server, src *net.UDPAddr) string {
-	return base64.RawURLEncoding.EncodeToString(s.freshCookie(src.IP))
+	return base64.RawURLEncoding.EncodeToString(s.freshCookie(src))
 }
 
 // legBound reports whether src holds a leg of tok's session — i.e. whether the

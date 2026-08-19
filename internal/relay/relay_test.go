@@ -204,7 +204,7 @@ func TestChainCachedOnlyWhenNoLiveCandidates(t *testing.T) {
 // has no mutation coverage of its own and none is claimed.
 func TestChallengeIsSmallerThanEveryAcceptedBind(t *testing.T) {
 	s := New(Config{TTL: 2 * time.Second})
-	chal := len(MarshalChallenge(s.freshCookie(net.IPv4(198, 51, 100, 7))))
+	chal := len(MarshalChallenge(s.freshCookie(&net.UDPAddr{IP: net.IPv4(198, 51, 100, 7), Port: 41234})))
 	for n := 1; n <= protocol.MaxFieldLen; n++ {
 		pkt := MarshalBind(Bind{SessionToken: strings.Repeat("x", n)})
 		if _, ok := ParseBind(pkt); !ok {

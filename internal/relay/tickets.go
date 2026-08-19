@@ -234,8 +234,11 @@ func (s *Server) bindTicketed(conn *net.UDPConn, p ticket.Payload, src *net.UDPA
 	// it is safe because all three of the following have already been established
 	// by the time we get here:
 	//
-	//   - a fresh cookie bound to the NEW source address (checked in bind), so the
-	//     mover actually receives packets there;
+	//   - a fresh cookie bound to the NEW source address — the full IP:PORT, not
+	//     just the IP (see computeCookie) — so the mover actually receives packets
+	//     there. The port matters precisely here: with an IP-only cookie a captured
+	//     bind replayed from another port behind the same public IP would land in
+	//     this branch and move the leg away from the real buddy;
 	//   - a proof of possession over that cookie, which only the holder of the
 	//     ephemeral private key can produce — a copied ticket and bind cannot;
 	//   - a ticket that is STILL VALID, because a migration is a new bind and took

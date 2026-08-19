@@ -93,8 +93,8 @@ func (h *harness) issue(t *testing.T, sid, leg string, src *net.UDPAddr, mut fun
 
 // cookieFor returns the cookie the relay would currently hand this source, as
 // both raw bytes and the base64 the wire carries.
-func (h *harness) cookieFor(ip net.IP) ([]byte, string) {
-	c := h.s.freshCookie(ip)
+func (h *harness) cookieFor(src *net.UDPAddr) ([]byte, string) {
+	c := h.s.freshCookie(src)
 	return c, base64.RawURLEncoding.EncodeToString(c)
 }
 
@@ -111,7 +111,7 @@ func (h *harness) bind(t *testing.T, b *buddy) {
 // bind just before it goes in (the tamper cases).
 func (h *harness) bindFrom(t *testing.T, b *buddy, src *net.UDPAddr, mut func(*Bind)) {
 	t.Helper()
-	raw, b64 := h.cookieFor(src.IP)
+	raw, b64 := h.cookieFor(src)
 	bind := Bind{
 		SessionToken: b.sid,
 		Cookie:       b64,
@@ -228,7 +228,7 @@ func TestBindWithoutATicketIsRefused(t *testing.T) {
 	h := newHarness(t, nil)
 	sid := newSID(t)
 	src := addr("127.0.0.1", 4001)
-	_, b64 := h.cookieFor(src.IP)
+	_, b64 := h.cookieFor(src)
 
 	h.s.bind(h.conn, Bind{SessionToken: sid, Cookie: b64}, src, 64)
 	h.drain()
@@ -350,11 +350,11 @@ func TestCookieGatesEverythingExpensive(t *testing.T) {
 		{name: "no cookie", cookie: ""},
 		{name: "garbage cookie", cookie: "AAAAAAAAAAAAAAAAAAAAAA"},
 		{name: "cookie for another address", cookie: func() string {
-			_, c := h.cookieFor(net.ParseIP("127.0.0.9"))
+			_, c := h.cookieFor(addr("127.0.0.9", 9009))
 			return c
 		}()},
 		{name: "cookie from a rotated-out epoch", cookie: func() string {
-			old := h.s.computeCookie(net.ParseIP("127.0.0.1"), time.Now().UnixNano()/int64(cookieEpoch)-2)
+			old := h.s.computeCookie(addr("127.0.0.1", 4001), time.Now().UnixNano()/int64(cookieEpoch)-2)
 			return base64.RawURLEncoding.EncodeToString(old)
 		}()},
 	} {
@@ -392,7 +392,7 @@ func TestCapturedBindIsUselessElsewhere(t *testing.T) {
 	a := h.issue(t, sid, ticket.LegA, addr("127.0.0.1", 4001), nil)
 
 	// Capture a's complete bind, as an on-path attacker would.
-	raw, b64 := h.cookieFor(a.src.IP)
+	raw, b64 := h.cookieFor(a.src)
 	captured := Bind{
 		SessionToken: a.sid,
 		Cookie:       b64,
@@ -409,19 +409,49 @@ func TestCapturedBindIsUselessElsewhere(t *testing.T) {
 		t.Fatal("a captured bind was accepted from another address")
 	}
 
-	// Replayed from the SAME address but with a freshly issued cookie the attacker
-	// could have observed: the proof of possession covers the OLD cookie, so it
-	// fails — and the attacker cannot re-sign without the ephemeral private key.
-	_, fresh := h.cookieFor(a.src.IP)
-	rebind := captured
-	rebind.Cookie = fresh
-	if fresh != b64 {
-		h.s.bind(h.conn, rebind, a.src, 512)
-		h.drain()
-		if h.sessions() != 0 {
-			t.Fatal("a captured bind was accepted under a different cookie")
-		}
+	// Replayed from the SAME address but under a DIFFERENT cookie that is also
+	// valid for it: the proof of possession covers the cookie it was signed over,
+	// so presenting another one fails — and the attacker cannot re-sign without the
+	// ephemeral private key.
+	//
+	// Built deliberately, not by minting twice: within one 30s epoch two mints
+	// return the SAME bytes, so the earlier version of this test compared a cookie
+	// with itself and skipped its own assertion. validCookie accepts the current
+	// AND the previous epoch, which is what makes two simultaneously-valid,
+	// DIFFERENT cookies available without waiting for a clock.
+	epoch := time.Now().UnixNano() / int64(cookieEpoch)
+	prev := h.s.computeCookie(a.src, epoch-1)
+	prev64 := base64.RawURLEncoding.EncodeToString(prev)
+	if prev64 == b64 {
+		t.Fatal("previous-epoch cookie equals the current one — this case would assert nothing")
 	}
+	rebind := captured
+	rebind.Cookie = prev64 // valid for this address, but NOT what the proof covers
+	h.s.bind(h.conn, rebind, a.src, 512)
+	h.drain()
+	if h.sessions() != 0 {
+		t.Fatal("a captured bind was accepted under a different cookie")
+	}
+
+	// And the mirror image: the proof over the previous-epoch cookie, presented
+	// with that same cookie, IS accepted — otherwise the case above would pass for
+	// the trivial reason that an old cookie is refused outright, and would say
+	// nothing about the proof of possession being bound to it.
+	stillValid := Bind{
+		SessionToken: a.sid,
+		Cookie:       prev64,
+		Ticket:       base64.RawURLEncoding.EncodeToString(a.payload),
+		TicketSig:    base64.RawURLEncoding.EncodeToString(a.sig),
+		BindSig:      base64.RawURLEncoding.EncodeToString(ticket.SignBind(a.eph, a.payload, a.sig, prev)),
+	}
+	h.s.bind(h.conn, stillValid, a.src, 512)
+	h.drain()
+	if h.legs(sid) != 1 {
+		t.Fatal("a correctly-signed bind over the previous-epoch cookie was refused — the negative case above proves nothing")
+	}
+	h.s.sessions = map[string]*session{} // reset for the positive control below
+	h.s.byAddr.Delete(a.src.String())
+	h.s.legsPerIP = map[string]int{}
 
 	// Positive control: the real buddy still binds.
 	h.bind(t, a)
@@ -496,7 +526,7 @@ func TestNATMigration(t *testing.T) {
 	// 19: a copy of the ticket WITHOUT the ephemeral private key cannot move the
 	// leg, even from an address it holds a valid cookie for.
 	thief := addr("127.0.0.88", 5555)
-	rawc, b64 := h.cookieFor(thief.IP)
+	rawc, b64 := h.cookieFor(thief)
 	_, wrong, _ := ed25519.GenerateKey(rand.Reader)
 	h.s.bind(h.conn, Bind{
 		SessionToken: sid,
@@ -608,7 +638,7 @@ func TestTicketAndCIDRAreAnAND(t *testing.T) {
 
 	// 22: no ticket at all from an allowed source.
 	src := addr("127.0.0.1", 4002)
-	_, b64 := h.cookieFor(src.IP)
+	_, b64 := h.cookieFor(src)
 	h.s.bind(h.conn, Bind{SessionToken: sid, Cookie: b64}, src, 64)
 	h.drain()
 	if h.sessions() != 0 {
@@ -665,7 +695,7 @@ func (h *harness) flood(t *testing.T, sid string, n int) {
 		}
 		src := &net.UDPAddr{IP: net.IPv4(10, byte(i>>16), byte(i>>8), byte(i)), Port: 40000 + i%1000}
 		att := other.issue(t, id, ticket.LegB, src, nil)
-		raw, b64 := h.cookieFor(src.IP)
+		raw, b64 := h.cookieFor(src)
 		h.s.bind(h.conn, Bind{
 			SessionToken: id,
 			Cookie:       b64,
@@ -818,7 +848,7 @@ func TestOversizedBindIsRefusedBeforeParsing(t *testing.T) {
 	h := newHarness(t, nil)
 	sid := newSID(t)
 	a := h.issue(t, sid, ticket.LegA, addr("127.0.0.1", 4001), nil)
-	raw, b64 := h.cookieFor(a.src.IP)
+	raw, b64 := h.cookieFor(a.src)
 	pkt := MarshalBind(Bind{
 		SessionToken: sid,
 		Cookie:       b64,
@@ -831,5 +861,95 @@ func TestOversizedBindIsRefusedBeforeParsing(t *testing.T) {
 	}
 	if _, ok := ParseBind(pkt); !ok {
 		t.Fatal("a real ticketed bind did not parse")
+	}
+}
+
+// A captured bind replayed from a DIFFERENT SOURCE PORT behind the same public
+// IP must be worthless — the case an IP-only cookie let through.
+//
+// Everything else that identifies a leg (the byAddr map, the migration check,
+// the partner pointers) compares full IP:PORT addresses. While the cookie was
+// computed over the IP alone, it was the one value that could not tell two ports
+// apart: an on-path observer sharing the public IP (same NAT, same LAN) could
+// replay a verbatim capture from another port, the cookie would still validate,
+// and the proof of possession — which covers exactly that cookie — would still
+// verify. The relay had no way left to notice and read it as a NAT migration.
+func TestCapturedBindIsUselessFromAnotherPort(t *testing.T) {
+	h := newHarness(t, nil)
+	sid := newSID(t)
+	a := h.issue(t, sid, ticket.LegA, addr("127.0.0.1", 4001), nil)
+
+	raw, b64 := h.cookieFor(a.src)
+	captured := Bind{
+		SessionToken: a.sid,
+		Cookie:       b64,
+		Ticket:       base64.RawURLEncoding.EncodeToString(a.payload),
+		TicketSig:    base64.RawURLEncoding.EncodeToString(a.sig),
+		BindSig:      base64.RawURLEncoding.EncodeToString(ticket.SignBind(a.eph, a.payload, a.sig, raw)),
+	}
+
+	// Same IP, neighbouring port — the attacker on the same NAT.
+	h.s.bind(h.conn, captured, addr("127.0.0.1", 4002), 512)
+	h.drain()
+	if h.sessions() != 0 {
+		t.Fatal("a captured bind was accepted from another port behind the same IP — the cookie is not bound to the port")
+	}
+}
+
+// The damage the previous test prevents, asserted on live state: with a leg
+// already bound, a replay from another port must NOT move it. A successful move
+// would silently redirect the buddy's (still encrypted) traffic to the attacker
+// — a denial of service and a metadata leak, without decrypting anything.
+func TestCapturedBindCannotHijackALegByPortMigration(t *testing.T) {
+	h := newHarness(t, nil)
+	sid := newSID(t)
+	real := addr("127.0.0.1", 4001)
+	a := h.issue(t, sid, ticket.LegA, real, nil)
+
+	// Capture the bind as it goes past, then let the real buddy bind normally.
+	raw, b64 := h.cookieFor(real)
+	captured := Bind{
+		SessionToken: a.sid,
+		Cookie:       b64,
+		Ticket:       base64.RawURLEncoding.EncodeToString(a.payload),
+		TicketSig:    base64.RawURLEncoding.EncodeToString(a.sig),
+		BindSig:      base64.RawURLEncoding.EncodeToString(ticket.SignBind(a.eph, a.payload, a.sig, raw)),
+	}
+	h.bind(t, a)
+	if got := h.legAddr(sid, ticket.LegA); got != real.String() {
+		t.Fatalf("the real buddy did not take its leg: leg=%q", got)
+	}
+
+	// Replay it from another port behind the same IP.
+	attacker := addr("127.0.0.1", 4002)
+	h.s.bind(h.conn, captured, attacker, 512)
+	h.drain()
+
+	if got := h.legAddr(sid, ticket.LegA); got != real.String() {
+		t.Fatalf("the leg was MOVED to %q by a replayed bind — the real buddy's traffic now goes to the attacker", got)
+	}
+	if _, hijacked := h.s.byAddr.Load(attacker.String()); hijacked {
+		t.Fatal("the attacker's address was published as a forwarding target")
+	}
+}
+
+// The counter-check: the fix must not break the case it has to keep working. A
+// buddy that genuinely moves to a new address gets a challenge for THAT address
+// and re-signs the proof with the ephemeral key it holds — which an attacker with
+// only a capture cannot do. The leg follows it.
+func TestLegitimateMigrationToANewPortStillWorks(t *testing.T) {
+	h := newHarness(t, nil)
+	sid := newSID(t)
+	a := h.issue(t, sid, ticket.LegA, addr("127.0.0.1", 4001), nil)
+	h.bind(t, a)
+
+	moved := addr("127.0.0.1", 4002)
+	h.bindFrom(t, a, moved, nil) // fresh cookie for the new address + a fresh proof
+
+	if got := h.legAddr(sid, ticket.LegA); got != moved.String() {
+		t.Fatalf("a legitimate migration did not take effect: leg=%q, want %q", got, moved.String())
+	}
+	if _, stale := h.s.byAddr.Load(addr("127.0.0.1", 4001).String()); stale {
+		t.Error("the old address still forwards after the migration")
 	}
 }

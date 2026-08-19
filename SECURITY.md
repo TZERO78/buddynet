@@ -95,7 +95,7 @@ adversary."
 | Malicious / compromised **handshake server** | Cannot impersonate a buddy: on the default invite path the joiner **pinned** the inviter's key from the invite itself, so a substituted identity is refused with no human involved, and the inviter catches the reverse direction by typing a code it cannot see. Without an invite, a pin (`--peer-key`) or the SAS catches it. Can deny service. | **Mitigated** |
 | A **relay** in the data path | Sees only ciphertext; cannot read or inject (QUIC/WireGuard auth). | **Safe** |
 | Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. The token (and the reconnect rendezvous secret) is **sealed to the server's pinned key** (`TokenEnc`), and the control plane is TLS 1.3 on top of that. | **Mitigated** |
-| Spoofed-source flood / reflection on the **handshake server** | Source address validated first (UDP cookie or QUIC) before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier (§5.2–§5.3). | **Mitigated** |
+| Spoofed-source flood / reflection on the **handshake server** | Source address validated by the QUIC handshake before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier (§5.2–§5.3). | **Mitigated** |
 | Spoofed-source reflection / traffic-laundering through a **relay** | A bind binds no leg until the source echoes an address-validation cookie (reply smaller than the bind); a spoofed source can never validate, so attacker data can never be forwarded to a victim address. | **Mitigated** |
 | A stranger **using your relay** (bandwidth, or hoarding capacity so your own fallback fails) | The relay admits only sessions your handshake server authorised (signed ticket bound to an ephemeral key the binder must prove) and/or named networks; it refuses to start with neither. | **Mitigated** (v5.0.0) |
 | A **compromised relay** | It holds only a public verify key: it can withhold service — which it can do by being offline anyway — but can never authorise a session, nor forge one for another relay. It still sees only ciphertext. In a COMBINED `--role=handshake,relay` process the server's signing key is in the same memory; run them separated when the relay is exposed (§6.4). | **Mitigated (separated) / reduced (combined)** |
@@ -321,41 +321,40 @@ Ed25519 key. Buddies pin the server key (`--server-key`) and verify, with a
 replayed. A `ver` field in every message means an incompatible build is reported
 clearly rather than as an opaque crypto error.
 
-### 5.2 Two spoof-proof transports
+### 5.2 A spoof-proof control plane
 
-The control plane can run over either transport. **Both structurally close the
-spoofed-source reflection vector** — the server never produces a `PEER_LIST` for
-an address that has not proven it can receive packets. They differ only in how
-that proof is obtained.
+The control plane is **QUIC/TLS 1.3**, and there is nothing to choose. It
+structurally closes the spoofed-source reflection vector: QUIC validates the
+source address in its own handshake, so the server never produces a `PEER_LIST`
+for an address that has not proven it can receive packets, and it does so before
+any server-side work. The cost is a certificate, which costs nothing here — the
+server presents its self-signed identity cert and the buddy pins it by
+`--server-key`, the same key-pinning model used for peer identity, with no CA and
+no domain. The buddy runs the control connection on its **shared** UDP socket and
+tears it down before punching, so the same NAT mapping still carries the peer
+tunnel.
 
-- **Plain UDP + address-validation cookie (default).** A `REGISTER` without a
-  valid cookie is answered only with a small `COOKIE` challenge — *smaller* than
-  the request, so never a useful amplifier — and no further work. The cookie is
-  `HMAC(subkey, epoch ‖ source-IP)` (the subkey HKDF-derived from the server
-  identity), so a spoofed source can never receive and echo it. The buddy echoes
-  it on its next `REGISTER`. This is QUIC's Retry-token idea at the application
-  layer: zero extra dependencies, no TLS certificate, and the buddy's single
-  socket is untouched (so hole punching and the peer tunnel are unaffected).
+> **Removed in v5 (protocol v8): the plain-UDP transport.** It obtained the same
+> return-routability proof with an application-layer `COOKIE` challenge
+> (`HMAC(subkey, epoch ‖ source-IP)`, the reply smaller than the request, so never
+> an amplifier). It is gone because it only reproduced what QUIC does anyway,
+> while leaving the rest of a `REGISTER` in cleartext — and because a transport
+> you can select is a transport a deployment can select wrongly. The **relay**
+> still uses a cookie of its own: a relay bind is plain UDP by design, and that
+> cookie covers the full source address, port included (§6.4).
 
-- **QUIC.** The control plane runs over QUIC, which validates
-  the source address in its own handshake before the server does any work. The
-  cost is a TLS certificate: the server presents its self-signed identity cert and
-  the buddy pins it by `--server-key` — the same TOFU model already used for peer
-  identity, no CA or domain. The buddy runs the QUIC control connection on its
-  **shared** UDP socket and tears it down before punching, so the same NAT mapping
-  still carries the peer tunnel.
+The global + per-source rate limits and the bounded registry caps apply to the
+control plane as before.
 
-Set the **same** transport on the server and every buddy, or; a mismatch simply fails to connect. On both transports the
-global + per-source rate limits and the bounded registry caps still apply.
-
-**Confidentiality of a `REGISTER`.** Plain UDP `REGISTER`s are otherwise cleartext
-JSON, but the one secret in them — the pairing token (and, on reconnect, the
-rendezvous secret) — is **sealed to the server's pinned identity key** (`TokenEnc`,
-a NaCl sealed box), so an on-path observer sees only ciphertext where the secret
-would be. The rest of a `REGISTER` (id, pubkey, virtual IP, name) is non-secret
-identity data. additionally encrypts the *whole* exchange.
-Either way, the partner is still pinned by key and verified by SAS; treat the
-token as a bearer secret and pin buddies with `--peer-key`.
+**Confidentiality of a `REGISTER`.** The whole exchange rides QUIC/TLS 1.3, so an
+on-path observer sees ciphertext and nothing else. Underneath that, the one secret
+in a `REGISTER` — the pairing token (and, on reconnect, the rendezvous secret) —
+is *additionally* **sealed to the server's pinned identity key** (`TokenEnc`, a
+NaCl sealed box), so it is never in the clear even inside the TLS session, and
+since v8 the cleartext `token` field is not serialised at all. The rest of a
+`REGISTER` (id, pubkey, virtual IP, name) is non-secret identity data. The
+partner is pinned by key — from the invite, from `--peer-key`, or by SAS on first
+contact (§4.3).
 
 ### 5.3 Server hardening
 
@@ -560,10 +559,14 @@ keeps it that way:
   only under `--debug`.**
 
 A ticket is bound to a **fresh ephemeral key per attempt**, and the bind must
-carry a signature by that key over the relay's own address-bound, rotating cookie.
-So a captured ticket, or an entire captured bind, is inert: it cannot be replayed
-from another address, cannot be replayed after the cookie epoch turns, and cannot
-be re-signed — the private half never leaves the buddy. A ticket authorises
+carry a signature by that key over the relay's own rotating cookie, which is bound
+to the full source address — **IP and port**. So a captured ticket, or an entire
+captured bind, is inert: it cannot be replayed from another address, **not even
+from a different port behind the same public IP** (the case an IP-only cookie left
+open until v5.1.1: on-path neighbours on the same NAT could replay a capture and
+have the leg follow them, redirecting the buddy's encrypted traffic), cannot be
+replayed after the cookie epoch turns, and cannot be re-signed — the private half
+never leaves the buddy. A ticket authorises
 **joining, not staying**: an established session is not torn down when it expires,
 but nothing new can be bound with an expired one, including a re-bind after an
 address change.

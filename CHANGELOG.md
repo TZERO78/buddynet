@@ -5,6 +5,64 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v5.1.1] — 2026-08-19
+
+### Fixed (Security) — the relay cookie now covers the source PORT
+
+- **A captured relay bind could be replayed from another port behind the same
+  public IP, and the relay would follow it.** The address-validation cookie was
+  `HMAC(key, epoch ‖ source-IP)` — no port — while everything else that
+  identifies a leg (the forwarding map, the migration check) compares full
+  `IP:PORT` addresses. It was the one place two different addresses looked alike:
+  an on-path observer sharing the public IP (same NAT or LAN) could replay a
+  verbatim capture from a different source port; the cookie still validated, the
+  proof of possession covers exactly that cookie so it still verified, and the
+  relay read the result as a legitimate NAT migration and moved the leg to the
+  attacker's address.
+
+  **Impact:** redirection of the buddy's relayed traffic, i.e. a denial of
+  service and a metadata leak. **No plaintext is exposed** — the tunnel is
+  end-to-end encrypted and the relay never holds a key to it — and this does not
+  reopen the relay to strangers: it needs a captured valid bind *and* the same
+  public IP.
+
+  The cookie is now `HMAC(key, epoch ‖ source-IP ‖ source-port)`. A legitimate
+  mover is unaffected: a bind from a new address draws a challenge for **that**
+  address and the buddy re-signs the proof with its ephemeral key — which is
+  exactly what a captured bind cannot do. No wire-format or protocol change.
+
+- **The test that was supposed to cover this proved nothing.**
+  `TestCapturedBindIsUselessElsewhere` minted a second cookie to compare against
+  the first, but within one 30 s epoch both mints return the same bytes, so its
+  assertion sat behind an `if` that was never true. It now builds a genuinely
+  different, simultaneously-valid cookie (the previous epoch, which `validCookie`
+  still accepts) and additionally asserts the positive control, so the negative
+  case cannot pass for the trivial reason that an old cookie is refused.
+  Two new tests cover the port case directly, including the leg-hijack itself.
+
+### Fixed (Privacy) — the leg-cap warning no longer names the source
+
+- `SECURITY: event=leg-cap-hit` printed the source accounting key (an IPv4
+  address or an IPv6 `/64`) unconditionally, contradicting the guarantee stated
+  in `docs/OPERATIONS.md` and enforced everywhere else in the relay: **a shipped
+  relay log does not record who used it.** The address now appears only under
+  `--debug`, like every other address the relay logs; without it the operator
+  still sees that a source is at the cap. `lab/test-relay-accounting.sh` asserts
+  both halves — and its `/64` check, previously an `info` that could never fail,
+  is now a real assertion.
+
+### Fixed — the security docs described the protocol we no longer speak
+
+`docs/PROTOCOL.md` still said `Version: 7` (the code has been at 8 since v5.0.0),
+its migration guide walked through v6 → v7, and it printed the removed
+plain-UDP `COOKIE` exchange as if it were current. `docs/ARCHITECTURE.md` still
+offered a choice of two handshake transports with plain UDP as the **default**,
+and `SECURITY.md` had two sentences left broken mid-clause by an earlier edit
+that removed `--quic-handshake` (*"Set the same transport on the server and every
+buddy, or; a mismatch…"*). All corrected to the shipped design: QUIC-only control
+plane, protocol 8, with what was removed and why kept as an explicit note rather
+than silently dropped.
+
 ## [v5.1.0] — 2026-08-19
 
 ### Added — the invite carries the inviter's identity
@@ -865,7 +923,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.1.0...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.1.1...HEAD
+[v5.1.1]: https://github.com/TZERO78/buddynet/compare/v5.1.0...v5.1.1
 [v5.1.0]: https://github.com/TZERO78/buddynet/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/TZERO78/buddynet/compare/v4.1.1...v5.0.0
 [v4.1.1]: https://github.com/TZERO78/buddynet/compare/v4.1.0...v4.1.1
