@@ -5,6 +5,43 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added — the invite carries the inviter's identity
+
+- **`--invite` now mints `bnet1.<token>.<public-key>` instead of a bare token,
+  and `--join` pins the key inside it.** The invite already travelled over a
+  channel the two people trust (phone, Signal); it now carries an *identity*
+  over that channel and not just a secret. The joining side pins the inviter
+  before it ever contacts the handshake server, so a hostile or compromised
+  server cannot put a different buddy on that end — it is refused, with no human
+  comparing anything. That direction is now exactly as strong as `--peer-key`,
+  by default, with no extra step for the user.
+
+- **First contact is asymmetric, and the remaining human step cannot be
+  self-satisfied.** The joiner (already pinned) only **displays** its
+  six-character code; the inviter **types that code in and is shown no code of
+  its own**. Previously both ends showed the same code and both typed one, which
+  left a way out for someone in a hurry: type what is on your own screen and
+  never make the call. Under a man in the middle that shortcut confirms the
+  attack on both ends at once. With nothing on screen to copy, the six
+  characters can only have come from the buddy.
+
+- A **bare** token from an older inviter still pairs, by trust-on-first-use with
+  the symmetric code as before. A **malformed** `bnet1.…` invite is an error —
+  never a silent fall back to the weaker unpinned path. A `--peer-key` that
+  contradicts the key inside the invite is refused rather than resolved.
+
+- **Client-side only: no protocol change, no `protocol.Version` bump.** The
+  handshake server still sees nothing but the opaque rendezvous token; the blob
+  and the key never go on the wire. Old and new peers interoperate.
+
+- **Headless nodes:** a joiner with a key-bearing invite is unattended-safe (it
+  has nothing to confirm, and logs its code). The **inviter** is the verifying
+  side and needs a terminal — for an unattended inviter, pin the joiner with
+  `--peer-key` as before. See *Daemon setup* in
+  [docs/INVITE.md](docs/INVITE.md).
+
 ## [v5.0.0] — 2026-08-13
 
 > **Breaking: `protocol.Version` 7 → 8, and two flags are gone.** A v4 buddy

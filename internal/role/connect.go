@@ -170,8 +170,14 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 	// First contact (trust-on-first-use): verify the partner identity with a SAS
 	// over the now-established, channel-bound session BEFORE trusting/persisting
 	// it. Only reached when not pinned and not --lab.
-	if needSAS {
-		if !cfg.Interactive {
+	// showOnly is the joining side of a key-bound invite: the partner key was
+	// pinned from the invite blob, so there is nothing to verify here — but the
+	// INVITER still has to verify us, and the code it types has to come from
+	// somewhere. Display it (once, on the first pairing) so the human can read it
+	// out. This never blocks and never trusts anything.
+	showOnly := !needSAS && cfg.SASShow && att.firstPairing
+	if needSAS || showOnly {
+		if needSAS && !cfg.Interactive {
 			return fmt.Errorf("first contact with an unknown buddy key (%s) but no way to verify it: running non-interactively. Pin it with --peer-key, or run once interactively to confirm the SAS", partner.PubKey)
 		}
 		ekm, eerr := sess.ExportKeyingMaterial(sasLabel, nil, 32)
@@ -180,12 +186,16 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		}
 		myEdPub := priv.Public().(ed25519.PublicKey)
 		sas := ComputeSAS(myEdPub, partnerPub, ekm)
-		if err := promptSAS(sas, cfg.SASTimeout); err != nil {
-			logSASFailure(err, sess.RemoteAddr().String(), used, partner, att.inviteToken)
-			return err // Buddy stops the reconnect loop, key NOT stored
-		}
-		if err := trust.confirm(att.inviteToken, partnerPub); err != nil {
-			return err
+		if showOnly {
+			showSAS(sas)
+		} else {
+			if err := promptSAS(sas, cfg.Inviting, cfg.SASTimeout); err != nil {
+				logSASFailure(err, sess.RemoteAddr().String(), used, partner, att.inviteToken)
+				return err // Buddy stops the reconnect loop, key NOT stored
+			}
+			if err := trust.confirm(att.inviteToken, partnerPub); err != nil {
+				return err
+			}
 		}
 	}
 

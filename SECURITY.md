@@ -76,7 +76,7 @@ key changes the address and forces re-pinning (see §8.1).
 | Asset | Protected by | Section |
 |---|---|---|
 | **Tunnel content** (confidentiality + integrity) | End-to-end encryption; forward secrecy | §4.1 |
-| **Peer authenticity** (you are talking to the right buddy) | Key pinning; TOFU + SAS | §4.2–§4.3 |
+| **Peer authenticity** (you are talking to the right buddy) | Key-bound invite; key pinning; TOFU + SAS | §4.2–§4.3 |
 | **Identity keys** (at rest and in memory) | `0600` files, no core dump, symlink-safe load, best-effort wipe | §4.7 |
 | **Host reachability** (what a buddy can touch on your machine) | Scoped exposure (`--expose`), fail-closed | §6.3 |
 | **Availability of the control plane** | Rate limits, bounded state, spoof-proofing | §5.3 |
@@ -92,7 +92,7 @@ adversary."
 |---|---|---|
 | Passive eavesdropper on the path | Sees only encrypted QUIC / WireGuard. | **Safe** |
 | Active network MITM (not the server) | Cannot impersonate a peer — pinned mutual auth, and the SAS catches a first-contact substitution (§4.2–§4.3). | **Safe** |
-| Malicious / compromised **handshake server** | Cannot impersonate a buddy: a substituted key fails the SAS (or is refused by `--peer-key`). Can deny service. | **Mitigated** |
+| Malicious / compromised **handshake server** | Cannot impersonate a buddy: on the default invite path the joiner **pinned** the inviter's key from the invite itself, so a substituted identity is refused with no human involved, and the inviter catches the reverse direction by typing a code it cannot see. Without an invite, a pin (`--peer-key`) or the SAS catches it. Can deny service. | **Mitigated** |
 | A **relay** in the data path | Sees only ciphertext; cannot read or inject (QUIC/WireGuard auth). | **Safe** |
 | Someone who learns the **token** | Cannot impersonate a buddy (SAS / pin). Can at most occupy a pairing slot and *deny* the legitimate pair — a DoS, not a breach. The token (and the reconnect rendezvous secret) is **sealed to the server's pinned key** (`TokenEnc`), and the control plane is TLS 1.3 on top of that. | **Mitigated** |
 | Spoofed-source flood / reflection on the **handshake server** | Source address validated first (UDP cookie or QUIC) before any `PEER_LIST`; global + per-source rate limits and bounded state cap the rest. Never a useful amplifier (§5.2–§5.3). | **Mitigated** |
@@ -140,11 +140,34 @@ registrations and signs whatever key registered. So on its own, a token-knower �
 or a malicious/compromised handshake server — could be vouched for as "the
 partner." BuddyNet closes this with a trust hierarchy (strongest first):
 
-**1. `--peer-key` (strict pin).** The buddy's Ed25519 key, exchanged once
-out-of-band. Any other partner is refused, no prompt. **Strongest; recommended
-for anything important, and required for unattended daemons.**
+**1. Key-bound invite (`--invite` / `--join`, the default pairing path).** The
+invite a buddy hands over is not a bare secret: it is
+`bnet1.<token>.<inviter-public-key>` ([`internal/invite`](internal/invite/invite.go)).
+`--join` splits it and **pins the inviter's key** before contacting the server, so
+that direction is verified with **no human step at all** and is exactly as strong
+as `--peer-key` — a handshake server that substitutes an identity is refused, not
+merely noticed.
 
-**2. Trust-on-first-use + SAS (default).** On the first connect for a token,
+The trust anchor here is the channel the invite already travels over (phone,
+Signal). That channel was always required; binding the key to it is what turns it
+from a way to move a secret into a way to move an *identity*.
+
+The reverse direction — the inviter verifying the joiner — is the one remaining
+human step, and it is deliberately asymmetric: the **joiner displays** its code
+and the **inviter types it in without seeing its own** (`PromptSASBlind`). A
+person who cannot see a code cannot copy it off their own screen, so the six
+characters can only have come from the buddy over the trusted channel.
+
+A **malformed** invite is an error, never a silent fall back to the weaker
+unpinned path. A **bare** token from an older inviter still pairs, by §2 below.
+
+**2. `--peer-key` (strict pin).** The buddy's Ed25519 key, exchanged once
+out-of-band. Any other partner is refused, no prompt. **Equivalent in strength to
+the pin an invite carries, and the right choice for unattended daemons** — it
+needs no invite exchange and no human at all, in either direction.
+
+**3. Trust-on-first-use + SAS (fallback).** Used when neither side pinned the
+other — a bare token, or a manual pairing. On the first connect for a token,
 after the tunnel is up but **before the key is trusted**, both buddies display a
 **Short Authentication String** — a 6-character code:
 
@@ -173,12 +196,16 @@ to another plane.
 
 > **Why type it, not press `y`:** requiring the code to be *entered* means it
 > cannot be confirmed without actually receiving it out of band — a reflexive
-> keypress no longer trusts an unverified key. The residual is a user who types
-> their **own** displayed code instead of the one they heard; that is far more
-> deliberate than a single `y`, but for unattended links use `--peer-key`, which
-> removes the human step entirely.
+> keypress no longer trusts an unverified key.
+>
+> This symmetric form has one residual: both ends derive the *same* code and both
+> display it, so a user could type their **own** code instead of the one they
+> heard. That is far more deliberate than a single `y`, but it is why the invite
+> path above is asymmetric — there the verifying side never sees a code to copy,
+> and the residual is gone rather than merely made inconvenient. For unattended
+> links `--peer-key` removes the human step entirely.
 
-**3. `--lab` — no verification at all.** Must be set explicitly, is logged
+**4. `--lab` — no verification at all.** Must be set explicitly, is logged
 loudly, **testing only.** Never use it on a daemon or a server-side host.
 
 For daemons/Unraid there is no human to compare a SAS: run with `--no-interactive`
@@ -209,8 +236,9 @@ identity key**:
 
 The pairing secret is split so the value that actually travels is short-lived:
 
-- **`--invite` / `--join`** mint/use a **one-time invite token**, valid only
-  until the first pairing (`--invite-timeout`, default 15 min). On the first
+- **`--invite` / `--join`** mint/use a **one-time, key-bearing invite**, valid
+  only until the first pairing (`--invite-timeout`, default 15 min). It carries
+  the inviter's public key, so the joiner pins it (see §4.3). On the first
   SAS-confirmed (or `--peer-key`-pinned) pairing, both ends **derive a long-lived
   session secret from the channel binding** (`HKDF`-style over the exported
   keying material + both keys) and store it next to the partner key. It is

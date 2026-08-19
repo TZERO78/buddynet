@@ -204,8 +204,13 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 
 	// First contact (TOFU): verify the partner with a SAS bound to a fresh
 	// ephemeral-DH exchange over the punched socket (no TLS EKM on the WG path).
-	if needSAS {
-		if !cfg.Interactive {
+	// showOnly: joining side of a key-bound invite — key already pinned from the
+	// blob, so this side only displays its code for the inviter to type. Both
+	// ends must run the binding exchange for either to get a code, so it stays
+	// inside the same branch (see connect.go for the QUIC twin of this).
+	showOnly := !needSAS && cfg.SASShow && att.firstPairing
+	if needSAS || showOnly {
+		if needSAS && !cfg.Interactive {
 			return fmt.Errorf("first contact with an unknown buddy key (%s) but running non-interactively — pin it with --peer-key", partner.PubKey)
 		}
 		committer := nd.pub < partner.PubKey // deterministic, opposite on the two ends
@@ -214,12 +219,16 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 			return fmt.Errorf("SAS channel binding: %w", berr)
 		}
 		sas := ComputeSAS(nd.priv.Public().(ed25519.PublicKey), partnerPub, sid)
-		if perr := promptSAS(sas, cfg.SASTimeout); perr != nil {
-			logSASFailure(perr, remote.String(), relay.Path{}, partner, att.inviteToken)
-			return perr // key NOT trusted; stop (do not fall back to another plane)
-		}
-		if cerr := nd.trust.confirm(att.inviteToken, partnerPub); cerr != nil {
-			return cerr
+		if showOnly {
+			showSAS(sas)
+		} else {
+			if perr := promptSAS(sas, cfg.Inviting, cfg.SASTimeout); perr != nil {
+				logSASFailure(perr, remote.String(), relay.Path{}, partner, att.inviteToken)
+				return perr // key NOT trusted; stop (do not fall back to another plane)
+			}
+			if cerr := nd.trust.confirm(att.inviteToken, partnerPub); cerr != nil {
+				return cerr
+			}
 		}
 	}
 

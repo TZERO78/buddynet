@@ -30,7 +30,7 @@ docker run -d --name demo-inviter --network "$NET" \
   --role=buddy --key /var/lib/buddynet/id.key \
   --server server:51820 --server-key "$KEY" --peer-key "$BPUB" \
   --forward 127.0.0.1:7777 --invite --no-interactive >/dev/null
-for i in $(seq 1 24); do TOK=$(docker logs demo-inviter 2>&1 | grep -m1 -oE '^[A-Za-z0-9_-]{40,}$'); [ -n "$TOK" ] && break; sleep 0.5; done
+for i in $(seq 1 24); do TOK=$(docker logs demo-inviter 2>&1 | grep -m1 -oE '^bnet1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$'); [ -n "$TOK" ] && break; sleep 0.5; done
 
 # ── presentation ──────────────────────────────────────────────────────────────
 G=$'\033[1;32m'; B=$'\033[1;34m'; D=$'\033[2m'; C=$'\033[1;36m'; Y=$'\033[1;33m'; R=$'\033[0m'
