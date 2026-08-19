@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.08.13.2">
+<!ENTITY version   "2026.08.19">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,24 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.08.19
+- Pinned to buddynet **v5.1.0** — a security improvement to pairing, **no
+  coordinated upgrade needed**: nothing on the wire changed, so a v5.1 node pairs
+  with a v5.0 one as before.
+  - **The invite your buddy gives you now carries their identity.** It looks like
+    `bnet1.&lt;token&gt;.&lt;key&gt;` instead of a bare token. Paste the **whole** string into
+    the *Invite* field (or the invite file) — BuddyNet pins your buddy's key
+    straight from it, so a compromised handshake server cannot slip a different
+    machine in on the other end. Nothing for you to compare, and it works
+    headless.
+  - An older bare token still works exactly as before. A **truncated or edited**
+    invite is refused rather than quietly pairing with less protection — if you
+    see that error, copy the invite again in full.
+  - Your buddy (the inviting side) is asked once for the six-character code shown
+    on **your** screen, and is deliberately shown no code of their own, so it can
+    only come from a phone call. That side needs a terminal; an unattended
+    inviter should pin with a buddy key instead.
 
 ###2026.08.13.2
 - Pinned to buddynet **v5.0.0** — a major release. **⚠ Coordinated upgrade
@@ -340,11 +358,11 @@ Handshake server (host:port):
 Server key (public pin — must match the server's identity):
 : <input type="text" name="SERVER_KEY" value="<?=v($cfg,'SERVER_KEY')?>" placeholder="server Ed25519 public key, base64">
 
-Token (shared secret — for testing; prefer the Token file below):
+Invite from your buddy (`bnet1.…`, pins their identity) — for testing; prefer the file below:
 : <input type="password" id="bn_tok" name="TOKEN" value="<?=v($cfg,'TOKEN')?>"> <button type="button" onclick="bnShow('bn_tok',this)" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">show</button> <button type="button" onclick="bnGen('bn_tok')" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">generate</button>
 
-Token file (on the array — overrides the field above, recommended):
-: <input type="text" name="TOKEN_FILE" value="<?=v($cfg,'TOKEN_FILE')?>" placeholder="/mnt/user/appdata/buddynet/token (chmod 0600)">
+Invite file (on the array — overrides the field above, recommended):
+: <input type="text" name="TOKEN_FILE" value="<?=v($cfg,'TOKEN_FILE')?>" placeholder="/mnt/user/appdata/buddynet/token — holds the bnet1.… invite (chmod 0600)">
 
 Buddy key (public pin — your buddy's identity, **required headless**):
 : <input type="text" name="PEER_KEY" value="<?=v($cfg,'PEER_KEY')?>" placeholder="buddy Ed25519 identity, base64">
@@ -713,12 +731,12 @@ mkdir -p "$PLG"
 # NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
 # version and URL are hard-coded here on purpose.
 # MAINTAINER: bump both together on each new release (tag -> release.yml build).
-BINVER="v5.0.0"
+BINVER="v5.1.0"
 BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
 # SHA256 of the release binary; verified on every install so a corrupted or
 # tampered download is never installed. Matches buddynet-linux-amd64.sha256 of
 # the BINVER release — bump both together on each new release.
-BINSHA="297dddfebf36ca7c1e37519ba7c4ada7481687550ffcd2224b4307745bc985df"
+BINSHA="b6489fc6b658436447235c6e019d04cd2b5b227ac474b103de789bb69fee8152"
 verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
 
 # Download the buddynet binary to flash (only if missing or its checksum is wrong).
