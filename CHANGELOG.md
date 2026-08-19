@@ -5,7 +5,7 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v5.1.0] — 2026-08-19
 
 ### Added — the invite carries the inviter's identity
 
@@ -41,6 +41,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   side and needs a terminal — for an unattended inviter, pin the joiner with
   `--peer-key` as before. See *Daemon setup* in
   [docs/INVITE.md](docs/INVITE.md).
+
+### Changed
+
+- Dependency bumps: `golang.org/x/crypto` 0.54.0 → 0.55.0, and the
+  `distroless/static` base image for the shipped container.
 
 ## [v5.0.0] — 2026-08-13
 
@@ -860,7 +865,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.0.0...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.1.0...HEAD
+[v5.1.0]: https://github.com/TZERO78/buddynet/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/TZERO78/buddynet/compare/v4.1.1...v5.0.0
 [v4.1.1]: https://github.com/TZERO78/buddynet/compare/v4.1.0...v4.1.1
 [v4.0.0]: https://github.com/TZERO78/buddynet/compare/v3.0.1...v4.0.0
