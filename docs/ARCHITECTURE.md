@@ -145,24 +145,25 @@ by a session token; it never terminates the TLS and so never sees plaintext —
 only virtual IPs and ciphertext. See [PROTOCOL.md](PROTOCOL.md) for the bind
 handshake.
 
-## Handshake transport (UDP or QUIC)
+## Handshake transport (QUIC)
 
-The matchmaking control plane (`REGISTER` → `PEER_LIST`) runs over one of two
-transports, chosen with and set the **same** on the server and
-every buddy. Both validate the source address before the server does any work, so
-neither can be turned into a reflector; they differ only in how:
+The matchmaking control plane (`REGISTER` → `PEER_LIST`) runs over **QUIC/TLS
+1.3**, and only that. There is no transport to choose and nothing to keep in sync
+between server and buddies.
 
-- **Plain UDP + cookie (default).** A `REGISTER` without a valid cookie is
-  answered only with a small `COOKIE` challenge (`HMAC(subkey, epoch‖src-IP)`,
-  smaller than the request); the buddy echoes it on its next `REGISTER`. A
-  spoofed source never receives the challenge, so it can never be answered. No
-  TLS certificate, and the buddy's single UDP socket is untouched — so hole
-  punching and the peer tunnel are unaffected.
-- **QUIC.** The exchange rides QUIC, whose handshake
-  validates the address itself (no cookie needed). The server presents its
-  identity cert; the buddy pins it by `--server-key`. The buddy runs the QUIC
-  control connection on its **shared** socket and closes it before punching, so
-  the same NAT mapping still carries the tunnel.
+QUIC's own handshake validates the source address before the server does any
+work, so the server cannot be turned into a reflector — no application-layer
+cookie is needed. The server presents its identity certificate and the buddy pins
+it with `--server-key`. The buddy runs the control connection on its **shared**
+UDP socket and closes it before punching, so the same NAT mapping still carries
+the peer tunnel.
+
+> **Removed in v5 (protocol v8):** the plain-UDP control plane and its
+> application-layer `COOKIE` challenge. It provided the same anti-reflection
+> property but left the rest of a `REGISTER` in cleartext on the wire, and a
+> choice of transports is a choice a deployment can get wrong. `TypeCookie` and
+> `Message.cookie` are gone with it. The **relay** keeps its own cookie: a relay
+> bind is plain UDP by design (see "Relay bind handshake" in PROTOCOL.md).
 
 See the `REGISTER` section of [PROTOCOL.md](PROTOCOL.md) for the wire details.
 
@@ -171,11 +172,12 @@ See the `REGISTER` section of [PROTOCOL.md](PROTOCOL.md) for the wire details.
 - **Signed rosters.** The handshake server signs every `PEER_LIST` over
   `(token, ts, peers)`; buddies pin the server key and verify, so a man in the
   middle on the control path cannot inject or alter peers.
-- **Pinned peers.** A buddy pins its partner with `--peer-key`, or learns it
-  trust-on-first-use (SSH-style) and refuses later changes. On first contact (no
-  pin) both ends show a **Short Authentication String** bound to the live TLS
-  session; the humans compare it out of band, so a man in the middle is caught
-  before the key is trusted.
+- **Pinned peers.** By default the pin comes from the invite itself: `--invite`
+  mints `bnet1.<token>.<key>` and `--join` pins the key inside it, so the joining
+  side is protected with no human step. `--peer-key` does the same by hand.
+  Failing both, a buddy learns its partner trust-on-first-use (SSH-style) and
+  refuses later changes, verified by a **Short Authentication String** bound to
+  the live TLS session — typed in, not clicked away. See SECURITY.md §4.3.
 - **Ephemeral pairing secret.** `--invite`/`--join` use a one-time invite token;
   after first pairing both ends derive a long-lived rendezvous **session secret**
   from the channel binding — computed locally, never derived from anything on the
@@ -189,8 +191,10 @@ See the `REGISTER` section of [PROTOCOL.md](PROTOCOL.md) for the wire details.
   datagram before any parsing or crypto, so a flood is dropped cheaply and the
   per-packet work stays bounded. The relay rate-limits binds per source and caps
   legs per source IP.
-- **No reflection.** The handshake server validates the source address (UDP
-  cookie or QUIC) before emitting a `PEER_LIST`; the relay only ever replies to an
-  address it has just heard a valid bind from. Neither is a usable amplifier.
+- **No reflection.** The handshake server validates the source address in the
+  QUIC handshake before emitting a `PEER_LIST`; the relay only ever replies to an
+  address it has just heard a valid bind from — and its cookie is bound to the
+  full source **address**, port included, so a captured bind is worthless from any
+  other port. Neither is a usable amplifier.
 - **Replay-resistant registrations.** In approval mode a bounded cache drops
   repeated registration signatures seen within the freshness window.

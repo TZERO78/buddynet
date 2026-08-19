@@ -5,46 +5,51 @@ of truth is [`pkg/protocol`](../pkg/protocol); a one-byte drift between
 implementations would break signature verification, so anything that crosses the
 wire or is signed lives there and nowhere else.
 
-- **Version:** `7` (`protocol.Version`). Every message stamps `ver`; a mismatch
+- **Version:** `8` (`protocol.Version`). Every message stamps `ver`; a mismatch
   is reported clearly instead of failing as an opaque signature error. Server and
   buddies must run the same version. Notable bumps: **v3** added the relay bind
   address-validation cookie (see "Relay bind handshake"), **v4** widened the
   virtual IP to a `/16` (`10.66.X.Y`), **v6** lets the pairing token travel sealed
   to the server's pinned key (`token_enc`) instead of in cleartext, **v7** added
-  the per-attempt `nonce` and widens the registration signature to cover every
-  field the server acts on.
+  the per-attempt `nonce` and widened the registration signature to cover every
+  field the server acts on, **v8** made the control plane QUIC-only (the
+  plain-UDP transport and its `COOKIE` challenge are gone) and dropped the
+  cleartext `token` field, leaving `token_enc` as the only form on the wire.
 
-> **v8 is a breaking change with no compatibility shim.** A v6 registration
-> signature does not cover `ver`, `role`, `virtual_ip`, `name`, `nonce` or
-> `code_enc`, so it cannot be verified under v7 — and it is *not* accepted under
-> the old rules. Once the source address is validated, a mismatched client is
-> answered with a version-stamped empty `PEER_LIST`, which surfaces on the buddy
-> as *"server speaks vN, we speak vM — update buddynet"*.
+> **v8 is a breaking change with no compatibility shim.** A v7 buddy and a v8
+> server cannot talk in either direction: the plain-UDP transport a v7 node may
+> use no longer exists, and the cleartext `token` field is no longer serialised.
+> Once the source address is validated, a mismatched client is answered with a
+> version-stamped empty `PEER_LIST`, which surfaces on the buddy as *"server
+> speaks vN, we speak vM — update buddynet"*.
 
-### Migrating a running server to v7
+### Migrating a running server across a breaking bump
 
-A v7 server does not serve v6 buddies, so a single in-place upgrade cuts every
-buddy off until each one is updated. **Do not add a compatibility shim** — a v6
-signature does not cover the fields v7 relies on, so accepting one would mean
-accepting a weaker proof. Run the two versions side by side instead:
+The recipe below is written for the v7 → v8 step (the most recent one) and works
+for any future breaking bump — substitute the two version numbers.
 
-1. **Keep the v6 server running** on its current address and port. Do not touch it.
-2. **Start the v7 server alongside it**, on a second port (or a second address) —
+A v8 server does not serve v7 buddies, so a single in-place upgrade cuts every
+buddy off until each one is updated. **Do not add a compatibility shim** — the
+old rules are the weaker ones, and accepting them on request is exactly the
+downgrade an attacker would ask for. Run the two versions side by side instead:
+
+1. **Keep the v7 server running** on its current address and port. Do not touch it.
+2. **Start the v8 server alongside it**, on a second port (or a second address) —
    same host is fine, it is a separate process with its own `--listen`. Reuse the
    **same identity key** so buddies keep the `--server-key` they have already
    pinned; only the port changes for them.
 3. **Migrate buddies one at a time**: update the binary and point `--server` at
-   the v7 port. Each buddy that moves pairs over v7; the ones still on v6 keep
+   the v8 port. Each buddy that moves pairs over v8; the ones still on v7 keep
    working against the old server. Note that a *pair* must move together — both
    buddies rendezvous on the same server, so migrate them as a couple.
-4. **Watch the v6 server's log** until no registrations arrive any more.
-5. **Shut the v6 server down.** If you want the original port back, stop v6 and
-   restart v7 on it; buddies then need one more `--server` change, so it is
+4. **Watch the v7 server's log** until no registrations arrive any more.
+5. **Shut the v7 server down.** If you want the original port back, stop v7 and
+   restart v8 on it; buddies then need one more `--server` change, so it is
    usually simpler to keep the new port.
 
 **Writable state must not be shared.** Since v5.0.0 the control server writes
 nothing at runtime (pending enrolments live in memory), so the only file to think
-about is the allowlist. In approval mode, **copy** it to the v7 server rather than
+about is the allowlist. In approval mode, **copy** it to the new server rather than
 pointing both at the same file: two processes appending and atomically renaming the same path
 will drop each other's approvals. Copy it before migrating, or the first buddy to
 move finds itself unapproved — `--authorized` is fail-closed, so an empty file
@@ -86,7 +91,7 @@ The server observes the **source address** of the datagram as a candidate
 endpoint (over IPv6 this is directly reachable; over IPv4 it is the punched NAT
 mapping).
 
-**What `reg_sig` covers (v7).** `RegistrationPayload` signs every field the
+**What `reg_sig` covers (v8).** `RegistrationPayload` signs every field the
 server acts on: `ver`, `role`, `token` (the **plaintext**, i.e. what `token_enc`
 unseals to), `id`, `pubkey`, `virtual_ip`, `name`, `ts`, `nonce`, `code_enc` and
 `epk`.
@@ -125,9 +130,10 @@ application-layer cookie provided the same property; it is removed, and with it
 is always plain UDP.)
 
 ```
-REGISTER (no cookie) ─▶ server
-       ◀── COOKIE = HMAC(subkey, epoch‖src-IP)   (smaller than the request)
-REGISTER + cookie ─▶ server ──validate──▶ pair, then PEER_LIST
+QUIC handshake ──▶ server        (the handshake itself validates the address;
+   (TLS 1.3, server cert          an IP-spoofed sender never completes it)
+    pinned by --server-key)
+REGISTER ─────────▶ server ──▶ pair, then PEER_LIST
 ```
 
 ## PEER_LIST  (handshake → peer)
@@ -329,12 +335,25 @@ nothing. In network mode (`--allow-cidr` alone) the three ticket fields are abse
 and `s` is the buddy-derived `session_token` below.
 
 The relay binds **no leg** until the client echoes a valid cookie —
-`HMAC(per-process key, epoch‖src-IP)`, truncated, accepted for the current and
-previous 30 s epoch. The challenge is a fixed, compact binary message **smaller
-than the bind that triggers it**, so it is never an amplifier. This is the same
-return-routability proof the handshake server uses: it closes the relay's only
-reflection / traffic-laundering vector — without it, a spoofed bind could
-register a victim's address as a leg and have attacker data forwarded to it.
+`HMAC(per-process key, epoch‖src-IP‖src-port)`, truncated, accepted for the
+current and previous 30 s epoch. The challenge is a fixed, compact binary message
+**smaller than the bind that triggers it**, so it is never an amplifier. This is
+the same return-routability proof the handshake server gets from QUIC: it closes
+the relay's only reflection / traffic-laundering vector — without it, a spoofed
+bind could register a victim's address as a leg and have attacker data forwarded
+to it.
+
+The cookie covers the **full source address, port included**. Everything else
+that identifies a leg — the forwarding map, the migration check — compares
+`IP:PORT`, so an IP-only cookie would be the single place where two addresses
+looked alike: an on-path observer sharing the public IP (same NAT or LAN) could
+replay a captured bind verbatim from another port, and since the proof of
+possession covers exactly that cookie, the relay would accept it as a NAT
+migration and move the leg away from the real buddy. No plaintext is exposed —
+the tunnel is end-to-end encrypted — but the traffic is redirected. Including the
+port costs a legitimate mover nothing: a bind from a new address draws a challenge
+for **that** address, and the buddy re-signs the proof with its ephemeral key,
+which is precisely what a captured bind cannot do. Fixed in v5.1.1.
 
 Once both legs are bound, the relay forwards every **non-bind** datagram from one
 leg to the other. QUIC's first byte is never the bind prefix, so data and
@@ -395,7 +414,7 @@ endpoint — the relay forwards ciphertext and never sees content.
 | Grafting a captured enrollment code onto another key | `code_enc` is inside the registration signature |
 | Spoofed-source memory blowup | hard caps on tokens / ids / candidates; capped+pruned approval-mode maps |
 | Flooding the listener (CPU) | global + per-source rate limit before any crypto |
-| Turning a server into a reflector | source address validated first — a UDP cookie (`HMAC(subkey, epoch‖src-IP)`, reply smaller than request) or QUIC's handshake — before any `PEER_LIST` |
+| Turning a server into a reflector | source address validated by QUIC's handshake before any `PEER_LIST`; the relay's own cookie (`HMAC(key, epoch‖src-IP‖src-port)`, reply smaller than request) does the same for a bind |
 | Turning a **relay** into a reflector / traffic launderer | a bind binds no leg until the source echoes an address-validation cookie (`HMAC(per-process key, epoch‖src-IP)`, reply smaller than the bind); a spoofed source can never validate |
 | **Using someone else's relay** (bandwidth, capacity hoarding) | a relay admits only sessions a named handshake server authorised (signed ticket) and/or named networks; it refuses to start with neither, and `0.0.0.0/0` is not an accepted answer |
 | **Replaying a captured relay ticket** | the ticket is bound to an ephemeral key the binder must sign with; the signature covers the relay's own address-bound, rotating cookie |

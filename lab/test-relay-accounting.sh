@@ -114,8 +114,12 @@ else
 fi
 
 say "start the relay (--relay-max-legs-per-ip $MAXLEGS)"
+# --debug ON PURPOSE: the leg-cap warning names its accounting key only in debug
+# mode (a shipped relay does not log who used it), and the /64 in that key is
+# exactly what this test has to see. The second relay below runs WITHOUT it, so
+# the other half of that rule gets checked too.
 ns "$NSR" "$BNBIN" --role=relay --relay-listen "[fd00:cafe::1]:$PORT" \
-    --allow-cidr "$LABNET" \
+    --allow-cidr "$LABNET" --debug \
     --relay-max-legs-per-ip "$MAXLEGS" --relay-max-sessions 4096 --ttl 600s \
     > "$TMP/relay.log" 2>&1 &
 for _ in $(seq 1 20); do grep -q "action=listening" "$TMP/relay.log" 2>/dev/null && break; sleep 0.5; done
@@ -148,7 +152,11 @@ fi
 if grep -q "leg-cap-hit src=fd00:beef:1::/64" "$TMP/relay.log"; then
   ok "the cap warning names the /64, not a single address"
 else
-  info "no /64-keyed leg-cap warning in the log"
+  # Was an `info` (i.e. it could never fail) — with --debug the line MUST be
+  # there, so a missing one now means the accounting key regressed to a single
+  # address, or the warning stopped firing at all.
+  bad "no /64-keyed leg-cap warning under --debug — the accounting key regressed"
+  grep "leg-cap-hit" "$TMP/relay.log" | head -3
 fi
 
 say "positive control: a different /64 is still admitted"
@@ -195,6 +203,28 @@ if grep -q "bound=1" "$TMP/dos-post.log"; then
   ok "an unrelated /64 can STILL get a session — no global lockout"
 else
   bad "H-01 DoS: one /64 filled the table and locked out an unrelated /64"
+fi
+
+say "privacy: a relay WITHOUT --debug names no source"
+# The second relay ran without --debug and hit its per-IP cap during the flood
+# above, so its log is the natural place to check the rule the shipped relay
+# claims: it says a source is hoarding, never which one. An address here would
+# mean a production relay writes down who used it.
+if grep -q "leg-cap-hit" "$TMP/relay-dos.log"; then
+  if grep "leg-cap-hit" "$TMP/relay-dos.log" | grep -q "src="; then
+    bad "the leg-cap warning printed a source address WITHOUT --debug"
+    grep "leg-cap-hit" "$TMP/relay-dos.log" | head -3
+  else
+    ok "the cap warning fired without naming a source (addresses stay behind --debug)"
+  fi
+else
+  info "no leg-cap warning on the non-debug relay — nothing to check here"
+fi
+if grep -qE "src=fd00:beef" "$TMP/relay-dos.log"; then
+  bad "a source address leaked into a non-debug relay log"
+  grep -E "src=fd00:beef" "$TMP/relay-dos.log" | head -3
+else
+  ok "no source address anywhere in the non-debug relay log"
 fi
 
 say "result"

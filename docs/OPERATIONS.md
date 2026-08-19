@@ -30,11 +30,8 @@ buddynet --role=buddy \
   ...
 ```
 
-### Why QUIC is the right default
+### Why the control plane is QUIC
 
-| Property | Plain UDP | QUIC |
-|---|---|---|
-| REGISTER confidentiality | **Cleartext** — token travels in the clear | Encrypted (TLS 1.3) |
 The control plane is QUIC/TLS 1.3, and there is no alternative to choose: the
 whole `REGISTER` exchange — pairing token included — is inside TLS, and only the
 server can read it. Source addresses are validated by the QUIC handshake itself,
