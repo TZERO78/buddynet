@@ -89,17 +89,10 @@ type authorizer struct {
 	// enroll gates work done for keys that are NOT on the allowlist. Since an
 	// unknown key may now complete the TLS handshake (that is what makes code-based
 	// enrollment possible at all), the per-registration cost it can trigger — a
-	// sealed-code X25519 open, a pending-map insert, a pending-file rewrite — must
+	// sealed-code X25519 open, a pending-map insert — must
 	// be bounded far more tightly than the cost an approved buddy causes. Its own
 	// limiter, so a stranger flood can never eat an allowlisted buddy's budget.
 	enroll *ratelimit.Limiter
-
-	// writeMu serialises PERSISTENCE. It is taken before mu and held across the
-	// file write, so two writers can never rename their snapshots out of order —
-	// which is how an older pending set used to overwrite a newer one. mu itself is
-	// NOT held across the write: it serves allowed() and replayed() on every packet,
-	// so putting disk I/O under it would trade a lost update for a stall.
-	writeMu sync.Mutex
 
 	mu         sync.RWMutex
 	keys       map[string]string
@@ -556,14 +549,6 @@ func (a *authorizer) prunePendingLocked() {
 			delete(a.pend, k)
 		}
 	}
-}
-
-func clonePending(m map[string]pendingEntry) map[string]pendingEntry {
-	out := make(map[string]pendingEntry, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }
 
 // --- file helpers, shared by the approve/list/revoke subcommands ----------

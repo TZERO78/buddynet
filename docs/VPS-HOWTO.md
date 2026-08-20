@@ -25,7 +25,7 @@ control plane, not a data path), a domain or just the VPS's IP, and SSH access.
 | 2 | [Install the binary (verified)](#2-install-the-binary-verified) | Signed release, provenance checked |
 | 3 | [Set up the firewall (nftables)](#3-set-up-the-firewall-nftables) | Default-drop; only SSH + BuddyNet ports |
 | 4 | [Install the systemd units](#4-install-the-systemd-units) | Hardened, sandboxed, auto-restart |
-| 5 | [Start it & get the server key](#5-start-it-and-get-the-server-key) | The key your buddies pin |
+| 5 | [Start it & get the server key](#5-create-the-identity-start-it-and-note-the-server-key) | The key your buddies pin |
 | 6 | [Connect your buddies](#6-connect-your-buddies) | Mint an invite, join from each host |
 | 7 | [Verify & maintain](#7-verify-and-maintain) | Confirm it works; keep it updated |
 | 8 | [Optional hardening](#8-optional-hardening) | Approval mode, source allowlist |
@@ -293,10 +293,12 @@ invite** (valid 15 min or until first pairing):
 
 ```bash
 # On machine A — mint an invite (prints a TOKEN):
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --invite
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+     --invite
 
 # On machine B — join with that token:
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=TOKEN
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+     --join TOKEN
 ```
 
 On first contact each side shows a 6-character **safety code** — read yours to
@@ -340,7 +342,15 @@ spike in `rate-limited`/`dropped` is an attack being absorbed:
 journalctl --namespace=buddynet | grep -E 'SECURITY:|ALERT:'
 ```
 
-See [OPERATIONS.md — Log schema](OPERATIONS.md#log-schema) for the full reference.
+See [OPERATIONS.md — Log schema](OPERATIONS.md#log-schema) for the full
+reference, and
+[OPERATIONS.md — Running a port that is open to the internet](OPERATIONS.md#running-a-port-that-is-open-to-the-internet)
+for what constant scanning looks like, why most of it is dropped without a log
+line, and why an empty log is not proof that nobody knocked.
+
+**Logs are kept for one week** by the shipped journald drop-in (50 MB cap). If
+you want to review a longer period, export before it expires — see
+[OPERATIONS.md — How long logs are kept](OPERATIONS.md#how-long-logs-are-kept).
 
 ---
 
@@ -397,8 +407,8 @@ host-hardening toolkit this project is designed to sit on top of.
   schema, `--status`).
 - [SECURITY.md](../SECURITY.md) — the threat model: what the coordinator can and
   cannot see.
-- [WIREGUARD.md](WIREGUARD.md) / [BUDDYSHARE.md](BUDDYSHARE.md) — the opt-in
-  kernel-WireGuard data plane and scoped SMB sharing (these run on the *buddies*,
-  not the coordinator).
+- [WIREGUARD.md](WIREGUARD.md) — the opt-in kernel-WireGuard data plane and its
+  fail-closed exposure scope (this runs on the *buddies*, not on the
+  coordination server).
 - [server-baukasten](https://github.com/TZERO78/server-baukasten) — full host
   hardening for the VPS this coordinator runs on (SSH, updates, fail2ban, users).

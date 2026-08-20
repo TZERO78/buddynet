@@ -315,13 +315,52 @@ const sessionFallbackAfter = 3
 // pre-existing first-pairing endpoint-harvest exposure applies, and only while a
 // token is present). On success a fresh session is stored and the desync heals.
 func peerSource(cfg BuddyConfig, spec peerSpec, scope *scopeCell) nextAttemptFn {
-	bootstrap := func() attempt {
+	bootstrap := func(token string) attempt {
 		// Meet at the shared bootstrap token, pin the manifest key (so no SAS
 		// prompt — Model A), and store a session secret on success. The exposure
 		// scope is read LIVE from the cell so a SIGHUP edit reaches this bring-up.
-		return attempt{rendezvous: spec.token, inviteToken: spec.token, pin: spec.pin, firstPairing: true, expose: scope.get()}
+		return attempt{rendezvous: token, inviteToken: token, pin: spec.pin, firstPairing: true, expose: scope.get()}
 	}
 	return func(failures int) (attempt, error) {
+		keyB64 := bcrypto.PubKeyB64(spec.pin)
+		// Checked on EVERY round, before a token or a session secret is used for
+		// anything. Checking only when writing (saveSession) and when assembling
+		// (assemblePeers) would leave the crash-safe intermediate state of a
+		// revocation — tombstone written, manifest entry not yet gone — being
+		// retried forever by a still-running worker. Here the worker stops:
+		// peerLoop returns any error from its attempt source, and the supervisor
+		// logs peer-stopped with the reason.
+		if revoked, rerr := isRevoked(trustBase(cfg.KnownPeers, cfg.PeersFile), keyB64); rerr != nil {
+			return attempt{}, rerr
+		} else if revoked {
+			return attempt{}, fmt.Errorf("buddy %s: %w", keyTag(keyB64), errPeerRevoked)
+		}
+		// The bootstrap token comes from the manifest AS IT IS NOW, not from the
+		// peerSpec frozen when this worker started. That frozen copy is what let a
+		// revoked buddy re-pair on a token the operator had already deleted (A-01):
+		// the session was gone, so the worker fell back to bootstrap() and used the
+		// stale in-memory token. The tombstone above is the correctness fix; this is
+		// the behaviour fix, and both are wanted.
+		token := spec.token
+		if cfg.PeersFile != "" {
+			live, lerr := loadPeersFile(cfg.PeersFile)
+			if lerr != nil {
+				// Not a trust decision (the key stays pinned either way), so do not
+				// kill the worker over a manifest an operator is mid-edit: drop the
+				// bootstrap token for this round and keep reconnecting via the session.
+				log.Printf("WARNING: cannot re-read %s (%v) — no bootstrap token this round for %s",
+					cfg.PeersFile, lerr, keyTag(keyB64))
+				token = ""
+			} else {
+				token = ""
+				for _, s := range live {
+					if s.pin.Equal(spec.pin) {
+						token = s.token
+						break
+					}
+				}
+			}
+		}
 		secret, ok, err := loadSessionFor(cfg.KnownPeers, spec.pin)
 		if err != nil {
 			return attempt{}, fmt.Errorf("session store %s: %w", cfg.KnownPeers, err)
@@ -331,17 +370,17 @@ func peerSource(cfg BuddyConfig, spec peerSpec, scope *scopeCell) nextAttemptFn 
 			// only rendezvous both sides can re-agree on) and the key must be pinned
 			// (always true in manifest mode; never fall back under --lab). Past
 			// the threshold, alternate so we also keep trying the real session.
-			if spec.token != "" && !cfg.Insecure && failures >= sessionFallbackAfter && failures%2 == 1 {
+			if token != "" && !cfg.Insecure && failures >= sessionFallbackAfter && failures%2 == 1 {
 				log.Printf("RECONNECT: action=session-fallback key=%s failures=%d detail=%q",
 					keyTag(bcrypto.PubKeyB64(spec.pin)), failures,
 					"session presumed stale (partner may have lost its copy); probing bootstrap token, key stays pinned")
-				return bootstrap(), nil
+				return bootstrap(token), nil
 			}
 			return attempt{rendezvous: secret, pin: spec.pin, expose: scope.get()}, nil
 		}
-		if spec.token == "" {
+		if token == "" {
 			return attempt{}, errSessionRevoked
 		}
-		return bootstrap(), nil
+		return bootstrap(token), nil
 	}
 }

@@ -21,7 +21,11 @@ Environment=BUDDYNET_LISTEN=[::]:51820
 #   LoadCredential=id.key:/etc/buddynet-secret/id.key
 # Back that source up — losing the identity forces every buddy to re-pin.
 LoadCredential=id.key:/etc/buddynet-secret/id.key
-ExecStart=/usr/local/bin/buddynet-handshake --key ${CREDENTIALS_DIRECTORY}/id.key --listen ${BUDDYNET_LISTEN} --quic-handshake
+# The control plane is QUIC/TLS 1.3 unconditionally since v8 — there is no
+# plain-UDP plane left to select, so no flag to pass. (This line used to end in
+# --quic-handshake, which v8 removed: the binary exited 2 and the unit never
+# started. A flag-drift test now guards every shipped artifact.)
+ExecStart=/usr/local/bin/buddynet-handshake --key ${CREDENTIALS_DIRECTORY}/id.key --listen ${BUDDYNET_LISTEN}
 Restart=on-failure
 RestartSec=2
 

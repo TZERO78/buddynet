@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -145,6 +146,7 @@ type attempt struct {
 	rendezvous   string            // token registered at the server this attempt
 	inviteToken  string            // human token, for TOFU/session keying ("" on reconnect)
 	pin          ed25519.PublicKey // reconnect: partner key that MUST match (nil otherwise)
+	cfgPin       ed25519.PublicKey // --peer-key as the operator configured it this run (nil if unset)
 	firstPairing bool              // ephemeral invite: derive & store a session on success
 	ifIndex      int               // WireGuard data plane: this buddy's interface is bnet{ifIndex} (one per buddy)
 	expose       *nft.Scope        // per-buddy WG exposure from the manifest (nil = inherit --expose, else fail-closed)
@@ -304,6 +306,15 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	// (bootstrap or reconnect), plus any previously paired peers. A single -L port
 	// cannot route to N buddies, so >1 buddy needs --vip-listen instead.
 	if cfg.PeersFile != "" {
+		// One designated trust-state lock covers manifest, sessions and revocations,
+		// and it is derived from --known-peers. That is deadlock-free but puts the
+		// lock file in an unexpected place if the two live in different directories,
+		// so say so rather than letting an operator discover it.
+		if cfg.KnownPeers != "" && filepath.Dir(cfg.KnownPeers) != filepath.Dir(cfg.PeersFile) {
+			log.Printf("NOTE: --peers-file and --known-peers are in different directories; "+
+				"the trust-state lock and the revocation list live next to %s (%s.lock, %s)",
+				cfg.KnownPeers, cfg.KnownPeers, revokedPath(cfg.KnownPeers))
+		}
 		specs, serr := assemblePeers(cfg)
 		if serr != nil {
 			return serr
@@ -333,6 +344,12 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 				"Remove excess sessions from %s, or use a solution designed for large-scale meshes.",
 				len(sessions), MaxBuddies, cfg.KnownPeers)
 			sessions = sessions[:MaxBuddies]
+		}
+		if trust.pinned != nil {
+			log.Printf("WARNING: --peer-key names ONE buddy, but %d buddies are paired in %s — "+
+				"it is not enforced for these workers, each of which pins its own stored key. "+
+				"To lock one out, revoke it: buddynet --known-peers %s peers remove <key>",
+				len(sessions), cfg.KnownPeers, cfg.KnownPeers)
 		}
 		specs := make([]peerSpec, len(sessions))
 		for i, s := range sessions {
@@ -384,18 +401,66 @@ func jitter(d time.Duration) time.Duration {
 	return d/2 + time.Duration(binary.BigEndian.Uint64(b[:])%(uint64(d/2)+1))
 }
 
+// errPinConflict reports a --peer-key that contradicts the stored session pin.
+// Both keys are printed IN FULL, not tagged: the operator has to compare them by
+// eye, and the revoke command below needs the whole key.
+func errPinConflict(cfg BuddyConfig, storedB64 string) error {
+	return fmt.Errorf("--peer-key does not match the stored session pin — NOT connecting.\n"+
+		"  --peer-key: %s\n"+
+		"  stored pin: %s\n"+
+		"  Deliberate re-pin or revocation? Drop the stored session, then pair again with a NEW invite:\n"+
+		"      buddynet --known-peers %s peers remove %s\n"+
+		"    (or \"Forget buddy\" in the Unraid plugin).\n"+
+		"  Typo? This node is paired with the stored key above — that is the buddy it will talk to.",
+		cfg.PeerKey, storedB64, cfg.KnownPeers, storedB64)
+}
+
 // nextAttempt decides how to connect this round: reconnect via a stored session
 // secret (pinning the recorded partner key), or pair with the invite/legacy
 // token. A stored session always takes precedence, so once an ephemeral invite
 // has paired once, the invite token is never used again.
 func nextAttempt(cfg BuddyConfig) (attempt, error) {
+	var cfgPin ed25519.PublicKey
+	if cfg.PeerKey != "" {
+		var perr error
+		if cfgPin, perr = bcrypto.DecodePubKey(cfg.PeerKey); perr != nil {
+			return attempt{}, fmt.Errorf("bad --peer-key: %w", perr)
+		}
+	}
+	// A revoked buddy is refused at EVERY attempt, before its stored secret or a
+	// bootstrap token is used for anything (see peerSource for the same check on
+	// the multi-peer path).
+	base := trustBase(cfg.KnownPeers, cfg.PeersFile)
+	if cfgPin != nil {
+		keyB64 := bcrypto.PubKeyB64(cfgPin)
+		if revoked, rerr := isRevoked(base, keyB64); rerr != nil {
+			return attempt{}, rerr
+		} else if revoked {
+			return attempt{}, fmt.Errorf("buddy %s: %w (lift it with: peers allow %s)", keyTag(keyB64), errPeerRevoked, keyB64)
+		}
+	}
 	if pin, secret, ok, err := loadSession(cfg.KnownPeers); err != nil {
 		return attempt{}, fmt.Errorf("session store %s: %w", cfg.KnownPeers, err)
 	} else if ok {
-		return attempt{rendezvous: secret, pin: pin}, nil
+		keyB64 := bcrypto.PubKeyB64(pin)
+		if revoked, rerr := isRevoked(base, keyB64); rerr != nil {
+			return attempt{}, rerr
+		} else if revoked {
+			return attempt{}, fmt.Errorf("buddy %s: %w (lift it with: peers allow %s)", keyTag(keyB64), errPeerRevoked, keyB64)
+		}
+		// Both pins are LOCAL: the stored one from the session store, the
+		// configured one from --peer-key. If they disagree the outcome is already
+		// decided, so stop before buddyRun registers — a REGISTER would hand this
+		// node's rendezvous token and observed endpoints to the server for a
+		// pairing that must not happen. The session is deliberately NOT deleted:
+		// a mismatch is a suspicion, not an instruction to destroy state.
+		if cfgPin != nil && !pin.Equal(cfgPin) {
+			return attempt{}, errPinConflict(cfg, bcrypto.PubKeyB64(pin))
+		}
+		return attempt{rendezvous: secret, pin: pin, cfgPin: cfgPin}, nil
 	}
 	if cfg.Token != "" {
-		return attempt{rendezvous: cfg.Token, inviteToken: cfg.Token, firstPairing: cfg.Ephemeral}, nil
+		return attempt{rendezvous: cfg.Token, inviteToken: cfg.Token, firstPairing: cfg.Ephemeral, cfgPin: cfgPin}, nil
 	}
 	return attempt{}, errors.New("no saved session and no invite token — use --invite to mint one, or --join <TOKEN> with the one your buddy gave you")
 }

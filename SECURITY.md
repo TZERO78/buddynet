@@ -18,8 +18,9 @@ attack.** It is organised threat-model-first:
 7. [Detecting an attack](#7-detecting-an-attack) — the log schema.
 8. [Operational security](#8-operational-security) — lost keys, revocation,
    release integrity.
-9. [Deliberately out of scope](#9-deliberately-out-of-scope) and
-   [non-goals](#10-non-goals--positioning).
+9. [Limits](#9-limits--what-buddynet-cannot-do) — what it cannot protect
+   against, and what is left out by design.
+10. [Non-goals / positioning](#10-non-goals--positioning).
 10. [Reporting a vulnerability](#11-reporting-a-vulnerability).
 
 The threat model in `docs/ARCHITECTURE.md` and the protocol in `docs/PROTOCOL.md`
@@ -100,6 +101,9 @@ adversary."
 | A stranger **using your relay** (bandwidth, or hoarding capacity so your own fallback fails) | The relay admits only sessions your handshake server authorised (signed ticket bound to an ephemeral key the binder must prove) and/or named networks; it refuses to start with neither. | **Mitigated** (v5.0.0) |
 | A **compromised relay** | It holds only a public verify key: it can withhold service — which it can do by being offline anyway — but can never authorise a session, nor forge one for another relay. It still sees only ciphertext. In a COMBINED `--role=handshake,relay` process the server's signing key is in the same memory; run them separated when the relay is exposed (§6.4). | **Mitigated (separated) / reduced (combined)** |
 | **Malicious / compromised paired buddy** (WireGuard plane) | Reaches only the port(s) you `--expose`; without a scope, nothing (fail-closed). It is a *trusted* peer by construction — treat what you expose as reachable by a hostile peer and keep it patched and least-privileged (§6.3). | **Scoped** |
+| A **revoked** buddy trying to come back | `peers remove` (and *Forget buddy* in the plugin) puts the key on a permanent local revocation list, deletes the stored session and drops the manifest entry. The key is refused at every reconnect attempt, no session can be written for it, it cannot be learned trust-on-first-use, and a restart does not bring it back. Lifting it is a separate, explicit act (§8.2). | **Mitigated** (v5.2.0) |
+| **Malformed or hostile packets** | Every parser that faces the network is bounded before it decodes (length caps, fixed-size id fields) and runs under panic isolation, so one crafted datagram cannot take the process down. The parsers are fuzzed nightly in CI. | **Mitigated** |
+| An **accidentally open relay** | A relay refuses to start without an authorization policy, and `--allow-cidr 0.0.0.0/0` (or `::/0`) is refused rather than accepted — "open to everyone" is not a configuration you can reach by mistake. | **Mitigated** (v5.0.0) |
 | Local process on the same host | Reads the `0600` key / `known_peers`, or a TCP-loopback `-L`. Use a `unix:/path` socket and the systemd sandbox. | **Mitigated** |
 
 Each row is expanded in the sections referenced.
@@ -485,7 +489,7 @@ What is *different* about this plane, and therefore new in the threat model:
 BuddyNet routes only the partner's VIP `/32`, **never the LANs/VLANs behind it** —
 it is not a subnet router (see §10).
 
-### 6.3 Scoped exposure (`--expose`) and BuddyShare
+### 6.3 Scoped exposure (`--expose`)
 
 This is what contains a hostile paired buddy on the WireGuard plane. **Formerly
 the documented residual risk** — the VIP is a real host address, so every service
@@ -506,31 +510,22 @@ property:**
   must agree — defence in depth). Each buddy has its own interface and thus its
   own scope (MultiPeer).
 
-**BuddyShare (SMB over the scoped door).** The flagship use exposes the host's
-**Samba** to the paired buddy (`--expose 445`), nothing else. In threat-model
-terms:
+**Exposing a service is the operator's decision, and it is a real one.** What a
+buddy can reach over the tunnel is whatever the scope names, and that service's
+own security then matters:
 
-- The buddy-reachable surface is **smbd** — a large, widely audited C codebase
-  with its own CVE history. It is reachable **only** by the pinned,
-  mutually-authenticated tunnel peer, never by the network at large; this is not
-  an open port 445. Still, a buddy who is compromised (or malicious) gets to talk
-  to your Samba — patch Unraid as usual, and grant the share user the minimum
-  rights (read-only where possible).
-- **The SMB password is not a security boundary.** It selects which Unraid user
-  the buddy is (and thus their per-share rights); the boundary that keeps everyone
-  else out is the key-pinned, end-to-end-encrypted tunnel plus the fail-closed
-  scope. With several buddies, each can reach `:445`, but each can only
-  authenticate as the user whose password they hold.
-- **Public shares bypass the user layer by definition** — any SMB client may open
-  them, so the paired buddy can too the moment the tunnel is up. The plugin warns
-  prominently; the fix is Unraid's own share security (Secure/Private). The
-  tunnel-scope layer is unaffected either way.
-- Two identities, one coupling: the buddy's BuddyNet key (tunnel) and their Unraid
-  share user (folders) are independent credentials; the coupling is "only this key
-  reaches `:445`." Revocation works per layer and each layer alone suffices (see
-  [`docs/BUDDYSHARE.md`](docs/BUDDYSHARE.md)); note that an already-established SMB
-  session survives a scope removal until it disconnects (the established-traffic
-  rule) — disable the user or restart the tunnel to cut it immediately.
+- The exposed service is reachable **only** by the pinned, mutually
+  authenticated tunnel peer — never by the network at large. An exposed port is
+  not an open port on the internet.
+- It is still reachable by a buddy who is compromised or malicious. Expose the
+  minimum: one port, and a service you keep patched. `--expose all` means what it
+  says.
+- A service's own authentication (an SMB password, an rsync secret) selects
+  *which* account the buddy uses. It is not the boundary that keeps everyone else
+  out — the key-pinned tunnel and the fail-closed scope are.
+- An **already-established** connection survives the removal of a scope until it
+  disconnects (the established-traffic rule). To cut it immediately, restart the
+  tunnel or disable the account in the service itself.
 
 ### 6.4 The blind relay
 
@@ -680,7 +675,9 @@ Either way the new identity is **not** trusted automatically (the safe behaviour
 - **Server key lost:** restore it from backup. If you genuinely start over
   (`init`), every buddy must update its pinned `--server-key`.
 - **Buddy key lost, `--peer-key` in use:** the partner rejects the new key as a
-  mismatch until it updates the pin (like SSH's "host key changed").
+  mismatch until it updates the pin **and** drops the session stored from the old
+  pairing (`peers remove <old key>`, then a fresh invite) — like SSH's "host key
+  changed", where the old entry has to go too.
 - **Buddy key lost, allowlist server:** re-enroll the new key (`--code`, then
   `approve` the key the server logs), revoke the dead one.
 
@@ -688,6 +685,11 @@ Either way the new identity is **not** trusted automatically (the safe behaviour
 (server: `StateDirectory`/volume; buddy: `--key`) and back them up.
 
 ### 8.2 Revoking access
+
+> **Since v5.2.0.** The revocation list described below, and `peers allow` to
+> lift it, are new in that release. In v5.1.x and earlier, `peers remove` dropped
+> the manifest entry and the session but kept no record, so a still-running buddy
+> could re-pair itself back in.
 
 BuddyNet's data plane is a **direct** peer-to-peer tunnel — once two buddies have
 punched a path, the handshake server is no longer in it and **cannot tear that
@@ -697,15 +699,34 @@ hub-and-spoke VPN. What actually revokes access:
 - **Approval mode (`--authorized`).** `revoke <key>` removes a client from the
   allowlist so it can no longer *re-pair*; an already-established tunnel keeps
   running until it next re-registers.
-- **`--peer-key` pin.** Change or remove the pin on the surviving side; the
-  revoked key is then refused on the next connect.
+- **`--peer-key` pin — changing it, not removing it.** *Changing* the pin on the
+  surviving side revokes: the buddy compares the configured pin against the pin
+  stored from the previous pairing, and if they disagree it refuses to connect at
+  all — before it even registers with the handshake server — and prints how to
+  re-pair. *Removing* the pin is **not** a revocation and is not meant to be: with
+  no `--peer-key` there is nothing to compare, the stored session pin governs, and
+  the connection continues. Dropping a flag must not silently delete state.
+  A changed pin therefore also needs the stored session cleared —
+  `peers remove <old key>` (or "Forget buddy" in the Unraid plugin) — followed by
+  a **new invite**. That, and not the flag alone, is the complete revocation.
 - **Token rotation.** Re-invite (`--invite`) to mint a fresh token and retire the
   old session secret; the old credential stops working for new connects.
-- **`peers remove <key>` (MultiPeer).** Removing one drops **both** its manifest
-  line and its stored session secret, so it can no longer re-pair. This is a
-  purely local, self-sovereign decision: it revokes that buddy from *your* node
-  only and never affects your other buddies. A running daemon applies it on
-  `SIGHUP` (or restart).
+- **`peers remove <key>` — the complete one.** It records the key on a permanent
+  local revocation list (`<known_peers>.revoked`) **and** drops the stored session
+  secret **and** the manifest line, in that order under one lock. The list is what
+  makes it stick: a still-running buddy used to re-pair on the bootstrap token it
+  held in memory and write its session straight back, so the `SIGHUP` meant to
+  apply the revocation restarted it instead. Now the key is refused at every
+  door — the next reconnect attempt stops that worker, no session can be stored
+  for it, it cannot be learned trust-on-first-use, and a `SIGHUP` will not
+  re-assemble it. This is a purely local, self-sovereign decision: it revokes that
+  buddy from *your* node only and never affects your other buddies. It works with
+  or without a manifest.
+
+  Lift it deliberately with `peers allow <key>` (or by adding the buddy back with
+  `peers add`), and only together with a **new invite** — the old session secret
+  is gone. Nothing expires the list on its own: a tombstone that ages out is
+  exactly when the zombie comes back.
 
 To **bound** how long an established tunnel can outlive a revocation, run the buddy
 with **`--reauth-interval`** (off by default). It rebuilds the tunnel on that
@@ -743,7 +764,44 @@ install on a mismatch.
 
 ---
 
-## 9. Deliberately out of scope
+## 9. Limits — what BuddyNet cannot do
+
+### 9.1 What it cannot protect against
+
+BuddyNet secures a connection between two machines. It cannot secure the
+machines. Concretely, none of the following are things it can help with:
+
+- **A compromised endpoint.** Once an endpoint is compromised with root or
+  equivalent access, the attacker can generally access everything that this
+  endpoint can access. BuddyNet cannot repair a compromised operating system.
+  This is a normal system boundary, not a weakness specific to this project.
+- **Malware on a buddy's machine**, or a buddy who is themselves hostile: they
+  are a legitimate, authenticated peer of yours.
+- **A stolen identity key.** Whoever holds `id.key` *is* that node until you
+  revoke it on the other side (§8.1, §8.2).
+- **An insecure host or server configuration** — a weak SSH setup, an open
+  firewall, wrong file permissions, an unpatched kernel.
+- **A service you deliberately exposed.** `--expose 445` means your buddy can
+  talk to that service; its own bugs and its own authentication are its own.
+- **Denial of service in general.** Rate limits and bounded state stop one source
+  from consuming unbounded work; they cannot stop someone from saturating a small
+  VPS's uplink. Availability is a property of your network and your provider.
+- **Vulnerabilities in what BuddyNet is built from** — the operating system, the
+  kernel, Go, QUIC (`quic-go`), kernel WireGuard, or any dependency. They are
+  pinned and scanned (`govulncheck` in CI), which is not the same as being free
+  of them.
+- **Operator error**, and **lost or corrupted backups**. BuddyNet is a transport;
+  it neither makes backups nor verifies them.
+
+**The source code is public, and an attacker may be assumed to know all of it.**
+That is deliberate: security here comes from keys and secrets, never from
+anything being hidden. The only things that must stay secret are identity keys,
+invite tokens, session secrets and enrollment codes. Open source cuts both ways —
+it lets an attacker study the design, and it lets anyone verify it. There is no
+"security through obscurity" claim anywhere in this project, and none should be
+read into it.
+
+### 9.2 Deliberately out of scope
 
 - **Server-forced disconnect of a live tunnel.** The handshake server is not in
   the data path, so it **cannot kill an established direct tunnel** — see §8.2 for
@@ -767,13 +825,17 @@ install on a mismatch.
 
 ## 10. Non-goals / positioning
 
-BuddyNet is a **two-person (small-circle) tool** to connect a handful of hosts
-securely — deliberately **not** a mesh VPN and not measured against Tailscale or
-Netbird. Concretely:
+BuddyNet is a small, self-hosted peer-to-peer network for families, friends and
+small teams. It reduces dependence on a managed VPN provider; it does not attempt
+to replace the administration, support, platform coverage or enterprise features
+of Tailscale or NetBird, and it is not measured against them. Concretely:
 
-- **16 buddies per node recommended, hard cap of 48** (fail-closed). The cap is a
-  guardrail, not a capacity target. For more, use a mesh VPN — that is a
-  different tool.
+- **Recommended size: roughly 2 to 16 buddies per node.** That is the range this
+  is built and tested for.
+- **Hard cap of 48 peers**, enforced fail-closed in the code. That is a
+  guardrail against a runaway manifest, **not** a capacity target and not a
+  recommendation. For more than a handful of machines, use a tool designed for
+  fleets.
 - **Connects hosts, not networks.** It routes only a partner's VIP `/32`, never
   the LANs/VLANs behind it — it is not a site-to-site/subnet router.
 - **No central hub that sees plaintext.** Peer-to-peer first, blind relay as

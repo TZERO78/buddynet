@@ -38,6 +38,10 @@ func PeersList(peersFile, knownPeers, peersPath string) error {
 	for _, s := range sessions {
 		paired[bcrypto.PubKeyB64(s.pin)] = true
 	}
+	revoked, err := revokedSet(trustBase(knownPeers, peersFile))
+	if err != nil {
+		return err
+	}
 	names := loadPeerNames(peersPath) // best-effort; empty until a buddy is seen
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -66,6 +70,9 @@ func PeersList(peersFile, knownPeers, peersPath string) error {
 		if paired[keyB64] {
 			status = "paired"
 		}
+		if _, gone := revoked[keyB64]; gone {
+			status = "REVOKED"
+		}
 		tok := "no-token"
 		if s.token != "" {
 			tok = "token-set"
@@ -76,12 +83,38 @@ func PeersList(peersFile, knownPeers, peersPath string) error {
 		}
 		emit(s.pin, s.name, status, tok, expose, "manifest")
 	}
+	listed := func(k string) bool { return inManifest[k] }
 	for _, s := range sessions {
 		keyB64 := bcrypto.PubKeyB64(s.pin)
-		if inManifest[keyB64] {
+		if listed(keyB64) {
 			continue
 		}
-		emit(s.pin, "", "paired", "—", "(inherit)", "session-only")
+		status := "paired"
+		if _, gone := revoked[keyB64]; gone {
+			status = "REVOKED"
+		}
+		emit(s.pin, "", status, "—", "(inherit)", "session-only")
+		inManifest[keyB64] = true // already shown
+	}
+	// A revoked buddy usually has neither a manifest entry nor a session left, so
+	// it would vanish from this list entirely — and the operator would have no way
+	// to see WHY it never comes back, or which key to pass to `peers allow`.
+	var revokedKeys []string
+	for k := range revoked {
+		if !listed(k) {
+			revokedKeys = append(revokedKeys, k)
+		}
+	}
+	sort.Strings(revokedKeys)
+	for _, k := range revokedKeys {
+		pin, derr := bcrypto.DecodePubKey(k)
+		if derr != nil {
+			continue
+		}
+		emit(pin, "", "REVOKED", "—", "—", "revoked")
+	}
+	if rows > 0 && len(revokedKeys) > 0 {
+		defer fmt.Println("\nREVOKED buddies cannot pair again until you run: peers allow <key>")
 	}
 	if rows == 0 {
 		fmt.Println("(no buddies configured yet)")
@@ -129,7 +162,7 @@ func errLegacyManifest(peersFile string) error {
 // WireGuard data plane. The key is validated and de-duplicated (a buddy already
 // listed is reported, not duplicated). The file is created 0600 in a 0700
 // directory, same trust domain as known_peers.
-func PeersAdd(peersFile, key, token, name, expose string) error {
+func PeersAdd(peersFile, knownPeers, key, token, name, expose string) error {
 	if peersFile == "" {
 		return fmt.Errorf("--peers-file <path> is required for peers add")
 	}
@@ -158,28 +191,86 @@ func PeersAdd(peersFile, key, token, name, expose string) error {
 		return errLegacyManifest(peersFile)
 	}
 
-	existing, err := loadPeersFile(peersFile)
-	if err != nil {
-		return err
-	}
-	for _, s := range existing {
-		if bcrypto.PubKeyB64(s.pin) == keyB64 {
+	// One transaction: listed-ness, the revocation list and the manifest write all
+	// under the SAME lock, so `peers add` cannot race the running daemon or a
+	// second CLI. The re-allow ordering is the mirror of the revoke ordering (see
+	// PeersRemove): manifest entry FIRST, tombstone last, so a crash in between
+	// leaves "configured but still revoked" — refused, and the operator repeats —
+	// never "allowed but not configured".
+	return withTrustStateLock(knownPeers, peersFile, func() error {
+		existing, err := loadPeersFile(peersFile)
+		if err != nil {
+			return err
+		}
+		lockBase := trustBase(knownPeers, peersFile)
+		revoked, err := isRevokedLocked(lockBase, keyB64)
+		if err != nil {
+			return err
+		}
+		listed := false
+		for _, s := range existing {
+			if bcrypto.PubKeyB64(s.pin) == keyB64 {
+				listed = true
+				break
+			}
+		}
+		// "Listed but revoked" is NOT "already listed" — it is the normal shape of a
+		// re-allow, because a revoke deliberately leaves the manifest entry standing
+		// if it crashes after the tombstone. Reporting "already listed" here is what
+		// left a buddy silently revoked with no way back through this command.
+		if listed && !revoked {
 			fmt.Printf("already listed: %s\n", keyTag(keyB64))
 			return nil
 		}
-	}
-	// Refuse to grow past the design limit (a new key would make len+1).
-	if len(existing) >= MaxBuddies {
-		return errTooManyBuddies(len(existing) + 1)
-	}
+		if !listed {
+			// Refuse to grow past the design limit (a new key would make len+1).
+			if len(existing) >= MaxBuddies {
+				return errTooManyBuddies(len(existing) + 1)
+			}
+			existing = append(existing, peerSpec{pin: pin, token: token, name: name, expose: scope})
+			if err := saveManifestLocked(peersFile, existing); err != nil {
+				return err
+			}
+		}
+		if revoked {
+			if _, rerr := removeRevokedLocked(lockBase, keyB64); rerr != nil {
+				return rerr
+			}
+			fmt.Printf("allowed buddy %s again (revocation lifted)%s%s\n", keyTag(keyB64), tokenNote(token), exposeNote(scope))
+			fmt.Println("note: the old session was destroyed by the revoke — pair again with a NEW invite.")
+			fmt.Println("      a running buddy picks this up on SIGHUP (kill -HUP <pid>) or restart.")
+			return nil
+		}
+		fmt.Printf("added buddy %s%s%s\n", keyTag(keyB64), tokenNote(token), exposeNote(scope))
+		fmt.Println("note: a running buddy picks this up on SIGHUP (kill -HUP <pid>) or restart.")
+		return nil
+	})
+}
 
-	existing = append(existing, peerSpec{pin: pin, token: token, name: name, expose: scope})
-	if err := saveManifest(peersFile, existing); err != nil {
+// PeersAllow lifts a revocation WITHOUT touching the manifest, for the node that
+// has no --peers-file (the single-buddy setup the Unraid plugin runs). It is
+// deliberately a separate, explicit act: the plugin performs it only after a new
+// invite has been minted, so the window between "allowed again" and "pinned
+// again" never stands open.
+func PeersAllow(peersFile, knownPeers, key string) error {
+	keyB64, err := resolveKeyRef(peersFile, knownPeers, key)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("added buddy %s%s%s\n", keyTag(keyB64), tokenNote(token), exposeNote(scope))
-	fmt.Println("note: a running buddy picks this up on SIGHUP (kill -HUP <pid>) or restart.")
-	return nil
+	return withTrustStateLock(knownPeers, peersFile, func() error {
+		lifted, rerr := removeRevokedLocked(trustBase(knownPeers, peersFile), keyB64)
+		if rerr != nil {
+			return rerr
+		}
+		if !lifted {
+			fmt.Printf("not revoked: %s (nothing to lift)\n", keyTag(keyB64))
+			return nil
+		}
+		fmt.Printf("allowed buddy %s again (revocation lifted)\n", keyTag(keyB64))
+		fmt.Println("note: the revoke destroyed the stored session — pair again with a NEW invite.")
+		fmt.Println("      with a manifest, add the buddy back too: peers add <key> <token>")
+		return nil
+	})
 }
 
 // PeersRemove revokes a buddy: it drops its manifest entry AND its stored
@@ -193,27 +284,51 @@ func PeersRemove(peersFile, knownPeers, key string) error {
 		return err
 	}
 
-	manifestRemoved, err := removeManifestEntry(peersFile, keyB64)
+	var manifestRemoved, sessionRemoved int
+	var alreadyRevoked bool
+	// ONE transaction, and the write order is load-bearing (A-01):
+	//
+	//   1. tombstone   — the revocation must be durable FIRST
+	//   2. session     — the credential that lets the buddy reconnect
+	//   3. manifest    — the bootstrap token it could re-pair with
+	//
+	// A crash between any two steps then leaves the SAFE state: revoked, possibly
+	// still configured. The buddy is refused (the tombstone is checked at every
+	// attempt), and the operator repeats the command. The reverse order would
+	// leave "no longer configured but not revoked", which is precisely the state a
+	// still-running worker resurrected itself from.
+	err = withTrustStateLock(knownPeers, peersFile, func() error {
+		added, aerr := addRevokedLocked(trustBase(knownPeers, peersFile), keyB64)
+		if aerr != nil {
+			return aerr
+		}
+		alreadyRevoked = !added
+		var serr error
+		if sessionRemoved, serr = removeSessionLocked(knownPeers, keyB64); serr != nil {
+			return serr
+		}
+		manifestRemoved, err = removeManifestEntryLocked(peersFile, keyB64)
+		return err
+	})
 	if err != nil {
 		return err
 	}
-	sessionRemoved, err := removeSession(knownPeers, keyB64)
-	if err != nil {
-		return err
-	}
-	if manifestRemoved == 0 && sessionRemoved == 0 {
-		fmt.Printf("not a known buddy: %s\n", keyTag(keyB64))
+	if manifestRemoved == 0 && sessionRemoved == 0 && alreadyRevoked {
+		fmt.Printf("already revoked: %s\n", keyTag(keyB64))
 		return nil
 	}
 	fmt.Printf("revoked buddy %s (manifest=%d session=%d)\n", keyTag(keyB64), manifestRemoved, sessionRemoved)
-	fmt.Println("note: a running buddy applies this on SIGHUP (kill -HUP <pid>) or restart;")
-	fmt.Println("      an already-established direct tunnel persists until it drops (see --reauth-interval).")
+	fmt.Println("note: the key is now on the revocation list, so a still-running buddy cannot")
+	fmt.Println("      re-pair itself back in; it stops on its next round. A running daemon also")
+	fmt.Println("      applies this on SIGHUP (kill -HUP <pid>) or restart, and an already-")
+	fmt.Println("      established direct tunnel persists until it drops (see --reauth-interval).")
+	fmt.Println("      To allow this buddy again later: peers allow <key>, then a NEW invite.")
 	return nil
 }
 
 // PeersMigrate converts a legacy line-format manifest to the YAML schema in
 // place, keeping the original as <path>.bak. Already-YAML files are a no-op.
-func PeersMigrate(peersFile string) error {
+func PeersMigrate(peersFile, knownPeers string) error {
 	if peersFile == "" {
 		return fmt.Errorf("--peers-file <path> is required for peers migrate")
 	}
@@ -237,7 +352,7 @@ func PeersMigrate(peersFile string) error {
 	if err := os.WriteFile(backup, data, 0o600); err != nil { // #nosec G703 -- backup lands next to the operator's own --peers-file (same trust as every path flag; G304 sibling)
 		return fmt.Errorf("write backup %s: %w", backup, err)
 	}
-	if err := saveManifest(peersFile, specs); err != nil {
+	if err := saveManifest(knownPeers, peersFile, specs); err != nil {
 		return err
 	}
 	fmt.Printf("migrated %s to YAML (%d buddies); the old file is kept at %s\n", peersFile, len(specs), backup)
@@ -269,6 +384,15 @@ func resolveKeyRef(peersFile, knownPeers, ref string) (string, error) {
 	for _, s := range sessions {
 		known[bcrypto.PubKeyB64(s.pin)] = struct{}{}
 	}
+	// Revoked keys are resolvable too: after a revoke the key is in neither the
+	// manifest nor the sessions, and `peers allow <prefix>` still has to find it.
+	rev, err := revokedSet(trustBase(knownPeers, peersFile))
+	if err != nil {
+		return "", err
+	}
+	for k := range rev {
+		known[k] = struct{}{}
+	}
 
 	var matches []string
 	for k := range known {
@@ -290,7 +414,7 @@ func resolveKeyRef(peersFile, knownPeers, ref string) (string, error) {
 // removeManifestEntry drops every manifest entry whose pinned key matches
 // keyB64, preserving the other buddies. Returns how many were removed. A legacy
 // file must be migrated first (remove writes only YAML).
-func removeManifestEntry(peersFile, keyB64 string) (int, error) {
+func removeManifestEntryLocked(peersFile, keyB64 string) (int, error) {
 	if peersFile == "" {
 		return 0, nil
 	}
@@ -315,7 +439,7 @@ func removeManifestEntry(peersFile, keyB64 string) (int, error) {
 	if removed == 0 {
 		return 0, nil
 	}
-	return removed, saveManifest(peersFile, kept)
+	return removed, saveManifestLocked(peersFile, kept)
 }
 
 func tokenNote(token string) string {

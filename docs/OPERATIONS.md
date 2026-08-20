@@ -26,7 +26,7 @@ buddynet --role=handshake \
 
 # Every buddy
 buddynet --role=buddy \
-  --server vps.example:51820 --server-key SERVER_KEY \ \
+  --server vps.example:51820 --server-key SERVER_KEY \
   ...
 ```
 
@@ -91,7 +91,7 @@ deployments.
 
 ```bash
 buddynet --role=handshake,relay \
-  --allow-cidr 203.0.113.0/24,198.51.100.0/24 \ \
+  --allow-cidr 203.0.113.0/24,198.51.100.0/24 \
   --key /var/lib/buddynet/id.key
 ```
 
@@ -340,7 +340,7 @@ RECONNECT: action=session-fallback key=… failures=N detail=…  # stale sessio
 ### Server lifecycle — `HANDSHAKE:` / `RELAY:`
 
 ```
-HANDSHAKE: action=listening      addr=… transport=udp           # bootstrap server is up
+HANDSHAKE: action=listening      addr=… transport=udp           # handshake server is up
 RELAY:     action=listening      addr=… transport=udp detail=…  # relay is up (blind forwarder)
 RELAY:     action=session-paired a=… b=…                        # two legs matched, relaying
 RELAY:     action=session-closed detail="idle > …"              # relayed session expired
@@ -390,13 +390,22 @@ BUDDYDNS: action=resolver-registered addr=127.0.0.153 detail="*.buddy routed via
 
 (The bind-failure and resolvectl-skip cases are logged as `WARNING:`/`NOTE:` — see below.)
 
-The `via=` field in `CONNECTED` tells you which path the tunnel used:
+The `via=` field in `CONNECTED` tells you which path the tunnel actually took —
+this is how you check whether your traffic is going direct or through a relay:
 
-| Value | Meaning |
+| Value (quoted in the log) | Meaning |
 |-------|---------|
-| `direct` | Hole-punch succeeded — no relay in the path |
-| `relay:HOST:PORT` | Relay is forwarding; direct punch failed |
-| `cached` | Server was unreachable; used the offline peer cache |
+| `via="direct P2P"` | Hole-punch succeeded — no relay in the path |
+| `via="known relay HOST:PORT"` | The relay your server advertised is forwarding; the direct punch failed |
+| `via="handshake server as relay"` | The handshake server is also relaying (combined role) |
+| `via="cached peer (server offline)"` | The handshake server was unreachable; the offline peer cache was used |
+
+```bash
+# Is the current tunnel direct, or over a relay?
+journalctl --namespace=buddynet | grep 'CONNECTED:' | tail -1
+```
+
+With `--wireguard` the same field reads `via="… (WireGuard)"`.
 
 ### Operational warnings — `WARNING:` and `NOTE:`
 
@@ -410,27 +419,89 @@ NOTE: server roster is signed but N out of date — check NTP/time-sync
 
 ### Filtering examples
 
+The shipped units log into their **own journal namespace** (`LogNamespace=buddynet`)
+so a flood of BuddyNet lines can never fill the main system journal. Every
+command therefore needs `--namespace=buddynet`; without it you are reading a
+different journal and will see nothing:
+
 ```bash
 # All security events from the last hour
-journalctl -u buddynet --since "1 hour ago" | grep "^[0-9: UTC]* SECURITY:"
+journalctl --namespace=buddynet --since "1 hour ago" | grep "SECURITY:"
 
 # All tunnel connections today
-journalctl -u buddynet --since today | grep "CONNECTED:"
+journalctl --namespace=buddynet --since today | grep "CONNECTED:"
 
 # All pending approval requests
-journalctl -u buddynet | grep "AUTHZ: action=pending"
+journalctl --namespace=buddynet | grep "AUTHZ: action=pending"
 
-# Did any buddies connect via relay (not direct)?
-journalctl -u buddynet | grep 'CONNECTED:' | grep 'via=relay'
+# Did any buddies connect over a relay (not direct)?
+journalctl --namespace=buddynet | grep 'CONNECTED:' | grep -F 'via="known relay'
 ```
 
-The `SyslogIdentifier` is set per-role when running under systemd
-(`buddynet-handshake`, `buddynet-relay`, `buddynet-buddy`), so you can filter
-by role with `-t`:
+The unit names are `buddynet-handshake`, `buddynet-relay` and
+`buddynet-buddy@<instance>` (plus `buddynet-public-handshake` for the
+single-purpose public server) — there is no unit called plain `buddynet`. Each
+sets a `SyslogIdentifier`, so you can also filter by role:
 
 ```bash
-journalctl -t buddynet-handshake -f
+journalctl --namespace=buddynet -u buddynet-handshake -f   # one unit, follow
+journalctl --namespace=buddynet -t buddynet-relay          # by identifier
 ```
+
+### Running a port that is open to the internet
+
+The handshake port is meant to be reachable from anywhere — that is how buddies
+behind NAT find each other. Some things about that are worth knowing before they
+worry you:
+
+- **Automated scanning is constant and normal.** Any address with an open UDP
+  port is probed continuously by researchers, botnets and search engines. It is
+  background noise on the internet, not a sign that someone is after you.
+- **Most of it never reaches the application.** Packets from a source that
+  `--allow-cidr` excludes, packets that fail address validation, and malformed
+  datagrams are dropped early and deliberately **without a log line**. Logging
+  every dropped packet would be the easiest way to turn a scan into a disk-space
+  attack.
+- **An empty BuddyNet log therefore does not prove nobody knocked.** It proves
+  that nothing got far enough to be worth writing down. If you want to see the
+  volume, count it where packets actually arrive — nftables counters, or your
+  provider's traffic graphs:
+
+  ```bash
+  sudo nft list ruleset | grep -A2 'udp dport 51820'   # counters on the rule
+  ```
+
+- **Rate limits protect resources, not availability.** BuddyNet bounds how much
+  work one source can cause (connection budget, per-source and global limits,
+  bounded in-memory state). Someone with enough bandwidth can still saturate the
+  uplink of a small VPS. That is a property of the network, not something an
+  application can fix; if it matters to you, that is a question for your provider.
+- **The clock matters.** Relay tickets and registration proofs carry timestamps
+  with a tolerance measured in seconds. Keep NTP running: a drifting clock looks
+  exactly like an attack in the logs, and eventually breaks pairing.
+- **`--debug` is not for a public server.** It logs source addresses next to
+  session ids — pairing metadata the server deliberately does not keep otherwise.
+
+### How long logs are kept
+
+The shipped `journald@buddynet.conf` caps the namespace at **50 MB** and drops
+entries **older than one week** (`MaxRetentionSec=1week`). That is a storage
+guarantee, and it is also a limit on what you can investigate later: anything you
+want to look at beyond a week has to be **exported before it expires**, for
+example a nightly
+
+```bash
+journalctl --namespace=buddynet --since yesterday --until today \
+    -o export > /var/backups/buddynet-$(date +%F).journal
+```
+
+or forwarding to a log host you run. Raise `MaxRetentionSec` and `SystemMaxUse`
+together if you would rather keep more on the machine — but check the disk first,
+because the cap is what keeps a log flood from filling it.
+
+Logs deliberately contain **no private keys, no invite tokens and no session
+secrets**. Public keys appear shortened, and source addresses appear on the relay
+only with `--debug`, which is why `--debug` is not for a public server.
 
 ---
 

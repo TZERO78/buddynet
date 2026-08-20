@@ -11,7 +11,7 @@ buddy at once, see [MultiPeer](PEERS.md).
 
 ## One-time setup (the VPS)
 
-Run the bootstrap server and print the key your buddies will pin:
+Run the handshake server and print the key your buddies will pin:
 
 ```bash
 # Once: create the server identity (it never creates one itself).
@@ -33,7 +33,7 @@ never travels in the clear. See [OPERATIONS.md](OPERATIONS.md).
 **Inviter** (e.g. the machine being backed up *to*, running an rsync daemon):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
     --invite --forward 127.0.0.1:873
 # prints a one-time INVITE and waits for the buddy to join
 ```
@@ -44,7 +44,7 @@ node's public key, so the joiner pins this identity from it.
 **Joiner** (the machine doing the backup):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
     --join=INVITE -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
@@ -69,7 +69,7 @@ server's pinned key, as the value it matches you two on. From then on just rerun
 reconnects via the stored session secret:
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ \
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
     -L 127.0.0.1:9000        # no --join: reconnects via the stored session
 ```
 

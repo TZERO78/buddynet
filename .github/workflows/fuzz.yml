@@ -1,7 +1,7 @@
 name: fuzz
 
 # Continuous fuzzing of the untrusted-input parsers. The repo ships Fuzz* targets
-# (REGISTER / relay bind+challenge / sealed-code / pubkey decode) but a one-shot
+# (REGISTER / relay bind+challenge / sealed-code / pubkey decode / relay ticket) but a one-shot
 # `go test` only runs their seed corpus; this job actually fuzzes them on a
 # nightly schedule (and on demand), so a crashing input is found over time rather
 # than never. Findings are uploaded as an artifact for triage.
@@ -25,11 +25,34 @@ jobs:
           - { pkg: ./internal/relay, target: FuzzParseChallenge }
           - { pkg: ./internal/crypto, target: FuzzOpenCode }
           - { pkg: ./internal/crypto, target: FuzzDecodePubKey }
+          # The relay's ticket verifier: reachable from the internet on every
+          # bind, and the last shipped Fuzz* pair that was not run nightly.
+          - { pkg: ./internal/ticket, target: FuzzParse }
+          - { pkg: ./internal/ticket, target: FuzzVerify }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version-file: go.mod
+
+      # A-07's gate. The point of the pin is that the stdlib govulncheck scans is
+      # the stdlib that ships — and "setup-go honours the toolchain line" did NOT
+      # hold here: with go-version-file it installed the `go` line (1.25.0), so
+      # the CVE scan ran against go1.25 while the release builds with go1.26.6.
+      # The finding, reproduced by the first attempt at fixing it.
+      #
+      # So the toolchain directive is left to the go command (GOTOOLCHAIN=auto
+      # switches to EXACTLY the pinned version when the installed one is older),
+      # and this step asserts the result instead of trusting it.
+      - name: toolchain is the pinned one
+        run: |
+          want=$(awk '/^toolchain /{print $2}' go.mod)
+          got=$(go version | awk '{print $3}')
+          echo "go.mod pins $want; this job runs $got"
+          if [ "$want" != "$got" ]; then
+            echo "::error::CI builds with $got but go.mod pins $want — everything below would test a different stdlib than the release"
+            exit 1
+          fi
       - name: fuzz ${{ matrix.target }}
         run: go test -run '^$' -fuzz='^${{ matrix.target }}$' -fuzztime=120s ${{ matrix.pkg }}
       - name: upload crashers

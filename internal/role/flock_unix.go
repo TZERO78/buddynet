@@ -3,6 +3,7 @@
 package role
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -26,9 +27,23 @@ func lockFile(path string) (unlock func(), err error) {
 	if err != nil {
 		return nil, fmt.Errorf("open lock %s.lock: %w", path, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	// EINTR is retried, not reported. A blocking flock() sits in the kernel, and
+	// the Go runtime's asynchronous preemption delivers SIGURG to running threads
+	// — so under load an unrelated preemption can interrupt the wait and return
+	// EINTR. Treating that as "cannot lock" would, with the fail-closed policy
+	// above, turn a scheduling event into a refused write. It surfaced as a
+	// flaky refusal in the trust-state tests once every writer of known_peers
+	// started going through this lock.
+	for {
+		lerr := syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+		if lerr == nil {
+			break
+		}
+		if errors.Is(lerr, syscall.EINTR) {
+			continue
+		}
 		f.Close()
-		return nil, fmt.Errorf("lock %s.lock: %w", path, err)
+		return nil, fmt.Errorf("lock %s.lock: %w", path, lerr)
 	}
 	return func() {
 		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
