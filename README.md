@@ -247,7 +247,11 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   code can only have come from the phone call. A man in the middle makes the two
   sides derive different codes, so it will not match.
 - `--peer-key` pins a buddy by hand and is the choice for unattended nodes — then
-  neither side prompts. Without a pin on either side, first contact falls back to
+  neither side prompts. It is checked on **every** connect, reconnects included:
+  if it names a different key than the one stored from the previous pairing, the
+  buddy refuses to connect and tells you how to re-pair (`peers remove <key>`,
+  then a new invite). Removing the flag is not a revocation — the stored pin
+  still governs. Without a pin on either side, first contact falls back to
   comparing that code mutually. For daemons set `--no-interactive` (an unknown
   key is then refused, never learned blind).
 - The invite is a **bearer secret** — keep it off the command line (use a `0600`

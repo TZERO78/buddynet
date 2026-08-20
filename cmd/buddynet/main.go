@@ -111,7 +111,7 @@ func main() {
 
 	server := flag.String("server", "", "buddy: handshake server host:port [required]")
 	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]. RELAY: the handshake server whose relay tickets this relay accepts — pass two comma-separated keys during a server key rotation")
-	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest)")
+	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest). Must agree with the key stored from a previous pairing: a pin that contradicts it refuses to connect (revoke the old buddy with \"peers remove <key>\", then pair again)")
 	knownPeers := flag.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)")
 	lab := flag.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1.")
 	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
@@ -963,6 +963,11 @@ SECURITY — please read
     unattended nodes (no human, no prompt). Without either, first contact falls
     back to comparing a Short Authentication String out of band, then remembers
     the key in --known-peers.
+  • --peer-key is checked on EVERY connect, including reconnects that use a
+    stored session. If it names a different key than the stored one, the buddy
+    stops before registering and says so: that is a re-pin or a revocation, and
+    it needs "peers remove <old key>" plus a new invite. Removing --peer-key is
+    NOT a revocation — the stored pin still governs.
   • The invite is one-time and retired after the first pairing; reconnects use the
     stored session secret, so it never has to be kept around.
 

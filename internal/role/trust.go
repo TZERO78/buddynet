@@ -69,6 +69,31 @@ func (t *trustPolicy) decide(token string, partnerPub ed25519.PublicKey) (needSA
 	}
 }
 
+// enforcePins checks the partner key the server (or the offline cache) vouched
+// for against EVERY pin this node holds locally: the stored session pin, and —
+// when --peer-key is set — the operator's configured pin. BOTH must match.
+//
+// This is the second half of the A-03 fix. nextAttempt already refuses to even
+// register when the two local pins contradict each other; that covers "my own
+// configuration is inconsistent". This one covers "the server named a partner
+// neither pin allows" — a different attacker, so a separate check. Without it,
+// a stored session would keep displacing --peer-key exactly as it did before,
+// because trustPolicy.decide is never reached once att.pin is set.
+func enforcePins(att attempt, partnerPub ed25519.PublicKey, source string) error {
+	partnerB64 := base64.StdEncoding.EncodeToString(partnerPub)
+	if att.pin != nil && !partnerPub.Equal(att.pin) {
+		log.Printf("SECURITY: event=pin-mismatch token=%s key=%s detail=%q",
+			tokenTag(att.rendezvous), keyTag(partnerB64), "partner key is not the stored session pin")
+		return fmt.Errorf("%s does not match the stored session pin — refusing (someone else answered on the session secret?)", source)
+	}
+	if att.cfgPin != nil && !partnerPub.Equal(att.cfgPin) {
+		log.Printf("SECURITY: event=pin-mismatch token=%s key=%s detail=%q",
+			tokenTag(att.rendezvous), keyTag(partnerB64), "partner key is not the pinned --peer-key (possible hijack/MITM)")
+		return fmt.Errorf("%s is not the pinned --peer-key — refusing (possible hijack/MITM)", source)
+	}
+	return nil
+}
+
 // confirm persists a partner key to the trust store after the SAS has been
 // verified, so subsequent connects match it silently. It is a no-op for a pinned
 // or insecure policy (nothing to learn).

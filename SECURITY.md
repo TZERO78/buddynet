@@ -680,7 +680,9 @@ Either way the new identity is **not** trusted automatically (the safe behaviour
 - **Server key lost:** restore it from backup. If you genuinely start over
   (`init`), every buddy must update its pinned `--server-key`.
 - **Buddy key lost, `--peer-key` in use:** the partner rejects the new key as a
-  mismatch until it updates the pin (like SSH's "host key changed").
+  mismatch until it updates the pin **and** drops the session stored from the old
+  pairing (`peers remove <old key>`, then a fresh invite) — like SSH's "host key
+  changed", where the old entry has to go too.
 - **Buddy key lost, allowlist server:** re-enroll the new key (`--code`, then
   `approve` the key the server logs), revoke the dead one.
 
@@ -697,8 +699,16 @@ hub-and-spoke VPN. What actually revokes access:
 - **Approval mode (`--authorized`).** `revoke <key>` removes a client from the
   allowlist so it can no longer *re-pair*; an already-established tunnel keeps
   running until it next re-registers.
-- **`--peer-key` pin.** Change or remove the pin on the surviving side; the
-  revoked key is then refused on the next connect.
+- **`--peer-key` pin — changing it, not removing it.** *Changing* the pin on the
+  surviving side revokes: the buddy compares the configured pin against the pin
+  stored from the previous pairing, and if they disagree it refuses to connect at
+  all — before it even registers with the handshake server — and prints how to
+  re-pair. *Removing* the pin is **not** a revocation and is not meant to be: with
+  no `--peer-key` there is nothing to compare, the stored session pin governs, and
+  the connection continues. Dropping a flag must not silently delete state.
+  A changed pin therefore also needs the stored session cleared —
+  `peers remove <old key>` (or "Forget buddy" in the Unraid plugin) — followed by
+  a **new invite**. That, and not the flag alone, is the complete revocation.
 - **Token rotation.** Re-invite (`--invite`) to mint a fresh token and retire the
   old session secret; the old credential stops working for new connects.
 - **`peers remove <key>` (MultiPeer).** Removing one drops **both** its manifest

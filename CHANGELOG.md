@@ -5,6 +5,49 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (Security, BEHAVIOUR CHANGE) — `--peer-key` is enforced on every connect
+
+- **`--peer-key` stopped being consulted as soon as a buddy had paired once.**
+  On a reconnect the pin came from the stored session (`known_peers`), and the
+  branch that compares it never reached the code that enforces `--peer-key`. So
+  changing the flag — which `SECURITY.md` §8.2 offered as one of four ways to
+  revoke a buddy — silently did nothing: the old key kept connecting.
+
+  Now **both** pins must match. If the configured `--peer-key` contradicts the
+  stored session pin, the buddy **refuses to connect at all**, and it stops
+  *before* registering with the handshake server — both keys are local, so the
+  outcome is already decided and there is no reason to hand the server this
+  node's rendezvous token and observed endpoints for a pairing that must not
+  happen. The partner key the server (or the offline cache) then vouches for is
+  checked against both pins as well, which covers the other case: a server that
+  names a different partner.
+
+  **What you may notice:** a node whose buddy legitimately rotated its key, and
+  whose `--peer-key` was updated to the new one, is now refused instead of
+  quietly connecting to the old key. That refusal is the point. It names both
+  keys and the way out:
+
+  ```
+  buddynet --known-peers <path> peers remove <old key>   # or "Forget buddy" in the plugin
+  ```
+
+  followed by a new invite. The stored session is **not** deleted automatically —
+  a mismatch is a suspicion, not an instruction to destroy state.
+
+  **`--peer-key` is deliberately not enforced** where it cannot mean one buddy:
+  it is already rejected together with `--peers-file`, and with several stored
+  sessions and no manifest the buddy now logs a `WARNING` instead of pretending
+  the flag applies.
+
+### Fixed (Docs)
+
+- `SECURITY.md` §8.2 claimed that *removing* the `--peer-key` pin revokes a
+  buddy. It does not, and it will not: with no pin there is nothing to compare
+  and the stored session pin governs. Revocation is `peers remove <key>` (or
+  "Forget buddy") **plus a new invite**; the section now says so.
+
 ## [v5.1.1] — 2026-08-19
 
 ### Fixed (Security) — the relay cookie now covers the source PORT

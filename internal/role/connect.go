@@ -83,8 +83,8 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 			return errors.New("partner has the SAME identity as us — both peers use the same --key; give each its own identity")
 		}
 		if att.pin != nil {
-			if !partnerPub.Equal(att.pin) {
-				return errors.New("partner key does not match the stored session pin — refusing (someone else answered on the session secret?)")
+			if perr := enforcePins(att, partnerPub, "partner key"); perr != nil {
+				return perr
 			}
 		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
 			return err
@@ -125,8 +125,8 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 			return derr
 		}
 		if att.pin != nil {
-			if !partnerPub.Equal(att.pin) {
-				return errors.New("cached partner key does not match the stored session pin — refusing")
+			if perr := enforcePins(att, partnerPub, "cached partner key"); perr != nil {
+				return perr
 			}
 		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
 			return err

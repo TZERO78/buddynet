@@ -70,10 +70,19 @@ func TestAuditPeerKeyIgnoredOnceASessionIsStored(t *testing.T) {
 		Token:      "invite-tok",
 	}
 
-	// 1. The real attempt source. It must be told which key to pin.
+	// 1. The real attempt source. Both pins are local and they contradict each
+	//    other, so the FIXED behaviour is to refuse here — before buddyRun sends
+	//    a REGISTER that would carry this node's token and endpoints to the
+	//    server for a pairing that must not happen.
 	att, err := nextAttempt(cfg)
 	if err != nil {
-		t.Fatalf("nextAttempt: %v", err)
+		for _, want := range []string{oldB64, newB64, "peers remove"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Fatalf("A-03 refusal does not mention %q — the operator cannot act on it:\n%v", want, err)
+			}
+		}
+		t.Logf("A-03 fixed: nextAttempt refuses before registering:\n%v", err)
+		return
 	}
 	if att.pin == nil {
 		t.Skip("nextAttempt returned no pin — A-03 precondition gone")
