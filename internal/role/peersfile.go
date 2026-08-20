@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tzero78/buddynet/internal/atomicfile"
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	"github.com/tzero78/buddynet/internal/nft"
 	"gopkg.in/yaml.v3"
@@ -302,7 +303,22 @@ func (s peerSpec) toManifest() manifestBuddy {
 
 // saveManifest writes the YAML manifest (0600 in a 0700 dir, same trust domain
 // as known_peers), with the schema header for hand-editors.
-func saveManifest(path string, specs []peerSpec) error {
+//
+// A-12: this used to be a bare os.WriteFile — neither atomic nor locked, the one
+// trust file left out of the treatment the allowlist, the peer cache and the
+// session store all get. A crash mid-write left a truncated YAML, which parses
+// as "no buddies"; a concurrent CLI write could lose the other's edit. It now
+// goes through the same trust-state lock and the same atomic rename.
+func saveManifest(knownPeers, path string, specs []peerSpec) error {
+	return withTrustStateLock(knownPeers, path, func() error {
+		return saveManifestLocked(path, specs)
+	})
+}
+
+// saveManifestLocked is saveManifest's body; the caller holds the trust-state
+// lock (the revocation transactions in peerscmd.go write several files under one
+// lock, and taking it again here would deadlock on flock).
+func saveManifestLocked(path string, specs []peerSpec) error {
 	m := peersManifest{}
 	for _, s := range specs {
 		m.Buddies = append(m.Buddies, s.toManifest())
@@ -314,7 +330,7 @@ func saveManifest(path string, specs []peerSpec) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
-	return os.WriteFile(path, append([]byte(manifestHeader), body...), 0o600)
+	return atomicfile.Write(path, append([]byte(manifestHeader), body...), 0o600)
 }
 
 // manifestNeedsMigration reports whether path exists in the legacy line format.
@@ -337,10 +353,25 @@ func assemblePeers(cfg BuddyConfig) ([]peerSpec, error) {
 	if err != nil {
 		return nil, err
 	}
+	// A revoked key is filtered out of BOTH sources. This is the third of the
+	// three places the revocation has to bite (the other two are the attempt
+	// source and saveSession): it is what makes the SIGHUP that applies a
+	// revocation stop the worker even if a session line for that buddy exists —
+	// which is exactly the crash-safe intermediate state the revoke transaction
+	// can leave behind, and was the resurrection path in A-01.
+	revoked, err := revokedSet(trustBase(cfg.KnownPeers, cfg.PeersFile))
+	if err != nil {
+		return nil, err
+	}
 	byKey := map[string]int{} // pubkey b64 → index into specs
 	var specs []peerSpec
 	for _, s := range manifest {
-		byKey[bcrypto.PubKeyB64(s.pin)] = len(specs)
+		keyB64 := bcrypto.PubKeyB64(s.pin)
+		if _, gone := revoked[keyB64]; gone {
+			log.Printf("TRUST: action=revoked-skipped key=%s source=manifest", keyTag(keyB64))
+			continue
+		}
+		byKey[keyB64] = len(specs)
 		specs = append(specs, s)
 	}
 
@@ -349,7 +380,12 @@ func assemblePeers(cfg BuddyConfig) ([]peerSpec, error) {
 		return nil, err
 	}
 	for _, s := range sessions {
-		if _, ok := byKey[bcrypto.PubKeyB64(s.pin)]; ok {
+		keyB64 := bcrypto.PubKeyB64(s.pin)
+		if _, gone := revoked[keyB64]; gone {
+			log.Printf("TRUST: action=revoked-skipped key=%s source=session", keyTag(keyB64))
+			continue
+		}
+		if _, ok := byKey[keyB64]; ok {
 			continue // already covered by the manifest (session resolved at runtime)
 		}
 		specs = append(specs, peerSpec{pin: s.pin}) // reconnect-only

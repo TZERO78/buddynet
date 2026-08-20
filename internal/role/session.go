@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"github.com/tzero78/buddynet/internal/atomicfile"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -86,18 +85,27 @@ func saveSession(path, inviteToken, partnerB64, secret string) error {
 	if path == "" {
 		return fmt.Errorf("no known-peers path to persist the session")
 	}
-	sessionFileMu.Lock()
-	defer sessionFileMu.Unlock()
-	// The lock file lives next to the store, so the directory has to exist before
-	// we can take it (the write below needs it anyway).
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	return withTrustStateLock(path, "", func() error {
+		return saveSessionLocked(path, inviteToken, partnerB64, secret)
+	})
+}
+
+// saveSessionLocked is saveSession's body; the caller holds the trust-state lock
+// (see withTrustStateLock — taking it again here would deadlock on flock).
+//
+// It re-checks the revocation list UNDER THAT LOCK before writing. That is the
+// cross-process bolt against A-01: between `peers remove` and the SIGHUP that
+// applies it, a still-running worker could otherwise finish a re-pair and write
+// the revoked buddy's session line straight back, and assemblePeers (manifest
+// UNION sessions) would then restart it as a session-only peer. Checking at the
+// attempt (peerSource/nextAttempt) stops the worker; checking here means even a
+// worker that somehow got through cannot persist the resurrection.
+func saveSessionLocked(path, inviteToken, partnerB64, secret string) error {
+	if revoked, rerr := isRevokedLocked(path, partnerB64); rerr != nil {
+		return rerr
+	} else if revoked {
+		return fmt.Errorf("refusing to store a session for revoked buddy %s: %w", keyTag(partnerB64), errPeerRevoked)
 	}
-	unlock, lerr := acquireLock(path)
-	if lerr != nil {
-		return fmt.Errorf("lock session store: %w", lerr)
-	}
-	defer unlock()
 	var kept []string
 	if f, err := os.Open(path); err == nil {
 		sc := bufio.NewScanner(f)
@@ -131,26 +139,27 @@ func removeSession(path, partnerB64 string) (int, error) {
 	if path == "" {
 		return 0, nil
 	}
-	sessionFileMu.Lock() // same read-modify-write as saveSession; same serialisation
-	defer sessionFileMu.Unlock()
-	// Nothing to revoke and nothing to lock if the store does not exist yet. (A
-	// store created between this check and the lock below simply cannot contain the
-	// partner we were asked to remove — the same outcome as "no store".)
+	removed := 0
+	err := withTrustStateLock(path, "", func() error {
+		var rerr error
+		removed, rerr = removeSessionLocked(path, partnerB64)
+		return rerr
+	})
+	return removed, err
+}
+
+// removeSessionLocked is removeSession's body; the caller holds the trust-state
+// lock. The lock matters here more than anywhere: the running buddy writes this
+// store on every reconnect, and without it a concurrent save can rename its
+// pre-revocation snapshot over ours — resurrecting the buddy just revoked.
+func removeSessionLocked(path, partnerB64 string) (int, error) {
+	// Nothing to revoke if the store does not exist yet.
 	if _, serr := os.Stat(path); serr != nil {
 		if os.IsNotExist(serr) {
 			return 0, nil
 		}
 		return 0, serr
 	}
-	// The FILE lock, not just the in-process one: the running buddy writes this
-	// store too (saveSession on every reconnect). Without it a concurrent save can
-	// rename its pre-revocation snapshot over ours and the revoked buddy is
-	// reconnectable again. Fail-closed — see acquireLock.
-	unlock, lerr := acquireLock(path)
-	if lerr != nil {
-		return 0, fmt.Errorf("lock session store: %w", lerr)
-	}
-	defer unlock()
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -24,12 +24,26 @@
 # and never sees content. Advertise it to buddies by adding
 #   --relay-endpoint your.vps.example:${BUDDYNET_RELAY_PORT}
 # to the handshake command below.
+# THIS FILE BUILDS FROM SOURCE. Both services build the same image from this
+# checkout and carry a LOCAL tag; nothing is pulled from a registry.
+#
+# It used to say `build:` on handshake and a registry tag on both. That mixture
+# has two different meanings depending on how you start it: `up --build` built
+# locally and tagged the result v5.0.0, but `docker compose up relay` on its own
+# PULLED v5.0.0 from the registry — a different, older binary than the rest of
+# the deployment, silently. (Finding A-09.)
+#
+# For a release deployment, do the opposite consistently: delete both `build:`
+# blocks and pin BOTH services to the same IMMUTABLE DIGEST, the way the
+# Dockerfile pins its own base images —
+#   image: ghcr.io/tzero78/buddynet@sha256:<digest of the release you verified>
+# Never a floating tag, and never a digest next to a `build:`.
 services:
   handshake:
     build:
       context: ..
       dockerfile: deployments/Dockerfile
-    image: ghcr.io/tzero78/buddynet:v5.0.0   # locally built by the handshake service; bump per release
+    image: buddynet:local   # local tag only — see the note above
     command:
       - --role=handshake
       - --listen
@@ -59,7 +73,14 @@ services:
       - no-new-privileges:true
 
   relay:
-    image: ghcr.io/tzero78/buddynet:v5.0.0   # locally built by the handshake service; bump per release
+    # The relay builds from the SAME source as the handshake service (the build is
+    # cached, so this costs nothing) rather than referencing a registry tag. That
+    # is what makes `docker compose up relay` on its own run this checkout instead
+    # of pulling an older release.
+    build:
+      context: ..
+      dockerfile: deployments/Dockerfile
+    image: buddynet:local   # local tag only — see the note at the top
     command:
       - --role=relay
       - --listen

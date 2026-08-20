@@ -117,9 +117,29 @@ self-asserted `.buddy` name; it is best-effort from the offline cache
 (`--peers` / peers.json) and shows `—` until the buddy has been seen via the
 server. `VIP` is derived deterministically from the key, so it is always shown.
 
-`peers remove` is a **full local revocation**: it drops the manifest line **and**
-the stored session secret. Both are required — removing only the manifest line
-would leave the supervisor reconnecting via the leftover session.
+`peers remove` is a **full local revocation**: it records the key on the
+revocation list (`<known_peers>.revoked`), drops the stored session secret, and
+drops the manifest line — in that order, under one lock. All three are required.
+Removing only the two files was not enough: a still-running worker held the
+bootstrap token in memory, re-paired with it, and wrote the session back, so the
+`SIGHUP` that was meant to apply the revocation restarted the buddy instead.
+
+The revocation list is permanent and there is deliberately no expiry — an entry
+disappears only when you lift it:
+
+```bash
+# lift a revocation (then pair again with a NEW invite):
+buddynet --known-peers /var/lib/buddynet/known_peers peers allow Zk1pQ9
+
+# with a manifest, adding the buddy back lifts it in the same step:
+buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers \
+  peers add DAVE_KEY fresh-token
+```
+
+A revoked buddy is refused at every door: the reconnect attempt stops the worker
+(`peer-stopped … buddy revoked`), a session cannot be stored for it, it cannot be
+learned trust-on-first-use, and `SIGHUP` will not re-assemble it. `peers list`
+shows it with status `REVOKED` so it never disappears silently.
 
 ## Routing — `--vip-listen`
 
@@ -163,7 +183,8 @@ a live tunnel. (Windows has no `SIGHUP`; there a restart re-reads the manifest.)
 | `--known-peers PATH` | — | Per-buddy session store (also where `peers remove` revokes the session secret). |
 | `--reauth-interval D` | — | Periodically rebuild tunnels so a revocation takes effect within `D` on a live direct tunnel (off by default). |
 
-Subcommands: `peers list`, `peers add <key> [token]`, `peers remove <key>`.
+Subcommands: `peers list`, `peers add <key> [token]`, `peers remove <key>`
+(revoke), `peers allow <key>` (lift a revocation), `peers migrate`.
 
 ## How it works
 
@@ -189,9 +210,11 @@ Subcommands: `peers list`, `peers add <key> [token]`, `peers remove <key>`.
   protects *you*: afterwards your node won't register that buddy's rendezvous,
   won't pin it, and won't route to it. Whether that buddy still reaches *other*
   nodes is their own sovereign decision, not your exposure.
-- **Revocation is two files.** `peers remove` drops both the manifest line and the
-  session secret; the supervisor applies it on `SIGHUP`/restart, bounded on a live
-  tunnel by `--reauth-interval`.
+- **Revocation is one transaction.** `peers remove` writes the tombstone, then
+  drops the session secret, then the manifest line — under one lock, so a crash
+  in between leaves the *safe* state (revoked, possibly still configured), never
+  a buddy that is unconfigured but still allowed back. A running worker stops on
+  its next round; a live direct tunnel is bounded by `--reauth-interval`.
 - **VIP scope.** Only *connected* buddies' VIPs are bound on `lo`; an unrelated
   `10.66.x.y` is never reachable. The bind uses a host-scoped `/32` so the address
   is local-only and not used for outbound source selection.
