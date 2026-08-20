@@ -233,6 +233,27 @@ own outbound connections to the buddy keep working; and that LAN→buddy forward
 is blocked — deliberately, until subnet routing exists as its own option. Every
 LAN check runs over IPv4 and IPv6.
 
+## Scoped-exposure test with a real service (`test-smb-scope.sh`)
+
+Needs root, the `wireguard` module, and samba/smbclient/cifs-utils:
+
+```bash
+sudo -v && ./test-smb-scope.sh
+```
+
+Three namespaces. One buddy runs a stock `smbd` bound to `0.0.0.0` and exposes
+**only** `:445` over the WireGuard data plane; the other reaches it at the VIP.
+SMB is used here because it is the awkward case — a large service that listens on
+everything and must not become reachable beyond the tunnel. It asserts that the
+exposed port works through the tunnel while an unexposed one stays blocked, that
+a service started *before* the interface exists still serves it, that a wrong
+password is refused by the service's own layer, that `mount.cifs` works, and that
+removing the exposure closes the port again (fail-closed).
+
+BuddyNet has no file-sharing feature; what is under test here is the scope, not
+Samba. Running SMB, rsync or anything else over a tunnel is your own deployment
+decision, and that service's security remains yours.
+
 ## Firewall rule-order test
 
 Proves with rule counters that the shipped ruleset's rate limit still applies once

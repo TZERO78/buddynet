@@ -104,11 +104,22 @@ buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/kn
 # 10.66.44.2     bob    paired    Zk1pQ9  —          (inherit)  session-only
 
 # Add a buddy (pinned key + optional bootstrap token, name, WireGuard scope):
-buddynet --peers-file /var/lib/buddynet/peers peers add DAVE_KEY shared-token-with-dave --name dave --expose 873
+buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers \
+    peers add DAVE_KEY shared-token-with-dave --name dave --expose 873
 
 # Remove (revoke) a buddy — the short 6-char KEY from `peers list` is enough:
-buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers peers remove Zk1pQ9
+buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers \
+    peers remove Zk1pQ9
+
+# Allow a revoked buddy again (then pair with a NEW invite):
+buddynet --peers-file /var/lib/buddynet/peers --known-peers /var/lib/buddynet/known_peers \
+    peers allow Zk1pQ9
 ```
+
+> **Pass the same `--known-peers` to every `peers` command.** The stored sessions
+> and the revocation list live next to that path, so a command run without it
+> works on a different set of files than the one run with it. If you use the
+> default location, simply omit the flag everywhere.
 
 The `KEY` column is the first 6 characters of the buddy's identity key — a
 human-friendly handle, not the full key. `peers remove` accepts it (or any unique
@@ -116,6 +127,11 @@ prefix, or the full key) and refuses an ambiguous one. `NAME` is the buddy's
 self-asserted `.buddy` name; it is best-effort from the offline cache
 (`--peers` / peers.json) and shows `—` until the buddy has been seen via the
 server. `VIP` is derived deterministically from the key, so it is always shown.
+
+> **Since v5.2.0.** The revocation list, `peers allow`, and the "a still-running
+> buddy cannot undo it" property are new in that release. In v5.1.x, `peers
+> remove` dropped the manifest entry and the session but kept no permanent
+> record.
 
 `peers remove` is a **full local revocation**: it records the key on the
 revocation list (`<known_peers>.revoked`), drops the stored session secret, and
@@ -180,7 +196,7 @@ a live tunnel. (Windows has no `SIGHUP`; there a restart re-reads the manifest.)
 |------|-----|-------------|
 | `--peers-file PATH` | — | Multi-buddy manifest (`<peer-key> [token]` per line). Maintains a tunnel to every listed buddy plus any previously paired peer. Mutually exclusive with `--invite`/`--join`/`--join`/`--lazy`. |
 | `--vip-listen PORT` | — | Bind each connected buddy's VIP on `lo` and route `VIP:PORT` (and `name.buddy:PORT`) through that buddy's tunnel. Needs `NET_ADMIN`; degrades gracefully. |
-| `--known-peers PATH` | — | Per-buddy session store (also where `peers remove` revokes the session secret). |
+| `--known-peers PATH` | `~/.config/buddynet/known_peers` | Per-buddy session store. `peers remove` deletes the session secret here, and the revocation list lives next to it as `<path>.revoked`. |
 | `--reauth-interval D` | — | Periodically rebuild tunnels so a revocation takes effect within `D` on a live direct tunnel (off by default). |
 
 Subcommands: `peers list`, `peers add <key> [token]`, `peers remove <key>`

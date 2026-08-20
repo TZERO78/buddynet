@@ -4,31 +4,48 @@
 [![Go](https://img.shields.io/badge/go-1.25%2B-00ADD8?logo=go&logoColor=white)](go.mod)
 [![Latest release](https://img.shields.io/github/v/release/TZERO78/buddynet?sort=semver)](https://github.com/TZERO78/buddynet/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Self-pentest: 14/14 defenses hold](https://img.shields.io/badge/self--pentest-14%2F14%20defenses%20hold-brightgreen)](lab/pentest/README.md)
+[![Self-pentest suite](https://img.shields.io/badge/self--pentest-structural%20probe-blue)](lab/pentest/README.md)
 
-> **A small, self-hosted P2P overlay for trusted groups. One binary, your own
-> coordinator, direct encrypted tunnels, and an authorized blind-relay fallback.
-> The coordinator may forward ciphertext, but it never sees plaintext. No
-> Tailscale account required.**
+> **BuddyNet is a small, self-hosted, open-source peer-to-peer network for
+> families, friends, and small teams.** One binary, your own coordination
+> server, direct encrypted tunnels between the machines, and an authorized
+> blind-relay fallback when a direct path cannot be established. It reduces
+> dependence on a managed VPN provider — it does not attempt to replace the
+> administration, support, platform coverage, or enterprise features of
+> Tailscale or NetBird.
 
 ![BuddyNet deployment walkthrough — the VPS runs the coordinator, machine A mints a one-time invite, machine B joins behind its own NAT, and a direct hole-punched tunnel comes up](media/deploy-demo.gif)
 
 <sup>Stand it up in three steps, live: the VPS runs the coordinator (`--role=handshake,relay`), machine A mints a one-time invite, machine B joins behind its own NAT, and the tunnel is `via="direct P2P"` — hole-punched, no port-forwarding, no relay in the path. Reproduce: `lab/demo-deploy.sh`.</sup>
 
 BuddyNet gives every node a stable identity and a deterministic virtual IP, finds
-peers through a tiny bootstrap server, and brings up a direct (hole-punched)
+peers through a small **handshake server** (the coordination server: it
+introduces two machines to each other and then steps out of the way), and brings
+up a direct (hole-punched)
 encrypted tunnel — falling back to a blind relay only when a direct path is
-impossible. Point `rsync`, `borg`, or `ssh` at a local socket and it travels
-straight to your buddy — and a single node can hold **several tunnels at once**
+impossible. Point `rsync`, `borg`, or `ssh` at a local socket and the traffic
+travels to your buddy — and a single node can hold **several tunnels at once**
 ([MultiPeer](docs/PEERS.md)), routing to each buddy by name. The coordination
-server is a VPS *you* own. It never sees plaintext: on a direct path it carries
-no tunnel data at all, and when a direct path can't be punched it forwards
-encrypted packets it cannot read.
+server runs on a machine *you* own. It never sees plaintext: on a direct path it
+carries no tunnel data at all, and when a direct path cannot be punched it
+forwards encrypted packets it cannot read.
+
+**What "self-hosted" means here**, precisely, because the word gets stretched:
+
+- you run the coordination server yourself, and you hold its key;
+- no account with a VPN provider is involved, and no third party can see or
+  manage your network;
+- you decide who joins, who is revoked, and when to update.
+
+It does **not** mean independent of an operating system, of Go, QUIC or
+WireGuard, of a machine with a public address, or of an internet connection —
+BuddyNet needs all of those, and it has a small set of pinned third-party
+dependencies (see [CREDITS.md](CREDITS.md)).
 
 ```
 buddynet --role=buddy       # ordinary peer; NAT is fine
 buddynet --role=relay       # public IP; blindly forwards encrypted sessions
-buddynet --role=handshake   # bootstrap/matchmaking server on a VPS
+buddynet --role=handshake   # handshake server: coordinates pairing, carries no traffic
 ```
 
 There is **no auto-detection** — you always set `--role`. Every binary carries
@@ -36,29 +53,30 @@ all three roles; in a buddy the relay and handshake code sit dormant as fallback
 
 ## Where BuddyNet fits
 
-These are differences in **scope and shape**, not a scoreboard — Tailscale,
-Netbird and plain WireGuard are mature projects solving a larger problem, and
-each of them does things BuddyNet does not.
+Tailscale, NetBird and plain WireGuard are mature projects solving a larger
+problem, and each of them does things BuddyNet does not. This is not a
+comparison of who is better or more secure — it is a description of what
+BuddyNet is, so you can tell whether it fits your case.
 
-| | BuddyNet | Tailscale | Netbird | WireGuard |
-|---|---|---|---|---|
-| Coordination server | **Yours, self-hosted** | Tailscale Inc. | Self-hostable | None |
-| Plaintext visible to the server | ❌ Never | ❌ Never | ❌ Never | N/A (no server) |
-| Zero-config NAT traversal | ✅ | ✅ | ✅ | ❌ Manual |
-| One binary, all roles | ✅ | ❌ | ❌ | ✅ |
-| Designed for | Small trusted groups | Fleets / enterprise | Fleets / teams | Anything, manually |
-| Managed global relay network | ❌ (you run yours) | ✅ | ✅ | N/A |
-| Commercial support / SLA | ❌ | ✅ | ✅ | ❌ |
-| Unraid plugin | ✅ | ✅ | ❌ | ❌ |
+| | BuddyNet |
+|---|---|
+| Coordination server | one you run yourself, on a machine you own |
+| Provider account | none — there is no BuddyNet service to sign up for |
+| Plaintext seen by the coordination server | none, on any path |
+| NAT traversal | automatic hole punching, no port forwarding |
+| Relay | only your own, only as a fallback, and only for sessions your own server authorised |
+| Recommended size | roughly **2 to 16 buddies** per node |
+| Enforced ceiling | **48 peers**, fail-closed — a guardrail, not a target |
+| Platforms | Linux (amd64/arm64) and Unraid today |
+| Support | none. MIT-licensed, no SLA, no support contract, no paid tier |
+| Fleet administration | none — no dashboard, no central policy, no device inventory |
 
-> **BuddyNet is not a large-scale mesh management platform.** It is intentionally
-> smaller in scope than Tailscale and similar platforms: designed for personal
-> networks, families, friends, and small teams that want a transparent
-> self-hosted overlay without an enterprise control plane. We recommend no more
-> than **16 buddies per node**. The enforced limit of **48 peers** is a safety
-> ceiling, not a capacity target. For large fleets, centralized policy
-> management, global relay availability, or enterprise support, use a platform
-> designed for that scale.
+> **BuddyNet is not a mesh-management platform and does not try to become one.**
+> If you need large fleets, centralized policy, guaranteed relay availability,
+> broad platform coverage (Windows, macOS, iOS, Android) or commercial support,
+> use a platform built for that. If you want a transparent overlay between a
+> handful of machines belonging to people who know each other, that is exactly
+> what this is.
 
 ### What BuddyNet deliberately does not have
 
@@ -67,18 +85,20 @@ The small scope is a design choice, not a gap on a roadmap:
 - **No enterprise identity platform.** No SSO, no directory integration, no
   org-wide policy engine — identity is one Ed25519 key per node, pinned by hand
   or through an invite.
-- **No global relay network.** There is no fleet of DERP-style servers behind
+- **No global relay network.** There is no fleet of relay servers behind
   BuddyNet. The only relay in your setup is the one you started.
-- **No large fleet-management system.** No dashboard, no central inventory, no
-  push of config to hundreds of devices.
-- **No commercial availability guarantee.** No SLA, no support contract, no paid
-  tier — this is an MIT-licensed side project.
-- **The operator owns and maintains the coordinator.** Patching, backups, the key
-  file, uptime and firewalling of that VPS are your job. Nobody does it for you
-  — and nobody else can reach into it either.
+- **No fleet management.** No dashboard, no central inventory, no push of
+  configuration to hundreds of devices.
+- **No availability guarantee.** No SLA, no support contract, no paid tier.
+- **No file-sharing or backup feature.** BuddyNet moves bytes between two
+  machines. Whatever you run over that connection — rsync, borg, SMB, ssh — is
+  ordinary software you install, configure and secure yourself.
+- **The operator owns and maintains the coordination server.** Patching,
+  backups, the key file, uptime and firewalling are your job. Nobody does it for
+  you — and nobody else can reach into it either.
 
-BuddyNet is tested and optimized for small networks — a handful of machines
-between people who know each other — not for hundreds or thousands of devices.
+BuddyNet is tested for small networks — a handful of machines between people who
+know each other — not for hundreds or thousands of devices.
 
 ## What you need
 
@@ -144,7 +164,8 @@ buddynet --role=handshake,relay \
 **2 — Inviter** (e.g. the machine being backed up *to*, running an rsync daemon):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --invite --forward 127.0.0.1:873
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+    --invite --forward 127.0.0.1:873
 # prints a one-time INVITE, then waits for your buddy to join
 ```
 
@@ -154,9 +175,16 @@ machine's public key, so your buddy pins **your** identity straight from it.
 **3 — Joiner** (the machine doing the backup):
 
 ```bash
-buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \ --join=INVITE -L 127.0.0.1:9000 &
+buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
+    --join INVITE -L 127.0.0.1:9000 &
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
+
+> The invite is a **bearer secret**: anyone holding it can take your buddy's
+> place until it is used. Keep it out of the command line and out of shell
+> history — put it in a `0600` file or pass it as `BUDDYNET_JOIN`. Using rsync
+> over the tunnel like this is just an example of ordinary software running over
+> an ordinary local socket; BuddyNet has no backup feature of its own.
 
 That's it — an end-to-end-encrypted, NAT-traversed tunnel carrying plain rsync.
 Check the link any time with `--status` — it exits `0` reachable, `3`
@@ -167,9 +195,12 @@ unreachable, `4` offline, `5` untrusted, `1` local error (see
 
 One node can hold **several tunnels at once** ([`--peers-file`](docs/PEERS.md)):
 each buddy is pinned by key, reachable by name via BuddyDNS (`<name>.buddy →
-10.66.X.Y`), and self-managed with the `peers` CLI — `list`, `add` (invite), and
-`remove` (revoke, drops the manifest entry **and** the session). No central
-authority: throw one buddy out and the rest keep tunneling, untouched.
+10.66.X.Y`), and managed by you alone with the `peers` CLI — `list`, `add`,
+`remove` (revoke) and `allow` (lift a revocation). A revocation is permanent
+until you lift it: the key goes on a local revocation list, the stored session
+is deleted, and neither an old session nor an old bootstrap token brings that
+buddy back. No central authority is involved: revoke one buddy and the others
+keep tunneling, untouched.
 
 **Sizing, honestly:** we recommend **no more than 16 buddies per node**. That is
 the range BuddyNet is tested and tuned for. The **48-peer limit** enforced
@@ -181,24 +212,6 @@ platform built for fleets.
 ![BuddyNet MultiPeer demo — one hub holding five buddy tunnels: list them, reach them by name via BuddyDNS, revoke one, the rest keep tunneling](media/multipeer-demo.gif)
 
 <sup>One hub, five buddies (`bob alice steven markus sandra`) — `peers list`, reach a buddy by name (BuddyDNS), revoke one, and the other four keep tunneling. Reproduce: `lab/demo.sh`.</sup>
-
-## BuddyShare — share folders, back up to each other
-
-The reason BuddyNet exists: two people who back up to each other. **BuddyShare
-is scoped by default** — your buddy reaches exactly **one** thing on your
-server (Samba, port 445 over the tunnel), and inside Samba only the shares you
-grant their Unraid user. Everything else on your host stays invisible,
-fail-closed.
-
-```text
-you:   Users → add user "bob"  ·  Shares → grant bob per share  ·  plugin: BuddyShare = Enabled
-buddy: mounts \\10.66.x.y\share (Unassigned Devices / mount.cifs) → points any backup tool at it
-```
-
-No new file service, no new ACL system: Unraid's own SMB does the folders, the
-tunnel's fail-closed `--expose` does the rest. Users and rights stay entirely
-in Unraid's UI — the plugin only configures the tunnel scope. Full guide incl.
-revoke and honest caveats: [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md).
 
 ## How it works
 
@@ -235,6 +248,13 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 
 ## Security
 
+> **New in v5.2.0**, and worth knowing if you are upgrading from v5.1.x:
+> `--peer-key` is checked on **every** connect (a pin that contradicts the stored
+> one now refuses the connection), a revocation is **permanent until you lift it**
+> with `peers allow`, and the Unraid plugin's *Forget buddy* became a real
+> revocation. See [CHANGELOG.md](CHANGELOG.md) for the full list and the two
+> behaviour changes.
+
 - Pin the server with `--server-key`. Your buddy pins **itself**: the invite from
   `--invite` is `bnet1.<token>.<inviter-key>`, so `--join` learns the inviter's
   identity from the channel you already trust (phone, Signal) and refuses anyone
@@ -258,7 +278,7 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   file or `BUDDYNET_JOIN`).
 - Optional allowlist (approval mode) on the handshake server, with sealed
   enrollment codes so a code can't be read off the wire.
-- The bootstrap server is hardened against abuse: source-address validation,
+- The handshake server is hardened against abuse: source-address validation,
   global + per-source rate limits, bounded in-memory state, and replay rejection
   in approval mode. The control plane is QUIC/TLS 1.3 unconditionally, so it
   encrypts the token and validates source addresses without a cookie round-trip.
@@ -268,34 +288,55 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
 - A direct tunnel isn't revocable centrally — the server isn't in the data path.
   `--reauth-interval` periodically rebuilds the tunnel so a revocation or token
   rotation takes effect within the interval (off by default; see
-  [SECURITY.md](SECURITY.md#revoking-access)).
+  [SECURITY.md](SECURITY.md#82-revoking-access)).
 
-**What the security boundary covers.** BuddyNet protects connections between
-non-compromised hosts against network attackers, unauthorized relay use,
-interception, replay, and identity substitution. Like any VPN, it cannot protect
-a device after its operating system or administrator account has already been
-compromised, and it cannot stop a volumetric attack that saturates the server's
-upstream connection.
+**What the security boundary covers.** BuddyNet protects the connection between
+two machines that are not themselves compromised: against network attackers,
+unauthorized use of your relay, interception, replay, and someone being
+substituted for your buddy.
+
+**What it cannot do**, and no VPN can:
+
+> Once an endpoint is compromised with root or equivalent access, the attacker
+> can generally access everything that this endpoint can access. BuddyNet cannot
+> repair a compromised operating system.
+
+That is a normal system boundary, not a weakness specific to BuddyNet. The same
+goes for a stolen identity key, malware on a buddy's machine, a service you
+deliberately exposed, an insecure SSH or firewall configuration on the server,
+and a volumetric attack that saturates its uplink — rate limits bound the work
+per source, they do not guarantee availability.
+
+**The source code is public, and you should assume an attacker has read all of
+it.** Security here rests on keys and secrets, never on anything being hidden:
+identity keys, invite tokens, session secrets and enrollment codes are the only
+things that must stay private. Open source makes analysis easier for attackers
+and for defenders alike; the trade is deliberate.
 
 The full threat model — what BuddyNet protects against, the trust hierarchy, and
 its honest limits — is in **[SECURITY.md](SECURITY.md)**.
 
-> **Self-pentested, and published as such.** The repository includes a
-> [structural attack tool and full results](lab/pentest/README.md) — 16 tests, 14
-> defenses verified against a live lab instance, 1 N/A, 1 low finding (stale VIP
-> after `kill -9`, fixed in v2.2.0). No critical or high findings. This is our own
-> structural testing, **not** an independent third-party audit — bugs can always
-> remain. We publish it because we think tests belong in the open — not as
-> evidence that BuddyNet is more secure than projects that test privately or
-> hire auditors instead. Found one? Please open an issue; we're grateful for
-> every report.
+> **Self-tested, and published as such.** The repository contains the attack
+> tool and the results ([lab/pentest/](lab/pentest/README.md)): a structural
+> probe that brings up its own servers and asserts, scene by scene, that each
+> defense refuses what it is supposed to refuse — and that an honest pairing
+> still works, so a refusal cannot pass for a defense that simply broke
+> everything. It is run after security-relevant changes. The dated manual
+> red-team report kept at the end of that file is from **2026-06-20** and
+> describes protocol v6; it is history, not a statement about the current
+> release.
+>
+> This is our own testing, **not** an independent third-party audit, and bugs can
+> always remain. We publish it because tests belong in the open — not as evidence
+> that BuddyNet is more secure than projects that test privately or hire
+> auditors. Found something? Please open an issue; we are grateful for every
+> report.
 
 ## Documentation
 
 | Doc | What it covers |
 |-----|---------------|
 | [docs/TWO-BUDDIES.md](docs/TWO-BUDDIES.md) | The two-buddy setup, end to end |
-| [docs/BUDDYSHARE.md](docs/BUDDYSHARE.md) | **BuddyShare**: scoped folder sharing + mutual backup over SMB |
 | [docs/WIREGUARD.md](docs/WIREGUARD.md) | The kernel-WireGuard data plane and scoped exposure (`--expose`) |
 | [docs/PEERS.md](docs/PEERS.md) | **MultiPeer** (many buddies): `--peers-file` manifest, `--vip-listen` routing, `peers` subcommands, live reload |
 | [docs/INVITE.md](docs/INVITE.md) | Invite/join flow, key-bound invites, SAS, session secrets, TOFU, re-auth |
@@ -314,15 +355,27 @@ go build -ldflags="-s -w" -o buddynet ./cmd/buddynet
 go test ./...
 ```
 
+**Go versions.** Building needs **Go 1.25.0 or newer** — that is the minimum in
+`go.mod`. Official builds (CI, releases, the container image) all use the exact
+toolchain pinned on the `toolchain` line of the same file, currently
+**go1.26.6**, and each CI job verifies that it really got that version. So
+"minimum to build" and "what the released binary was built with" are two
+different numbers on purpose.
+
 Built for **Linux** — amd64 and ARM64 (Raspberry Pi, Unraid). The data plane
-(kernel WireGuard, nftables scoping, netlink VIP binding) and deployment (systemd,
-Unraid) are Linux-only, so released binaries are Linux amd64/arm64. A deliberately
-small, pinned dependency set (`quic-go`, `miekg/dns`, `golang.org/x/crypto`),
-gated by `govulncheck` in CI. Server side via Docker:
+(kernel WireGuard, nftables scoping, netlink VIP binding) and the deployment
+artifacts (systemd, Unraid) are Linux-only, so released binaries are Linux
+amd64/arm64. A deliberately small, pinned dependency set (`quic-go`,
+`miekg/dns`, `golang.org/x/crypto`, `filippo.io/edwards25519`, `yaml.v3`), gated
+by `govulncheck` and `gosec` in CI. Server side via Docker:
 
 ```bash
 docker compose -f deployments/docker-compose.yml up -d --build
 ```
+
+That compose file **builds from this checkout** and tags the result locally;
+nothing is pulled from a registry. For a release deployment, pin both services
+to one immutable image digest instead — the file says exactly how, at the top.
 
 On a VPS you can run both server roles in one process:
 `buddynet --role=handshake,relay`. On **Unraid**, the buddy role ships as a
@@ -346,24 +399,39 @@ Each release also carries an SPDX SBOM (`buddynet-<tag>-sbom.spdx.json`).
 (Releases up to v1.1.0 used separate `.sig`/`.pem` files; v1.1.2 onward uses the
 single `.bundle`.)
 
+What that does and does not give you, plainly: the bundle proves the release
+workflow in this repository produced that exact file, and the checksum proves
+your copy is intact. There is **no SLSA provenance attestation** yet, so
+`gh attestation verify` will not find anything. Rebuilding a release yourself is
+possible — v5.1.1 was reproduced bit-for-bit — but the recipe matters: clone with
+`--depth 1 --no-tags`, then build with the pinned toolchain, or the module
+version stamped into the binary differs and the hash will not match.
+
 ## Status & Roadmap
 
-The two-buddy setup is implemented and tested end to end. **MultiPeer** (many
-buddies at once — `--peers-file`, per-buddy VIP routing, live reload) shipped
-with v2.1. **v3.0.0** ships the **kernel-WireGuard data plane** (`--wireguard`,
-direct + relay + MultiPeer) with **scoped, fail-closed exposure** (`--expose`,
-see [docs/WIREGUARD.md](docs/WIREGUARD.md)) and **BuddyShare** on top
-([docs/BUDDYSHARE.md](docs/BUDDYSHARE.md)) — all opt-in; QUIC remains the
-default data plane. Peer-to-peer gossip remains deferred. Everything is
-additive on the v1 wire format, virtual IPs, and fallback chain.
+What is implemented today:
+
+- **Two buddies**, end to end — invite, pairing, direct tunnel, relay fallback.
+- **MultiPeer** (several buddies at once, `--peers-file`, per-buddy VIP routing,
+  live reload), shipped in v2.1.
+- **Kernel-WireGuard data plane** (`--wireguard`) with **scoped, fail-closed
+  exposure** (`--expose`), shipped in v3.0.0 and opt-in. QUIC stays the default.
+- **Authorized relay** (signed relay tickets), shipped in v5.0.0.
+- **Unraid plugin** for the buddy role.
+
+Not implemented, and not promised for a date: peer-to-peer gossip (deliberately
+deferred after its own threat-model review), subnet routing, and any platform
+beyond Linux and Unraid.
 
 **Security posture**
 
-- **v2.2.0: self-pentested — 14/14 applicable defenses verified, no
-  critical/high findings** (our own structural testing, not an independent audit).
-  Full report: [lab/pentest/README.md](lab/pentest/README.md).
-- `govulncheck` in CI, Dependabot for dependency updates.
-- cosign keyless signing + SPDX SBOM on every release.
+- A structural self-test suite (`lab/pentest/`) that is run after
+  security-relevant changes; the last full **manual** red-team report in that
+  file is dated 2026-06-20 and describes protocol v6, so read it as history, not
+  as today's status. This is our own testing — **not** an independent audit.
+- `govulncheck` and `gosec` in CI, Dependabot for dependency updates, nightly
+  fuzzing of the parsers that face untrusted input.
+- cosign keyless signing + an SPDX SBOM on every release.
 
 ## License
 

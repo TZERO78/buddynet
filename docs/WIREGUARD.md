@@ -2,8 +2,9 @@
 
 > **Status:** shipped in **v3.0.0** — opt-in and lab-validated by the project's
 > own netns tests (`lab/test-wg-*.sh`). The default data plane is still QUIC.
-> The flagship use of the scoped door is **BuddyShare**
-> ([BUDDYSHARE.md](BUDDYSHARE.md)): SMB on `--expose 445`.
+> A common use of the scoped door is a single service, for example SMB with
+> `--expose 445`. BuddyNet provides the scoped transport; the service itself is
+> yours to run, secure and patch.
 
 > ## ⚠️ Sharing is SCOPED by default (`--expose`)
 >

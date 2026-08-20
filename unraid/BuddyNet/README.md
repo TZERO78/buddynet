@@ -16,22 +16,19 @@ https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet
 
 Then configure under **Tools → BuddyNet**.
 
-The install pins **buddynet v2.0.0** and verifies the downloaded
-`buddynet-linux-amd64` against its published SHA256 — a corrupted or tampered
-download is refused.
-
-> **Upgrading from a v1.x plugin:** v2.0.0 widens the virtual IP to a `/16`
-> (`10.66.X.Y`), so every node's virtual IP changes. After updating, your buddy
-> must **re-pin** your Buddy key (the identity itself is unchanged; only the
-> derived virtual IP moves).
+The install pins one buddynet release — currently **v5.1.1** — and verifies the
+downloaded `buddynet-linux-amd64` against its published SHA256, so a corrupted or
+tampered download is refused. The pinned version and its checksum are in
+`buddynet.plg` (`BINVER` / `BINSHA`) and move together on each release.
 
 ## What it does
 
 - **Settings page** (Tools → BuddyNet) + a service that runs on array start and
   stops on array stop.
-- **Bidirectional over one tunnel:** `-L` pushes backups *to* your buddy,
-  `-forward` lets your buddy reach a local service (e.g. an rsync daemon on
-  `:873`). Set at least one.
+- **Both directions over one tunnel:** `-L` exposes a local port that reaches a
+  service on your buddy's side, `-forward` lets your buddy reach a service here
+  (an rsync daemon on `:873`, for example). Set at least one — a tunnel with
+  neither carries nothing.
 - **BuddyDNS:** give this node a `--name` (so your buddy reaches it as
   `<name>.buddy`) and/or enable the `--dns` resolver, which answers `*.buddy`
   queries on `127.0.0.153:53`. To use the names on the Unraid host, route the
@@ -44,16 +41,39 @@ download is refused.
 - **Secrets off the FAT flash:** the token file, identity key, trust store and
   peer cache live on `/mnt/user/appdata/buddynet/` (real `0600`). A token typed
   into the page is only a testing fallback — prefer the token file.
-- **Danger zone:** *Forget buddy* (clear `known_peers`) and *Reset identity*
-  (delete `id.key` — note this changes your virtual IP, so your buddy must
-  re-pin your new key).
+- **Optional WireGuard data plane** with **scoped exposure**: with WireGuard
+  enabled your buddy reaches only the port(s) you list under *Exposed ports* —
+  with the field empty, nothing at all (fail-closed). This is a transport scope,
+  not a file-sharing feature: whatever service you expose is ordinary software
+  you install and secure yourself.
+- **Danger zone:**
+  - *Forget buddy* **revokes** the buddy: its key goes on this node's revocation
+    list and the stored session is deleted, so it cannot reconnect — not with the
+    invite still saved in the plugin config, and not after a restart. The service
+    is left stopped, because this node then has no buddy.
+  - *Allow buddy again* lifts that revocation and starts the service. It refuses
+    unless a buddy key **and** an invite are configured, so the revocation is
+    never lifted before there is something new to pin.
+  - *Reset identity* deletes `id.key`. That changes this node's identity **and**
+    its virtual IP, so your buddy has to re-pin the new key.
 
 ## Security
 
-Unraid runs the buddy **headless**, so there is no terminal to compare the
-first-contact safety check (SAS). You must therefore **pin your buddy** with the
-**Buddy key** field (each node logs its own identity at startup); the service
-runs `--no-interactive`, so an unknown key is refused rather than trusted blind.
-The token is a bearer secret — keep it in the `0600` token file, not the flash
-config. See the project [README](../../README.md) and
+Unraid runs the buddy **headless**: there is no terminal on which a human could
+compare the first-contact safety check (the six-character SAS code). The service
+therefore always runs with `--no-interactive`, and that has one consequence worth
+stating plainly:
+
+> **An unknown buddy key is refused, never learned.** There is no
+> trust-on-first-use here. If the key is not pinned, the connection does not come
+> up.
+
+So pin your buddy — either with a `bnet1.…` invite, which carries the inviter's
+key and pins it for you, or by pasting their key into the **Buddy key** field
+(every node prints its own identity at startup). A pinned key that later
+contradicts the key stored from an earlier pairing also stops the connection:
+that is a re-pin or a revocation, and it needs *Forget buddy* plus a new invite.
+
+The invite is a bearer secret — keep it in the `0600` token file on the array,
+not in the flash config. See the project [README](../../README.md) and
 [SECURITY.md](../../SECURITY.md).

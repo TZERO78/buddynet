@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
-# e2e for the BuddyShare pattern (docs/plans/buddyshare.md): SMB over the
-# --wireguard data plane, scoped to :445 with --expose. REAL binary, real smbd.
+# e2e for SCOPED EXPOSURE with a real service behind it: SMB over the --wireguard
+# data plane, scoped to :445 with --expose. REAL binary, real smbd.
 #
-# Mirrors the Unraid↔Unraid setup: on the sharing side a stock smbd (bound to
-# 0.0.0.0, like Unraid's) with a per-buddy share user; the buddy reaches it at
-# the VIP over the tunnel — and nothing else.
+# SMB is the example here because it is the awkward case — a large service that
+# binds 0.0.0.0 and must not become reachable beyond the tunnel. BuddyNet has no
+# file-sharing feature of its own; what is under test is the scope, not Samba.
+#
+# On the sharing side a stock smbd (bound to 0.0.0.0, like Unraid's) with a
+# per-buddy share user; the buddy reaches it at the VIP over the tunnel — and
+# nothing else.
 #
 # Three netns on one bridge (no NAT → direct punch trivially works):
 #   ns-srv  10.50.0.10  handshake+relay
-#   ns-a    10.50.0.20  buddy A — runs smbd, shares [buddyshare], --expose 445
+#   ns-a    10.50.0.20  buddy A — runs smbd, shares [labshare], --expose 445
 #   ns-b    10.50.0.30  buddy B — the consuming side (fail-closed, no --expose)
 #
 # Asserts:
@@ -31,7 +35,7 @@ RID=YnVkZHluZXQtbGFiLXJpZA
 cd "$(dirname "$0")/.."
 BN=/tmp/bshare/bn
 D=/tmp/bshare
-TOKEN=lab-buddyshare-token
+TOKEN=lab-labshare-token
 LABUSER=$(id -un)
 SMBPW=lab-buddy-pw
 SMBPW_WRONG=not-the-password
@@ -103,7 +107,7 @@ cat > "$D/smb.conf" <<CONF
   smb ports = 445
   bind interfaces only = no
 
-[buddyshare]
+[labshare]
   path = $D/share
   valid users = $LABUSER
   read only = no
@@ -142,7 +146,7 @@ assert_connected() { # $1 logfile, $2 label
 
 FAIL=0
 smbc() { # $1 user%pass, $2 -c command → runs smbclient from ns-b against A's VIP
-	sudo ip netns exec ns-b timeout 25 smbclient "//$VIP_A/buddyshare" -U "$1" -m SMB3 -c "$2"
+	sudo ip netns exec ns-b timeout 25 smbclient "//$VIP_A/labshare" -U "$1" -m SMB3 -c "$2"
 }
 
 echo "== [$(date +%T)] PHASE 1: tunnel up, A scoped to :445 =="
@@ -163,7 +167,7 @@ if assert_connected "$D/a.log" "buddy-a" && assert_connected "$D/b.log" "buddy-b
 		echo "  [PASS] smbd answers on the VIP (interface appeared after smbd start)"
 	else echo "  [FAIL] smbclient ls failed"; sed 's/^/    | /' "$D/ls.out"; FAIL=1; fi
 
-	echo "buddyshare roundtrip $(date +%s)" > "$D/up.txt"
+	echo "labshare roundtrip $(date +%s)" > "$D/up.txt"
 	sudo cp "$D/up.txt" /tmp/bshare-up.txt
 	if smbc "$LABUSER%$SMBPW" "lcd /tmp; put bshare-up.txt; get bshare-up.txt bshare-down.txt" >/dev/null 2>&1 \
 		&& cmp -s "$D/up.txt" /tmp/bshare-down.txt; then
@@ -179,7 +183,7 @@ if assert_connected "$D/a.log" "buddy-a" && assert_connected "$D/b.log" "buddy-b
 	# read and umount must happen in ONE invocation — a mount does not survive it.
 	mkdir -p "$D/mnt"
 	if sudo ip netns exec ns-b timeout 25 sh -c "
-		mount -t cifs //$VIP_A/buddyshare $D/mnt -o user=$LABUSER,pass=$SMBPW,vers=3.0,soft &&
+		mount -t cifs //$VIP_A/labshare $D/mnt -o user=$LABUSER,pass=$SMBPW,vers=3.0,soft &&
 		echo via-mount > $D/mnt/mounted.txt &&
 		cat $D/mnt/greeting.txt &&
 		umount $D/mnt" >"$D/mount.out" 2>"$D/mount.err" \

@@ -1,5 +1,21 @@
 # BuddyNet Architecture
 
+**In one paragraph.** Two machines want to talk. Each one registers with a small
+**handshake server** that you run; the server learns where they currently are on
+the internet, notices that they share a pairing token, and hands each one a
+signed list containing the other. From then on the two machines talk **directly**
+to each other, encrypted end to end — the handshake server carries none of that
+traffic. If a direct path cannot be established (some NATs simply will not
+cooperate), they fall back to a **relay**, also yours, which forwards the
+encrypted packets without being able to read them.
+
+That fallback is not free of information: a relay necessarily sees that *some*
+session exists, when it runs and how many bytes cross it. It does not see the
+content, the identities behind it, or which of your buddies is which — a bind
+carries an opaque, server-chosen session id and a one-attempt ephemeral key,
+nothing durable. A direct tunnel gives the relay nothing at all, because it is
+not in the path.
+
 BuddyNet is one binary that runs in one of three explicit roles. There is **no
 auto-detection** — the operator always sets `--role`. Every binary contains all
 three roles; in a buddy the relay and handshake code sit dormant as fallback.
@@ -70,7 +86,7 @@ A buddy tries paths in order, cheapest and most private first
 1. **Direct P2P** — hole-punch to the partner's live candidates, run QUIC
    straight over the punched UDP path. No third party in the data path.
 2. **Known relay** — a relay the handshake server offered for this pair.
-3. **Handshake-as-relay** — the bootstrap server acting as a relay of last
+3. **Handshake-as-relay** — the handshake server acting as a relay of last
    resort (only if the VPS also runs `--role=relay` and advertises it with
    `--relay-endpoint`).
 4. **Cached peer** — the partner's last-known endpoints from `peers.json`,
