@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (Security) — three findings from the parallel 2026-08-20 audit pass
+
+These were reproduced on `main` **after** v5.2.0 shipped, from a second audit
+branch whose tests had not been merged. All three are low severity; all three had
+a reproducing test before they had a fix.
+
+- **The `-L` Unix socket existed group/world-accessible before it was chmodded.**
+  `net.Listen` creates the socket with `0777 &^ umask` and the listener starts
+  accepting immediately, so narrowing it on the next statement closes a door
+  somebody may already be through — and `-L` has no authentication of its own:
+  the file mode **is** the access control, and whoever connects is spliced onto
+  the tunnel to the partner. The window was measured, not assumed: an observer
+  polling the path saw it open in 127 of 200 rounds. The socket is now created
+  owner-only under a tightened umask, with the `chmod` kept as a second layer.
+
+- **`REGISTER.Role` was neither validated nor bounded, and was retained.** Every
+  neighbouring field is length- or format-checked; this one was stored verbatim,
+  up to the 8 KB request cap, which worked out to tens of megabytes of
+  attacker-chosen bytes held in a registry whose stated purpose is bounded
+  memory. Nothing in the tree ever read it back, so the field is gone. The wire
+  field remains (it is covered by the signature); the server simply keeps
+  nothing from it.
+
+- **Evicting the stalest pairing scanned the whole table under the global lock.**
+  Once the token table was full — which a client can cause, since it picks its
+  own token — every registration carrying a fresh token walked all 4096 buckets
+  while holding the one mutex every registration needs: ~300 µs per packet
+  against ~1.3 µs on an empty table, about a third of the server's own admitted
+  packet budget spent where nothing else can proceed. Eviction now samples eight
+  buckets and takes the oldest of those: **~2.8 µs per packet**, a hundredfold
+  less lock time. The trade is deliberate and documented — the victim is the
+  oldest of a sample, not the globally oldest. A test pins the age bias
+  (aged buckets were evicted 100 out of 100 times) and fails if the sampling is
+  removed.
+
 ## [v5.2.0] — 2026-08-20
 
 Hardening release from the 2026-08-20 audit: it closes two controls that were

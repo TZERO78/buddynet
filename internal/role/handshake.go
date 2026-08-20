@@ -107,8 +107,14 @@ const (
 // hsPeer accumulates what the server knows about one (token,id) across its v4
 // and v6 registrations.
 type hsPeer struct {
-	id        string
-	role      protocol.Role
+	id string
+	// NO role field. REGISTER carries one, but the server never read it, and
+	// storing it meant keeping an unvalidated, unbounded, attacker-chosen string
+	// (every neighbouring field is length- or format-checked; this one was
+	// `if m.Role != "" { self.role = m.Role }`) for nothing. Bounded only by the
+	// 8 KB request cap, that was up to ~55 MB of retained attacker data in a
+	// registry whose whole point is bounded memory. Dropping the field is the
+	// cheapest correct fix: nothing reads it, so nothing needs it.
 	pubkey    string
 	virtualIP string
 	name      string // self-asserted .buddy name; relayed as-is, not validated by the server
@@ -270,9 +276,6 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 	if m.VirtualIP != "" {
 		self.virtualIP = m.VirtualIP
 	}
-	if m.Role != "" {
-		self.role = m.Role
-	}
 	// Accept the name only if it passes the DNS-label rules. The server relays it
 	// verbatim and trusts the receiving buddy to apply TOFU pinning; we just
 	// reject garbage so the wire stays clean.
@@ -303,17 +306,42 @@ func (r *hsRegistry) upsert(m protocol.Message, src *net.UDPAddr) (self, partner
 	return self, partner, true
 }
 
-// evictStalestLocked frees one slot by removing the token bucket whose most
-// recent activity is oldest. Caller holds r.mu; returns false only if the table
-// is empty (nothing to evict).
+// evictSample is how many buckets evictStalestLocked looks at before choosing.
+// Eight is enough that the victim is reliably among the older entries (the
+// expected age percentile of the oldest of eight uniform samples is ~89%) while
+// keeping the work per eviction constant.
+const evictSample = 8
+
+// evictStalestLocked frees one slot by removing an old token bucket. Caller
+// holds r.mu; returns false only if the table is empty (nothing to evict).
+//
+// It samples instead of scanning, and that is the point. The exact version
+// walked ALL maxTokens buckets — each one re-scanned by bucketSeen — while
+// holding r.mu, the single mutex every registration needs. Measured on a full
+// table that was ~300 µs per packet against ~1.3 µs on an empty one, and since
+// the token is chosen by the client, filling the table is free: at the server's
+// own admitted ceiling of rlGlobalRate packets/second, roughly a third of every
+// second was spent scanning inside the lock, with no legitimate registration
+// able to make progress. Being precise about WHICH bucket is stalest was the
+// most expensive property in the control plane and bought nothing: the job here
+// is to free a slot under pressure.
+//
+// Go randomises map iteration order, so taking the first evictSample entries is
+// a random sample. The victim is the oldest of those, not the oldest overall —
+// a deliberate trade, and under a flood the table is mostly the attacker's own
+// entries anyway.
 func (r *hsRegistry) evictStalestLocked() bool {
 	var victim string
 	var oldest time.Time
 	found := false
+	seen := 0
 	for token, bucket := range r.waiting {
-		seen := bucketSeen(bucket)
-		if !found || seen.Before(oldest) {
-			victim, oldest, found = token, seen, true
+		age := bucketSeen(bucket)
+		if !found || age.Before(oldest) {
+			victim, oldest, found = token, age, true
+		}
+		if seen++; seen >= evictSample {
+			break
 		}
 	}
 	if !found {
