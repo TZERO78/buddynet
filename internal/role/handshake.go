@@ -436,8 +436,9 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	} else {
 		log.Print("approval mode OFF: any client that knows a token may pair. A token-holder can " +
 			"thereby harvest the partner's endpoints from the signed PEER_LIST, and (only against a buddy " +
-			"run with --lab) MITM it. Restrict with --authorized, and/or use --quic-handshake so the " +
-			"token never travels in cleartext; always pin buddies with --peer-key.")
+			"run with --lab) MITM it. Restrict with --authorized; always pin buddies with --peer-key. " +
+			"(The control plane is QUIC/TLS 1.3 unconditionally since v8, so the token never travels " +
+			"in cleartext either way.)")
 	}
 
 	reg := newHSRegistry(cfg.TTL)

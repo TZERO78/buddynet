@@ -260,8 +260,8 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   enrollment codes so a code can't be read off the wire.
 - The bootstrap server is hardened against abuse: source-address validation,
   global + per-source rate limits, bounded in-memory state, and replay rejection
-  in approval mode. (recommended default) encrypts the control
-  plane and validates source addresses without a cookie round-trip.
+  in approval mode. The control plane is QUIC/TLS 1.3 unconditionally, so it
+  encrypts the token and validates source addresses without a cookie round-trip.
 - Restrict **who** can reach a server role with `--allow-cidr` (comma-separated
   CIDRs; relay **and** handshake). Disallowed sources are dropped before any
   crypto, so a private relay/handshake needs no separate firewall.

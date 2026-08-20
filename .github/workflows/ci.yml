@@ -33,6 +33,27 @@ jobs:
       - name: build
         run: go build ./...
 
+      # The shipped systemd units, validated by systemd itself. The binaries are
+      # installed first so ExecStart resolves — without that systemd-analyze
+      # exits 1 on "command is not executable" and the check would be noise.
+      #
+      # To be honest about what this covers: systemd-analyze verify checks the
+      # UNIT, not whether the binary accepts the flags in ExecStart. It would NOT
+      # have caught A-05 (a unit passing a removed flag). The flag-drift test in
+      # cmd/buddynet{,-handshake} is that gate; this is the complement that
+      # catches unit syntax the Go test cannot see.
+      - name: systemd units
+        run: |
+          go build -o /tmp/buddynet ./cmd/buddynet
+          go build -o /tmp/buddynet-handshake ./cmd/buddynet-handshake
+          sudo install -m 0755 /tmp/buddynet /tmp/buddynet-handshake /usr/local/bin/
+          systemd-analyze verify deployments/systemd/*.service
+          # Sandbox scoring: informative only. The score moves with the systemd
+          # version, so making it blocking would flap on every runner update.
+          for u in deployments/systemd/*.service; do
+            systemd-analyze security --no-pager "$u" 2>&1 | tail -3 || true
+          done
+
       # Cross-compile every shipped release target so an arch-specific break fails
       # CI here, not in the tag-triggered release build. Keep in sync with the
       # matrix in .github/workflows/release.yml (Linux only, by design).
@@ -69,17 +90,11 @@ jobs:
       # only as false positives on this codebase (see the comment at each site):
       #   G402 InsecureSkipVerify — intentional: PKI-free, identity is pinned by
       #        key in VerifyPeerCertificate (internal/tunnel/{quic,control}.go).
-      #   G123 TLS resumption + VerifyPeerCertificate — peers are key-pinned across
-      #        reconnects; tracked as a hardening follow-up, not a vuln.
       #   G117 "struct field matches secret pattern" on JSON marshaling — that IS
       #        the wire protocol (SessionToken etc.); marshaling it is the point.
       #   G115 int64->uint64 of a positive cookie epoch — provably non-negative.
       #   G104 unchecked best-effort writes (conn.WriteToUDP), G304 file opens from
       #        config-supplied paths — pervasive in net/CLI code, not vulnerabilities.
-      #   G703 path traversal via taint analysis — the taint-analysis sibling of
-      #        G304: every file path here is the node operator's OWN CLI/config path
-      #        (--peers-file/--known-peers/--authorized), never attacker input. Same
-      #        non-vulnerability as G304; excluded for consistency.
       # Every other rule (exec, SQL, weak crypto, etc.) stays blocking. Installed
       # and run with the runner's Go (setup-go above), not the dockerized action —
       # that image bundles an older Go that GOTOOLCHAIN=local rejects against our

@@ -93,54 +93,109 @@ func appVersion() string {
 	return "dev"
 }
 
+// cliFlags is every command-line flag this binary defines, registered in ONE
+// place so a test can enumerate them from the same source main() uses.
+//
+// That is the point of the split (finding A-05): a shipped systemd unit passed
+// --quic-handshake for a full release after v8 removed it, so the service exited
+// 2 on every start and nothing noticed. A test that greps main.go for a pattern
+// would be guessing; registerFlags lets it ask the flag package itself.
+type cliFlags struct {
+	roleFlag          *string
+	keyPath           *string
+	listen            *string
+	relayListenFlag   *string
+	allowCIDR         *string
+	relayMaxSessions  *int
+	relayMaxLegsPerIP *int
+	ttl               *time.Duration
+	authorized        *string
+	relayEndpoint     *string
+	relayID           *string
+	debug             *bool
+	server            *string
+	serverKey         *string
+	peerKey           *string
+	knownPeers        *string
+	lab               *bool
+	code              *string
+	peersPath         *string
+	peersFile         *string
+	localListen       *string
+	vipListen         *string
+	forward           *string
+	punchDur          *time.Duration
+	idleTimeout       *time.Duration
+	reauthInterval    *time.Duration
+	noInteractive     *bool
+	sasTimeout        *time.Duration
+	inviteTimeout     *time.Duration
+	status            *bool
+	invite            *bool
+	join              *string
+	name              *string
+	dnsFlag           *bool
+	lazyFlag          *bool
+	expose            *string
+	wireguard         *bool
+	showVersion       *bool
+}
+
+// registerFlags defines every flag on fs and returns the parsed destinations.
+// main() calls it with flag.CommandLine; the flag-drift test calls it with a
+// throwaway FlagSet and reads the names back via fs.VisitAll.
+func registerFlags(fs *flag.FlagSet) *cliFlags {
+	return &cliFlags{
+		roleFlag:          fs.String("role", "", "node role: buddy | relay | handshake (required; never auto-detected)"),
+		keyPath:           fs.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)"),
+		listen:            fs.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr)),
+		relayListenFlag:   fs.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr)),
+		allowCIDR:         fs.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); a disallowed source is refused before it can occupy a connection slot, and on the relay before any crypto. On the HANDSHAKE server empty means open to all; on the RELAY it is one of the two authorization policies (the other is --server-key) and the relay refuses to start with neither — 0.0.0.0/0 and ::/0 are refused, an open relay is not a supported configuration"),
+		relayMaxSessions:  fs.Int("relay-max-sessions", 0, "relay: max concurrent sessions (abuse ceiling; 0 = default 4096). Lower it for a small private relay"),
+		relayMaxLegsPerIP: fs.Int("relay-max-legs-per-ip", 0, "relay: max legs one source may hold (anti-hoarding; 0 = default 64). A source is one IPv4 address or one IPv6 /64 — every address in a /64 is free to mint, so they share this budget. Lower it for a small private relay"),
+		ttl:               fs.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)"),
+		authorized:        fs.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke subcommands"),
+		relayEndpoint:     fs.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)"),
+		relayID:           fs.String("relay-id", "", "handshake/relay: the relay's id, the SAME value on both (mint one with `buddynet gen-relay-id`). On the handshake server it turns on relay tickets — every paired buddy is issued a short-lived signed permit for that relay; on the relay it names which tickets to accept"),
+		debug:             fs.Bool("debug", false, "handshake/relay: verbose logging of parked/dropped packets; on the relay it also puts SOURCE ADDRESSES in ticket-rejection lines, which a shipped relay deliberately does not log (not for production)"),
+		server:            fs.String("server", "", "buddy: handshake server host:port [required]"),
+		serverKey:         fs.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]. RELAY: the handshake server whose relay tickets this relay accepts — pass two comma-separated keys during a server key rotation"),
+		peerKey:           fs.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest). Must agree with the key stored from a previous pairing: a pin that contradicts it refuses to connect (revoke the old buddy with \"peers remove <key>\", then pair again)"),
+		knownPeers:        fs.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)"),
+		lab:               fs.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1."),
+		code:              fs.String("code", "", "buddy: enrollment code for an allowlist handshake server"),
+		peersPath:         fs.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable"),
+		peersFile:         fs.String("peers-file", "", "buddy: MultiPeer manifest (YAML: buddies with key/token/name/expose per entry; legacy line format still read — run `peers migrate`); maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--lazy"),
+		localListen:       fs.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer"),
+		vipListen:         fs.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing"),
+		forward:           fs.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)"),
+		punchDur:          fs.Duration("punch", 2*time.Second, "buddy: how long to hole-punch before bringing up QUIC"),
+		idleTimeout:       fs.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all"),
+		reauthInterval:    fs.Duration("reauth-interval", 0, "buddy: periodically rebuild the tunnel so a revocation/token rotation takes effect within this long (0 = off; a direct tunnel cannot be cancelled centrally). May interrupt long transfers."),
+		noInteractive:     fs.Bool("no-interactive", false, "buddy: never prompt for first-contact SAS confirmation; refuse to learn a NEW buddy key (pin it with --peer-key instead). For daemons/Unraid."),
+		sasTimeout:        fs.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)"),
+		inviteTimeout:     fs.Duration("invite-timeout", 15*time.Minute, "buddy: give up the first pairing (--invite/--join) after this long; the invite token is one-time"),
+		status:            fs.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)"),
+		invite:            fs.Bool("invite", false, "buddy: mint a ONE-TIME invite (valid until first pairing, see --invite-timeout), print it, and wait. The invite carries this node's public key, so your buddy pins YOUR identity from it — hand it over on a channel you trust. Afterwards reconnects use a stored session secret"),
+		join:              fs.String("join", "", "buddy: join with the one-time invite your buddy gave you. A key-bearing invite pins them automatically (no code to compare on this side); a bare token falls back to first-contact verification. On success a session secret is stored for reconnects"),
+		name:              fs.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars"),
+		dnsFlag:           fs.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)"),
+		lazyFlag:          fs.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)"),
+		expose:            fs.String("expose", "", "buddy (--wireguard): port(s) the partner may reach on THIS host over the tunnel, e.g. 873 or 873,8080 or tcp/873,udp/51820; 'all' = explicit whole-host access. WITHOUT this flag NOTHING is exposed (fail-closed; a manifest's per-buddy 'expose' overrides it)"),
+		wireguard:         fs.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y), direct or over a relay; -L/-forward/--vip-listen are not needed on this path (and are ignored)."),
+		showVersion:       fs.Bool("version", false, "print version and exit"),
+	}
+}
+
 func main() {
 	log.SetFlags(log.Ltime)
 
-	roleFlag := flag.String("role", "", "node role: buddy | relay | handshake (required; never auto-detected)")
-	keyPath := flag.String("key", "", "path to this node's Ed25519 identity key (created if missing; empty = ephemeral)")
-	listen := flag.String("listen", "", fmt.Sprintf("UDP address to listen on (handshake default %s, relay default %s)", protocol.DefaultHandshakeAddr, protocol.DefaultRelayAddr))
-	relayListenFlag := flag.String("relay-listen", "", fmt.Sprintf("relay: UDP address for the relay when combined with another role on one node (default %s)", protocol.DefaultRelayAddr))
-	allowCIDR := flag.String("allow-cidr", "", "relay/handshake: comma-separated CIDRs allowed to reach the server role(s); a disallowed source is refused before it can occupy a connection slot, and on the relay before any crypto. On the HANDSHAKE server empty means open to all; on the RELAY it is one of the two authorization policies (the other is --server-key) and the relay refuses to start with neither — 0.0.0.0/0 and ::/0 are refused, an open relay is not a supported configuration")
-	relayMaxSessions := flag.Int("relay-max-sessions", 0, "relay: max concurrent sessions (abuse ceiling; 0 = default 4096). Lower it for a small private relay")
-	relayMaxLegsPerIP := flag.Int("relay-max-legs-per-ip", 0, "relay: max legs one source may hold (anti-hoarding; 0 = default 64). A source is one IPv4 address or one IPv6 /64 — every address in a /64 is free to mint, so they share this budget. Lower it for a small private relay")
-	ttl := flag.Duration("ttl", 0, "liveness/idle window for server-side state (handshake 10s, relay 60s default)")
-	authorized := flag.String("authorized", "", "handshake: client allowlist file (approval mode); also used by the approve/list/revoke subcommands")
-	relayEndpoint := flag.String("relay-endpoint", "", "handshake: advertise this relay host:port to paired buddies as a fallback (set when the VPS also runs --role=relay)")
-	relayID := flag.String("relay-id", "", "handshake/relay: the relay's id, the SAME value on both (mint one with `buddynet gen-relay-id`). On the handshake server it turns on relay tickets — every paired buddy is issued a short-lived signed permit for that relay; on the relay it names which tickets to accept")
-	debug := flag.Bool("debug", false, "handshake/relay: verbose logging of parked/dropped packets; on the relay it also puts SOURCE ADDRESSES in ticket-rejection lines, which a shipped relay deliberately does not log (not for production)")
-
-	server := flag.String("server", "", "buddy: handshake server host:port [required]")
-	serverKey := flag.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]. RELAY: the handshake server whose relay tickets this relay accepts — pass two comma-separated keys during a server key rotation")
-	peerKey := flag.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest). Must agree with the key stored from a previous pairing: a pin that contradicts it refuses to connect (revoke the old buddy with \"peers remove <key>\", then pair again)")
-	knownPeers := flag.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)")
-	lab := flag.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1.")
-	code := flag.String("code", "", "buddy: enrollment code for an allowlist handshake server")
-	peersPath := flag.String("peers", role.DefaultPeersPath(), "buddy: offline peer cache (peers.json) used when the handshake server is unreachable")
-	peersFile := flag.String("peers-file", "", "buddy: MultiPeer manifest (YAML: buddies with key/token/name/expose per entry; legacy line format still read — run `peers migrate`); maintains a tunnel to every listed buddy at once (Model A, each pinned). Use --vip-listen to route to them. Mutually exclusive with --invite/--join/--lazy")
-	localListen := flag.String("L", "", "buddy: local address to expose (TCP host:port or unix:/path); connections are forwarded to the peer")
-	vipListen := flag.String("vip-listen", "", "buddy: port for per-buddy virtual-IP routing; binds each connected buddy's VIP (10.66.X.Y) on lo and forwards <name>.buddy:port to that buddy's tunnel. Scales to many buddies (unlike -L); needs NET_ADMIN/root, degrades gracefully if missing")
-	forward := flag.String("forward", "", "buddy: local service to forward incoming peer streams to (TCP host:port or unix:/path)")
-	punchDur := flag.Duration("punch", 2*time.Second, "buddy: how long to hole-punch before bringing up QUIC")
-	idleTimeout := flag.Duration("idle-timeout", 60*time.Second, "buddy: tear down the tunnel after this long with no traffic at all")
-	reauthInterval := flag.Duration("reauth-interval", 0, "buddy: periodically rebuild the tunnel so a revocation/token rotation takes effect within this long (0 = off; a direct tunnel cannot be cancelled centrally). May interrupt long transfers.")
-	noInteractive := flag.Bool("no-interactive", false, "buddy: never prompt for first-contact SAS confirmation; refuse to learn a NEW buddy key (pin it with --peer-key instead). For daemons/Unraid.")
-	sasTimeout := flag.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)")
-	inviteTimeout := flag.Duration("invite-timeout", 15*time.Minute, "buddy: give up the first pairing (--invite/--join) after this long; the invite token is one-time")
-	status := flag.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)")
-	invite := flag.Bool("invite", false, "buddy: mint a ONE-TIME invite (valid until first pairing, see --invite-timeout), print it, and wait. The invite carries this node's public key, so your buddy pins YOUR identity from it — hand it over on a channel you trust. Afterwards reconnects use a stored session secret")
-	join := flag.String("join", "", "buddy: join with the one-time invite your buddy gave you. A key-bearing invite pins them automatically (no code to compare on this side); a bare token falls back to first-contact verification. On success a session secret is stored for reconnects")
-	name := flag.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars")
-	dnsFlag := flag.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)")
-	lazyFlag := flag.Bool("lazy", false, "buddy: bind the -L listener immediately but defer the QUIC tunnel until the first connection arrives (requires -L)")
-	expose := flag.String("expose", "", "buddy (--wireguard): port(s) the partner may reach on THIS host over the tunnel, e.g. 873 or 873,8080 or tcp/873,udp/51820; 'all' = explicit whole-host access. WITHOUT this flag NOTHING is exposed (fail-closed; a manifest's per-buddy 'expose' overrides it)")
-	wireguard := flag.Bool("wireguard", false, "buddy: use the kernel WireGuard data plane (bnet0) for the peer tunnel instead of QUIC — needs Linux + NET_ADMIN + the wireguard module; set on BOTH buddies. Partner reachable natively at its VIP (10.66.X.Y), direct or over a relay; -L/-forward/--vip-listen are not needed on this path (and are ignored).")
-
-	showVersion := flag.Bool("version", false, "print version and exit")
+	f := registerFlags(flag.CommandLine)
 	flag.Usage = usage
 	flag.Parse()
 
 	switch {
-	case *showVersion || flag.Arg(0) == "version":
+	case *f.showVersion || flag.Arg(0) == "version":
 		fmt.Printf("%s %s\n", appName, appVersion())
 		return
 	case flag.Arg(0) == "help":
@@ -153,48 +208,48 @@ func main() {
 		genRelayID()
 		return
 	case flag.Arg(0) == "identity":
-		printIdentity(*keyPath)
+		printIdentity(*f.keyPath)
 		return
 	case flag.Arg(0) == "init":
-		initIdentity(*keyPath)
+		initIdentity(*f.keyPath)
 		return
 	}
 	// Handshake allowlist admin subcommands operate on --authorized and exit.
 	if cmd := flag.Arg(0); cmd == "approve" || cmd == "allowclient" || cmd == "list" || cmd == "revoke" {
-		os.Exit(runAuthCmd(*authorized, cmd, flag.Args()[1:]))
+		os.Exit(runAuthCmd(*f.authorized, cmd, flag.Args()[1:]))
 	}
 	// `peers` subcommands let a node curate its OWN buddy manifest (--peers-file,
 	// + --known-peers for revocation) and exit: `peers <list|add|remove> [args]`.
 	// Self-management only — there is no admin authority over other nodes.
 	if flag.Arg(0) == "peers" {
-		os.Exit(runPeersCmd(*peersFile, *knownPeers, *peersPath, flag.Args()[1:]))
+		os.Exit(runPeersCmd(*f.peersFile, *f.knownPeers, *f.peersPath, flag.Args()[1:]))
 	}
 
 	// Env fallbacks (handy for systemd; keeps the secret token out of argv/ps).
-	*roleFlag = orEnv(*roleFlag, "BUDDYNET_ROLE")
-	*server = orEnv(*server, "BUDDYNET_SERVER")
-	*serverKey = orEnv(*serverKey, "BUDDYNET_SERVER_KEY")
-	*peerKey = orEnv(*peerKey, "BUDDYNET_PEER_KEY")
-	*knownPeers = orEnv(*knownPeers, "BUDDYNET_KNOWN_PEERS")
-	*code = orEnv(*code, "BUDDYNET_CODE")
+	*f.roleFlag = orEnv(*f.roleFlag, "BUDDYNET_ROLE")
+	*f.server = orEnv(*f.server, "BUDDYNET_SERVER")
+	*f.serverKey = orEnv(*f.serverKey, "BUDDYNET_SERVER_KEY")
+	*f.peerKey = orEnv(*f.peerKey, "BUDDYNET_PEER_KEY")
+	*f.knownPeers = orEnv(*f.knownPeers, "BUDDYNET_KNOWN_PEERS")
+	*f.code = orEnv(*f.code, "BUDDYNET_CODE")
 	// The invite token is a bearer secret, so it needs a way out of argv/ps. That
 	// used to be BUDDYNET_TOKEN for the removed --token; --join inherits the role.
-	*join = orEnv(*join, "BUDDYNET_JOIN")
-	*name = orEnv(*name, "BUDDYNET_NAME")
-	if !*dnsFlag {
+	*f.join = orEnv(*f.join, "BUDDYNET_JOIN")
+	*f.name = orEnv(*f.name, "BUDDYNET_NAME")
+	if !*f.dnsFlag {
 		if v := os.Getenv("BUDDYNET_DNS"); v == "1" || v == "true" {
-			*dnsFlag = true
+			*f.dnsFlag = true
 		}
 	}
-	if !*lazyFlag {
+	if !*f.lazyFlag {
 		if v := os.Getenv("BUDDYNET_LAZY"); v == "1" || v == "true" {
-			*lazyFlag = true
+			*f.lazyFlag = true
 		}
 	}
 
 	// A node may run several roles at once, comma-separated (e.g. on a VPS:
 	// --role=handshake,relay). Each runs concurrently on its own port.
-	roles, rerr := parseRoles(*roleFlag)
+	roles, rerr := parseRoles(*f.roleFlag)
 	if rerr != nil {
 		fmt.Fprintln(os.Stderr, "error:", rerr)
 		usage()
@@ -229,37 +284,37 @@ func main() {
 	// for the inviter to type. See role.BuddyConfig.SASShow.
 	sasShow := false
 	if hasBuddy {
-		if *join != "" {
-			tok, pin, show, jerr := resolveJoin(*join, *peerKey)
+		if *f.join != "" {
+			tok, pin, show, jerr := resolveJoin(*f.join, *f.peerKey)
 			if jerr != nil {
 				fmt.Fprintf(os.Stderr, "error: %v\n", jerr)
 				os.Exit(2)
 			}
-			token, *peerKey, sasShow = tok, pin, show
+			token, *f.peerKey, sasShow = tok, pin, show
 			ephemeral = true
 		}
-		if *invite {
+		if *f.invite {
 			token = mintInviteToken()
 			ephemeral = true
 		}
 	}
 	bArgs := buddyArgs{
-		server: *server, serverKey: *serverKey, token: token, peerKey: *peerKey,
-		knownPeers: *knownPeers, lab: *lab, code: *code, keyPath: *keyPath,
-		peersPath: *peersPath, peersFile: *peersFile, localListen: *localListen, forward: *forward, vipListen: *vipListen,
-		punchDur: *punchDur, idleTimeout: *idleTimeout, status: *status,
+		server: *f.server, serverKey: *f.serverKey, token: token, peerKey: *f.peerKey,
+		knownPeers: *f.knownPeers, lab: *f.lab, code: *f.code, keyPath: *f.keyPath,
+		peersPath: *f.peersPath, peersFile: *f.peersFile, localListen: *f.localListen, forward: *f.forward, vipListen: *f.vipListen,
+		punchDur: *f.punchDur, idleTimeout: *f.idleTimeout, status: *f.status,
 		// Interactive only when not explicitly disabled AND a human is at the
 		// terminal; otherwise an unknown buddy key is refused, never learned blind.
-		interactive: !*noInteractive && secret.Interactive(), sasTimeout: *sasTimeout,
-		ephemeral: ephemeral, inviteTimeout: *inviteTimeout,
-		inviting: *invite, sasShow: sasShow,
-		reauthInterval: *reauthInterval,
-		name:           *name, dns: *dnsFlag, lazy: *lazyFlag, wireguard: *wireguard,
-		expose: *expose,
+		interactive: !*f.noInteractive && secret.Interactive(), sasTimeout: *f.sasTimeout,
+		ephemeral: ephemeral, inviteTimeout: *f.inviteTimeout,
+		inviting: *f.invite, sasShow: sasShow,
+		reauthInterval: *f.reauthInterval,
+		name:           *f.name, dns: *f.dnsFlag, lazy: *f.lazyFlag, wireguard: *f.wireguard,
+		expose: *f.expose,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
-	if *status {
+	if *f.status {
 		if len(roles) != 1 || !hasBuddy {
 			fmt.Fprintln(os.Stderr, "error: --status is only valid with --role=buddy alone")
 			os.Exit(2)
@@ -274,7 +329,7 @@ func main() {
 	}
 
 	// Parse the optional relay allowlist up front so a bad CIDR fails fast.
-	allowedCIDRs, cerr := parseCIDRs(*allowCIDR)
+	allowedCIDRs, cerr := parseCIDRs(*f.allowCIDR)
 	if cerr != nil {
 		fmt.Fprintln(os.Stderr, "error:", cerr)
 		os.Exit(2)
@@ -285,7 +340,7 @@ func main() {
 	// socket is opened.
 	var relayServerKeys []ed25519.PublicKey
 	if hasRole(roles, protocol.RoleRelay) {
-		relayServerKeys, cerr = relayKeys(roles, *serverKey, *keyPath)
+		relayServerKeys, cerr = relayKeys(roles, *f.serverKey, *f.keyPath)
 		if cerr != nil {
 			fmt.Fprintln(os.Stderr, "error:", cerr)
 			os.Exit(2)
@@ -309,19 +364,19 @@ func main() {
 			switch r {
 			case protocol.RoleHandshake:
 				fail("handshake", role.Handshake(ctx, role.HandshakeConfig{
-					Listen: orDefault(*listen, protocol.DefaultHandshakeAddr), KeyPath: *keyPath,
-					Authorized: *authorized, TTL: *ttl, Debug: *debug, RelayEndpoint: *relayEndpoint,
-					RelayID: *relayID, AllowCIDRs: allowedCIDRs,
+					Listen: orDefault(*f.listen, protocol.DefaultHandshakeAddr), KeyPath: *f.keyPath,
+					Authorized: *f.authorized, TTL: *f.ttl, Debug: *f.debug, RelayEndpoint: *f.relayEndpoint,
+					RelayID: *f.relayID, AllowCIDRs: allowedCIDRs,
 				}))
 			case protocol.RoleRelay:
 				fail("relay", role.Relay(ctx, role.RelayConfig{
-					Listen: relayListen(*relayListenFlag, *listen, roles), TTL: *ttl,
+					Listen: relayListen(*f.relayListenFlag, *f.listen, roles), TTL: *f.ttl,
 					ServerKeys:   relayServerKeys,
-					RelayID:      *relayID,
+					RelayID:      *f.relayID,
 					AllowCIDRs:   allowedCIDRs,
-					MaxSessions:  *relayMaxSessions,
-					MaxLegsPerIP: *relayMaxLegsPerIP,
-					Debug:        *debug,
+					MaxSessions:  *f.relayMaxSessions,
+					MaxLegsPerIP: *f.relayMaxLegsPerIP,
+					Debug:        *f.debug,
 				}))
 			case protocol.RoleBuddy:
 				fail("buddy", role.Buddy(ctx, bArgs.config()))
@@ -980,12 +1035,11 @@ SECURITY — please read
     stored session secret, so it never has to be kept around.
 
 TRANSPORT
-  The handshake control plane is encrypted with QUIC/TLS 1.3 BY DEFAULT: the
-  pairing token never travels in cleartext, source addresses are validated by the
-  QUIC handshake (the server is never a reflector), and with --authorized the
-  server pins clients to the allowlist at the TLS handshake. Pass
-  --quic-handshake=false (or BUDDYNET_QUIC=0) on the server AND every buddy for the
-  legacy plain-UDP control plane (token in cleartext; cookie-validated sources).
+  The handshake control plane is encrypted with QUIC/TLS 1.3 — ALWAYS, since v8:
+  the pairing token never travels in cleartext, source addresses are validated by
+  the QUIC handshake (the server is never a reflector), and with --authorized the
+  server pins clients to the allowlist at the TLS handshake. There is no plain-UDP
+  control plane left to select, and therefore no flag to select it with.
 
 FLAGS
 `, appName, appVersion())

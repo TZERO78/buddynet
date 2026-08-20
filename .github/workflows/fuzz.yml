@@ -1,7 +1,7 @@
 name: fuzz
 
 # Continuous fuzzing of the untrusted-input parsers. The repo ships Fuzz* targets
-# (REGISTER / relay bind+challenge / sealed-code / pubkey decode) but a one-shot
+# (REGISTER / relay bind+challenge / sealed-code / pubkey decode / relay ticket) but a one-shot
 # `go test` only runs their seed corpus; this job actually fuzzes them on a
 # nightly schedule (and on demand), so a crashing input is found over time rather
 # than never. Findings are uploaded as an artifact for triage.
@@ -25,6 +25,10 @@ jobs:
           - { pkg: ./internal/relay, target: FuzzParseChallenge }
           - { pkg: ./internal/crypto, target: FuzzOpenCode }
           - { pkg: ./internal/crypto, target: FuzzDecodePubKey }
+          # The relay's ticket verifier: reachable from the internet on every
+          # bind, and the last shipped Fuzz* pair that was not run nightly.
+          - { pkg: ./internal/ticket, target: FuzzParse }
+          - { pkg: ./internal/ticket, target: FuzzVerify }
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0

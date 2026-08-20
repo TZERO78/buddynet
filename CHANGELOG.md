@@ -88,6 +88,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated YAML, which reads as "no buddies". It now goes through the same
   atomic rename as everything else.
 
+### Fixed — an interrupted `flock` no longer looks like a refused lock
+
+- The advisory file lock waited with a single `flock(LOCK_EX)` and reported any
+  error as "cannot lock". That wait sits in the kernel, and the Go runtime's
+  asynchronous preemption delivers `SIGURG` to running threads, so under load an
+  unrelated preemption can return `EINTR` — which, with the deliberate
+  fail-closed policy, turns a scheduling event into a refused write. It showed up
+  as one flaky refusal in the trust-state tests under full-suite load once every
+  writer of `known_peers` started going through this lock (it was not reproduced
+  in repeated runs afterwards; `EINTR` is the only mechanism that fits, and
+  retrying it is correct regardless). The wait is now retried on `EINTR`.
+
+### Fixed — the shipped public-handshake systemd unit could not start
+
+- **`deployments/systemd/buddynet-public-handshake.service` passed
+  `--quic-handshake`**, which protocol v8 removed. The binary exits 2 on an
+  unknown flag, so the service failed on every start for a full release, and
+  nothing in CI ever looked at a shipped file. The flag is gone from the unit.
+
+  Two texts recommended the same removed flag — one of them inside a *security*
+  warning printed when approval mode is off, which is the worst place to send an
+  operator after a flag that makes the binary refuse to start. Both now say what
+  is true: the control plane is QUIC/TLS 1.3 unconditionally since v8, so there
+  is nothing to select and no flag to select it with. (A leftover half-sentence
+  in the README from the same removal is fixed too.)
+
+- **New gate: flag drift.** Both binaries now register their flags in one
+  `registerFlags(fs *flag.FlagSet)`, and a test enumerates them through a
+  throwaway `FlagSet` — asking the flag package itself rather than pattern-
+  matching `main.go`, because a pattern is a second definition that can drift
+  from the first. It scans the *active* artifacts only (systemd units, the
+  compose file, the Unraid plugin, the lab scripts) by explicit list: the
+  CHANGELOG and `docs/plans/` are supposed to name removed flags, and a gate with
+  false alarms gets switched off. It ignores comments, and it resolves `$BIN`
+  per file, so a lab script pointing that name at another tool is not charged to
+  buddynet. A positive control plants a removed flag in a temporary artifact and
+  requires the scan to report it — a gate that silently matches nothing looks
+  exactly like a clean run.
+
+  CI additionally runs `systemd-analyze verify` over the units, with the binaries
+  installed first so `ExecStart` resolves. To be honest about it: that validates
+  the *unit*, not whether the binary accepts the flags, and it would **not** have
+  caught this finding. The flag-drift test is the gate; `systemd-analyze` is the
+  complement. `systemd-analyze security` runs informational only — its score
+  moves with the systemd version.
+
+### Fixed — `docker compose up relay` pulled an old release
+
+- The compose file had `build:` on the handshake service and a
+  `ghcr.io/tzero78/buddynet:v5.0.0` tag on **both**. `up --build` built locally
+  and tagged the result v5.0.0, but starting the relay on its own **pulled**
+  v5.0.0 from the registry — a different, older binary than the rest of the
+  deployment, silently. Both services now build from this checkout and carry a
+  local tag; nothing is pulled. The file documents the release-deployment
+  variant explicitly: no `build:` at all, both services pinned to the same
+  immutable **digest** — never a floating tag, and never a digest next to a
+  `build:`.
+
+### Added — the relay ticket verifier is fuzzed nightly
+
+- `internal/ticket`'s `FuzzParse` and `FuzzVerify` were shipped but missing from
+  the nightly fuzz matrix — the one parser that is permanently reachable from the
+  internet on every relay bind. Both are in it now.
+
+### Removed — dead code and comments that described a vanished world
+
+- `clonePending` and the `authorizer.writeMu` field have been unreachable since
+  the stateless-server rewrite (v5.0.0): there is no pending file to snapshot or
+  serialise any more. `go vet` does not see unused unexported functions or
+  fields, so they sat there. The CI comment listing gosec exclusions named two
+  rules (`G123`, `G703`) that the command has not excluded for some time — the
+  comment was *stricter*-wrong than reality, but wrong.
+
 ### Fixed (Testing) — the pentest probe was authorizing nothing on the relay
 
 - **Two relay scenes reported PASS without a single leg ever being admitted.**
