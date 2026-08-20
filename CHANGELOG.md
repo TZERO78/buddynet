@@ -41,6 +41,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions and no manifest the buddy now logs a `WARNING` instead of pretending
   the flag applies.
 
+### Fixed (Security) — a revoked buddy stays revoked
+
+- **`peers remove` could be undone by the buddy process that was still running,
+  and the undo survived the `SIGHUP` the command told you to send.** The removal
+  dropped the manifest line and the stored session, and both files were correct
+  immediately afterwards — but the running worker still held the bootstrap token
+  in memory from when it started. With the session gone it fell back to that
+  token, re-paired, and wrote the session line back; since the worker set is the
+  manifest UNION the stored sessions, the `SIGHUP` restarted the buddy as a
+  session-only peer. The revocation was gone, and it stayed gone across restarts.
+
+  Revocation is now a **permanent local list of keys** (`<known_peers>.revoked`,
+  `0600`, atomically written). The presence of a key IS the revocation: no
+  expiry, no garbage collection — a tombstone that ages out is precisely when the
+  zombie comes back. It is enforced at every door: the reconnect attempt (the
+  worker stops with `peer-stopped … buddy revoked`), `saveSession` (no session
+  can be stored for a revoked key), `learnPeer` (no trust-on-first-use), the
+  trust decision itself, and the worker set assembled on `SIGHUP`.
+
+  `peers remove` also stopped reading the bootstrap token from the copy frozen at
+  worker start — it re-reads the manifest each round, so a removed entry takes
+  effect immediately rather than at the next restart.
+
+- **Lifting a revocation is now possible, and explicit.** `peers allow <key>`
+  lifts one (no manifest needed — the single-buddy setup the Unraid plugin runs),
+  and `peers add` on a revoked buddy lifts it instead of reporting
+  `already listed`, which is what used to leave a buddy silently locked out with
+  no way back. Pair again with a **new** invite: the old session secret is gone.
+  `peers list` shows revoked buddies with status `REVOKED`.
+
+- **The whole local trust state is written under one lock, in a fixed order.**
+  Manifest, session lines, TOFU lines and revocations are one state, not four.
+  Revoking writes tombstone → session → manifest; allowing runs the other way,
+  so a crash between any two steps leaves the *safe* side (refused) rather than
+  "no longer configured but still allowed back".
+
+- **`learnPeer` took no lock at all (A-02).** Every other writer of `known_peers`
+  does a locked read-modify-write; this one was a bare `O_APPEND`, so a
+  trust-on-first-use line written inside another writer's window was lost when
+  that writer renamed its snapshot into place. It now takes the same lock and
+  writes the same atomic way.
+
+- **The peers manifest was written with a plain `os.WriteFile` (A-12)** — neither
+  atomic nor locked, the one trust file left out. A crash mid-write left a
+  truncated YAML, which reads as "no buddies". It now goes through the same
+  atomic rename as everything else.
+
+### Changed — Unraid plugin: "Forget buddy" is a real revocation now
+
+- The button used to wipe `known_peers` and restart the service. That was never a
+  revocation: the buddy key and the invite live in `buddynet.cfg` on the flash,
+  untouched by the wipe, so the same buddy re-paired within seconds — and the
+  dialog claimed the key would be "re-learned on the next connect
+  (trust-on-first-use)", which cannot happen at all in the plugin (it always runs
+  `--no-interactive`, where an unknown key is refused, never learned).
+
+  It now runs `peers remove` for the configured buddy — tombstone plus session —
+  and leaves the service stopped, because the node has no buddy any more. A new
+  **Allow buddy again** button lifts the revocation and starts the service; it
+  refuses unless a key *and* an invite are configured, so the revocation is never
+  lifted before there is something new to pin. `reset identity` and uninstall
+  still delete everything, revocation list included — there the identity is gone,
+  so there is nothing left for a tombstone to protect.
+
 ### Fixed (Docs)
 
 - `SECURITY.md` §8.2 claimed that *removing* the `--peer-key` pin revokes a

@@ -64,7 +64,8 @@ func TestAuditLearnPeerIgnoresTheStoreLock(t *testing.T) {
 			t.Fatalf("learnPeer errored for an unrelated reason: %v", lerr)
 		}
 	case <-time.After(3 * time.Second):
-		t.Skip("learnPeer blocked on the store lock — A-02 appears fixed")
+		t.Log("A-02 fixed: learnPeer waits for the store lock, like every other writer of this file")
+		return
 	}
 
 	data, rerr := os.ReadFile(store)

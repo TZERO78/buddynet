@@ -11,6 +11,7 @@ import (
 	"log"
 	"net"
 	"net/netip"
+	"path/filepath"
 	"sync/atomic"
 	"time"
 
@@ -305,6 +306,15 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 	// (bootstrap or reconnect), plus any previously paired peers. A single -L port
 	// cannot route to N buddies, so >1 buddy needs --vip-listen instead.
 	if cfg.PeersFile != "" {
+		// One designated trust-state lock covers manifest, sessions and revocations,
+		// and it is derived from --known-peers. That is deadlock-free but puts the
+		// lock file in an unexpected place if the two live in different directories,
+		// so say so rather than letting an operator discover it.
+		if cfg.KnownPeers != "" && filepath.Dir(cfg.KnownPeers) != filepath.Dir(cfg.PeersFile) {
+			log.Printf("NOTE: --peers-file and --known-peers are in different directories; "+
+				"the trust-state lock and the revocation list live next to %s (%s.lock, %s)",
+				cfg.KnownPeers, cfg.KnownPeers, revokedPath(cfg.KnownPeers))
+		}
 		specs, serr := assemblePeers(cfg)
 		if serr != nil {
 			return serr
@@ -417,9 +427,27 @@ func nextAttempt(cfg BuddyConfig) (attempt, error) {
 			return attempt{}, fmt.Errorf("bad --peer-key: %w", perr)
 		}
 	}
+	// A revoked buddy is refused at EVERY attempt, before its stored secret or a
+	// bootstrap token is used for anything (see peerSource for the same check on
+	// the multi-peer path).
+	base := trustBase(cfg.KnownPeers, cfg.PeersFile)
+	if cfgPin != nil {
+		keyB64 := bcrypto.PubKeyB64(cfgPin)
+		if revoked, rerr := isRevoked(base, keyB64); rerr != nil {
+			return attempt{}, rerr
+		} else if revoked {
+			return attempt{}, fmt.Errorf("buddy %s: %w (lift it with: peers allow %s)", keyTag(keyB64), errPeerRevoked, keyB64)
+		}
+	}
 	if pin, secret, ok, err := loadSession(cfg.KnownPeers); err != nil {
 		return attempt{}, fmt.Errorf("session store %s: %w", cfg.KnownPeers, err)
 	} else if ok {
+		keyB64 := bcrypto.PubKeyB64(pin)
+		if revoked, rerr := isRevoked(base, keyB64); rerr != nil {
+			return attempt{}, rerr
+		} else if revoked {
+			return attempt{}, fmt.Errorf("buddy %s: %w (lift it with: peers allow %s)", keyTag(keyB64), errPeerRevoked, keyB64)
+		}
 		// Both pins are LOCAL: the stored one from the session store, the
 		// configured one from --peer-key. If they disagree the outcome is already
 		// decided, so stop before buddyRun registers — a REGISTER would hand this

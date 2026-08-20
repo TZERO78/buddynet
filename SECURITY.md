@@ -711,11 +711,22 @@ hub-and-spoke VPN. What actually revokes access:
   a **new invite**. That, and not the flag alone, is the complete revocation.
 - **Token rotation.** Re-invite (`--invite`) to mint a fresh token and retire the
   old session secret; the old credential stops working for new connects.
-- **`peers remove <key>` (MultiPeer).** Removing one drops **both** its manifest
-  line and its stored session secret, so it can no longer re-pair. This is a
-  purely local, self-sovereign decision: it revokes that buddy from *your* node
-  only and never affects your other buddies. A running daemon applies it on
-  `SIGHUP` (or restart).
+- **`peers remove <key>` — the complete one.** It records the key on a permanent
+  local revocation list (`<known_peers>.revoked`) **and** drops the stored session
+  secret **and** the manifest line, in that order under one lock. The list is what
+  makes it stick: a still-running buddy used to re-pair on the bootstrap token it
+  held in memory and write its session straight back, so the `SIGHUP` meant to
+  apply the revocation restarted it instead. Now the key is refused at every
+  door — the next reconnect attempt stops that worker, no session can be stored
+  for it, it cannot be learned trust-on-first-use, and a `SIGHUP` will not
+  re-assemble it. This is a purely local, self-sovereign decision: it revokes that
+  buddy from *your* node only and never affects your other buddies. It works with
+  or without a manifest.
+
+  Lift it deliberately with `peers allow <key>` (or by adding the buddy back with
+  `peers add`), and only together with a **new invite** — the old session secret
+  is gone. Nothing expires the list on its own: a tombstone that ages out is
+  exactly when the zombie comes back.
 
 To **bound** how long an established tunnel can outlive a revocation, run the buddy
 with **`--reauth-interval`** (off by default). It rebuilds the tunnel on that

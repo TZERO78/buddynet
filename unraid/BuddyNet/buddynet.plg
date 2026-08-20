@@ -261,7 +261,9 @@ manifest, one node can hold many at once (MultiPeer).
   - Binary verified against a pinned SHA256 on every install.
   - Secrets kept off the FAT flash: token file and the identity key + trust
     store + peer cache live on /mnt/user/appdata/buddynet/ (real 0600).
-  - Danger zone: reset identity / forget buddy (shred where supported).
+  - Danger zone: forget buddy = real revocation (the key goes on the revocation
+    list, so it cannot re-pair with the saved invite), allow buddy again, reset
+    identity (shred where supported).
   - Clean uninstall removes config, identity, trust store and peer cache.
 
 > **Maintainer note:** before publishing, set BINVER/BINURL/BINSHA in the
@@ -494,10 +496,16 @@ _(On Unraid use the Unassigned Devices plugin — Add Remote SMB Share. Prefer a
 ####Danger zone
 <div style="display:flex;gap:1em;flex-wrap:wrap;margin-top:.5em">
 <form method="POST" action="/update.php" target="progressFrame" style="margin:0"
-      onsubmit="return confirm('Delete the trust store (known_peers)? The buddy key will be re-learned on the next connect (trust-on-first-use).');">
+      onsubmit="return confirm('Revoke this buddy? Its key goes on the revocation list and the stored session is deleted, so it CANNOT reconnect — not even with the invite and key still saved here. The service stops. To pair again you need a NEW invite plus the buddy key, and then \'Allow buddy again\'. There is no trust-on-first-use here: this node runs headless.');">
   <input type="hidden" name="#command" value="/etc/rc.d/rc.buddynet">
   <input type="hidden" name="#arg[1]" value="forget-buddy">
-  <input type="submit" value="Forget buddy (clear known_peers)">
+  <input type="submit" value="Forget buddy (revoke)">
+</form>
+<form method="POST" action="/update.php" target="progressFrame" style="margin:0"
+      onsubmit="return confirm('Allow this buddy again? Do this only AFTER a new invite and the buddy key are saved above — it lifts the revocation and starts the service.');">
+  <input type="hidden" name="#command" value="/etc/rc.d/rc.buddynet">
+  <input type="hidden" name="#arg[1]" value="allow-buddy">
+  <input type="submit" value="Allow buddy again">
 </form>
 <form method="POST" action="/update.php" target="progressFrame" style="margin:0"
       onsubmit="return confirm('Really delete this node identity AND trust store? A NEW identity (and virtual IP) is generated on restart, so your buddy MUST re-pin your new Buddy key. This cannot be undone.');">
@@ -650,8 +658,57 @@ start() {
 stop() { is_running && kill "$(cat "$PIDFILE")" 2>/dev/null; rm -f "$PIDFILE"; echo "stopped"; }
 # really delete a file: shred if available (best effort on SSD/CoW), else rm
 wipe() { [ -f "$1" ] && { shred -u "$1" 2>/dev/null || rm -f "$1"; }; }
-forget_buddy()   { wipe "$STATE/known_peers"; echo "trust store cleared"; stop; sleep 1; start; }
-reset_identity() { stop; wipe "$STATE/id.key"; wipe "$STATE/known_peers"; echo "identity + trust store deleted"; sleep 1; start; }
+# The buddy this node is paired with: the pinned key from the cfg, else the key
+# on the stored session line (field 2 of a 3-field line in known_peers).
+buddy_key() {
+  local k="$PEER_KEY"
+  if [ -z "$k" ] && [ -r "$STATE/known_peers" ]; then
+    k="$(awk 'NF>=3 {print $2; exit}' "$STATE/known_peers")"
+  fi
+  printf '%s' "$k"
+}
+# The invite currently configured (file wins over the flash cfg, as in start()).
+invite_token() {
+  local t="$TOKEN"
+  if [ -n "$TOKEN_FILE" ] && [ -s "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ]; then
+    local ft; ft="$(trim "$(tr -d '\r\n' < "$TOKEN_FILE")")"
+    [ -n "$ft" ] && t="$ft"
+  fi
+  printf '%s' "$t"
+}
+# Forget buddy = REVOKE. Wiping known_peers was never a revocation: PEER_KEY and
+# the invite live in buddynet.cfg on the flash, untouched by the wipe, so the
+# service came straight back up with the same pin and the same token and the same
+# buddy re-paired within seconds. `peers remove` records the key on the
+# revocation list, which the daemon refuses at every attempt, and drops the
+# stored session — and the service stays STOPPED, because this node now has no
+# buddy to connect to.
+forget_buddy() {
+  local k; k="$(buddy_key)"
+  stop
+  if [ -n "$k" ] && [ -x "$BIN" ]; then
+    "$BIN" --known-peers "$STATE/known_peers" peers remove "$k" || echo "revoke failed — check $LOG"
+  else
+    wipe "$STATE/known_peers"
+    echo "no buddy key found (nothing paired yet) — trust store cleared"
+  fi
+  echo "the service stays stopped: this node has no buddy now."
+  echo "to pair again: paste a NEW invite and the buddy key, then press \"Allow buddy again\"."
+}
+# The deliberate counterpart. It refuses unless a key AND an invite are
+# configured, so the revocation is never lifted before there is something new to
+# pin — the window between "allowed again" and "pinned again" stays shut.
+allow_buddy() {
+  local k t; k="$(buddy_key)"; t="$(invite_token)"
+  [ -n "$k" ] || { echo "no Buddy key configured — paste your buddy's key first"; return 1; }
+  [ -n "$t" ] || { echo "no invite configured — paste the NEW invite first (an old one will not pair)"; return 1; }
+  [ -x "$BIN" ] || { echo "binary missing"; return 1; }
+  "$BIN" --known-peers "$STATE/known_peers" peers allow "$k" || return 1
+  stop; sleep 1; start
+}
+# reset_identity may delete everything, revocation list included: the identity is
+# gone, so there is nothing left for a tombstone to protect.
+reset_identity() { stop; wipe "$STATE/id.key"; wipe "$STATE/known_peers"; wipe "$STATE/known_peers.revoked"; echo "identity + trust store deleted"; sleep 1; start; }
 # rate: connection counts + throughput (bytes/sec) per direction, measured on the
 # loopback forwarded sockets (-L listener = "out" path, -forward target = "in").
 rate() {
@@ -675,8 +732,9 @@ case "$1" in
   status)        is_running && echo running || echo stopped ;;
   rate)          rate ;;
   forget-buddy)  forget_buddy ;;
+  allow-buddy)   allow_buddy ;;
   reset-identity) reset_identity ;;
-  *)             echo "usage: $0 {start|stop|restart|status|rate|forget-buddy|reset-identity}" ;;
+  *)             echo "usage: $0 {start|stop|restart|status|rate|forget-buddy|allow-buddy|reset-identity}" ;;
 esac
 ]]>
 </INLINE>
@@ -1059,7 +1117,9 @@ rm -f /usr/local/emhttp/languages/*/buddynet.txt /usr/local/emhttp/languages/*/b
 rm -rf /boot/config/plugins/buddynet
 # ...and the identity key + trust store + peer cache from the array (leave a
 # user-placed token file and the appdata dir itself alone). Array may be down here.
-rm -f /mnt/user/appdata/buddynet/id.key /mnt/user/appdata/buddynet/known_peers /mnt/user/appdata/buddynet/peers.json 2>/dev/null || true
+rm -f /mnt/user/appdata/buddynet/id.key /mnt/user/appdata/buddynet/known_peers \
+      /mnt/user/appdata/buddynet/known_peers.revoked /mnt/user/appdata/buddynet/known_peers.lock \
+      /mnt/user/appdata/buddynet/peers.json 2>/dev/null || true
 echo "BuddyNet removed. Config (flash) and identity/trust/cache (appdata) deleted."
 ]]>
 </INLINE>

@@ -53,16 +53,17 @@ func TestAuditRevokedPeerResurrectsViaStaleToken(t *testing.T) {
 
 	// Two buddies in the manifest, each with a bootstrap token (the ordinary
 	// `peers add <key> <token>` shape).
+	tokens := map[string]string{victim: "boot-victim", keep: "boot-keep"}
 	for _, k := range []string{victim, keep} {
-		if err := PeersAdd(manifest, k, "boot-"+k[:4], "", ""); err != nil {
+		if err := PeersAdd(manifest, known, k, tokens[k], "", ""); err != nil {
 			t.Fatalf("PeersAdd %s: %v", k[:8], err)
 		}
 	}
 	// Both are paired, so both have a stored session secret.
-	if err := saveSession(known, "boot-"+victim[:4], victim, "secret-victim"); err != nil {
+	if err := saveSession(known, tokens[victim], victim, "secret-victim"); err != nil {
 		t.Fatalf("seed victim session: %v", err)
 	}
-	if err := saveSession(known, "boot-"+keep[:4], keep, "secret-keep"); err != nil {
+	if err := saveSession(known, tokens[keep], keep, "secret-keep"); err != nil {
 		t.Fatalf("seed keep session: %v", err)
 	}
 
@@ -100,10 +101,39 @@ func TestAuditRevokedPeerResurrectsViaStaleToken(t *testing.T) {
 
 	// --- the still-running worker takes its next reconnect round --------------
 	// It uses the LIVE production attempt source with its STALE in-memory spec.
-	next := peerSource(BuddyConfig{KnownPeers: known}, runningSpec, newScopeCell(nil))
+	next := peerSource(BuddyConfig{KnownPeers: known, PeersFile: manifest}, runningSpec, newScopeCell(nil))
 	att, aerr := next(0)
-	if errors.Is(aerr, errSessionRevoked) {
-		t.Fatal("FIXED: the running worker stopped after the revoke (errSessionRevoked)")
+	if errors.Is(aerr, errPeerRevoked) || errors.Is(aerr, errSessionRevoked) {
+		// The fixed behaviour: the still-running worker refuses the revoked buddy on
+		// its very next round, so there is nothing left to resurrect.
+		t.Logf("A-01 fixed: the running worker stops after the revoke: %v", aerr)
+		// And the second bolt holds too: even if a worker got past the attempt
+		// source, the session line cannot be written back.
+		if serr := saveSession(known, "boot-victim", victim, "secret-victim-repaired"); serr == nil {
+			t.Fatal("A-01 half-fixed: saveSession still stores a session for the revoked buddy")
+		}
+		// Third: a SIGHUP must not reassemble the revoked buddy from any leftover.
+		after, aerr2 := assemblePeers(BuddyConfig{PeersFile: manifest, KnownPeers: known})
+		if aerr2 != nil {
+			t.Fatalf("assemblePeers after revoke: %v", aerr2)
+		}
+		for _, s := range after {
+			if s.pin.Equal(victimPub) {
+				t.Fatal("A-01 half-fixed: assemblePeers still returns the revoked buddy")
+			}
+		}
+		// Positive control INSIDE the fixed branch: the buddy that was NOT revoked
+		// must still be there, or "nothing came back" would prove nothing.
+		kept := false
+		for _, s := range after {
+			if s.pin.Equal(keepPub) {
+				kept = true
+			}
+		}
+		if !kept {
+			t.Fatal("the buddy that was not revoked disappeared too — the revocation is too broad")
+		}
+		return
 	}
 	if aerr != nil {
 		t.Fatalf("peerSource returned an unexpected error: %v", aerr)
@@ -169,7 +199,7 @@ func TestAuditRevokedPeerControlRestartedWorkerStops(t *testing.T) {
 	manifest := filepath.Join(dir, "peers.yaml")
 	known := filepath.Join(dir, "known_peers")
 
-	if err := PeersAdd(manifest, victim, "boot-tok", "", ""); err != nil {
+	if err := PeersAdd(manifest, known, victim, "boot-tok", "", ""); err != nil {
 		t.Fatalf("PeersAdd: %v", err)
 	}
 	if err := saveSession(known, "boot-tok", victim, "secret-victim"); err != nil {
@@ -194,8 +224,8 @@ func TestAuditRevokedPeerControlRestartedWorkerStops(t *testing.T) {
 	// And even if a worker somehow existed with a TOKENLESS spec (the shape
 	// assemblePeers produces for a session-only peer), it stops cleanly.
 	_, aerr := peerSource(BuddyConfig{KnownPeers: known}, peerSpec{pin: victimPub}, newScopeCell(nil))(0)
-	if !errors.Is(aerr, errSessionRevoked) {
-		t.Fatalf("control: tokenless spec after revoke returned %v, want errSessionRevoked", aerr)
+	if !errors.Is(aerr, errSessionRevoked) && !errors.Is(aerr, errPeerRevoked) {
+		t.Fatalf("control: tokenless spec after revoke returned %v, want errSessionRevoked or errPeerRevoked", aerr)
 	}
 	t.Log("positive control holds: a restarted worker refuses the revoked buddy; " +
 		"the defect is specifically the STALE IN-MEMORY spec.token of a still-running worker")

@@ -756,11 +756,13 @@ func initIdentity(keyPath string) {
 		"  identity AND its virtual IP, and everyone has to re-pin.\n", keyPath)
 }
 
-// runPeersCmd dispatches `peers <list|add|remove|migrate>` against the
-// --peers-file manifest (and --known-peers for revocation), then exits.
+// runPeersCmd dispatches `peers <list|add|remove|allow|migrate>` against the
+// --peers-file manifest (and --known-peers for revocation and the revocation
+// list), then exits. `allow` needs no manifest: it lifts a revocation on a node
+// that pairs a single buddy.
 func runPeersCmd(peersFile, knownPeers, peersPath string, args []string) int {
 	if len(args) == 0 {
-		fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers <list|add|remove|migrate> [args]")
+		fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers <list|add|remove|allow|migrate> [args]")
 		return 2
 	}
 	var err error
@@ -782,17 +784,23 @@ func runPeersCmd(peersFile, knownPeers, peersPath string, args []string) int {
 		if len(positional) == 2 {
 			token = positional[1]
 		}
-		err = role.PeersAdd(peersFile, positional[0], token, opts["name"], opts["expose"])
+		err = role.PeersAdd(peersFile, knownPeers, positional[0], token, opts["name"], opts["expose"])
 	case "remove":
 		if len(args) < 2 {
 			fmt.Fprintln(os.Stderr, "usage: --peers-file <file> peers remove <peer-pubkey>")
 			return 2
 		}
 		err = role.PeersRemove(peersFile, knownPeers, args[1])
+	case "allow":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: peers allow <peer-pubkey>   (lifts a revocation; pair again with a NEW invite)")
+			return 2
+		}
+		err = role.PeersAllow(peersFile, knownPeers, args[1])
 	case "migrate":
-		err = role.PeersMigrate(peersFile)
+		err = role.PeersMigrate(peersFile, knownPeers)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown peers subcommand %q (want list|add|remove|migrate)\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown peers subcommand %q (want list|add|remove|allow|migrate)\n", args[0])
 		return 2
 	}
 	if err != nil {

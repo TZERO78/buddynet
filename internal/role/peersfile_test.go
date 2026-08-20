@@ -128,13 +128,15 @@ func TestPeersMigrate(t *testing.T) {
 	b, _, _ := ed25519.GenerateKey(rand.Reader)
 	aB64, bB64 := bcrypto.PubKeyB64(a), bcrypto.PubKeyB64(b)
 
-	path := filepath.Join(t.TempDir(), "peers")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peers")
+	known := filepath.Join(dir, "known_peers")
 	writeFile(t, path, aB64+" boot-a\n"+bB64+"\n")
 
-	if err := PeersAdd(path, bB64, "", "", ""); err == nil {
+	if err := PeersAdd(path, known, bB64, "", "", ""); err == nil {
 		t.Fatal("peers add on a legacy manifest must refuse and point at migrate")
 	}
-	if err := PeersMigrate(path); err != nil {
+	if err := PeersMigrate(path, known); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	if _, err := os.Stat(path + ".bak"); err != nil {
@@ -148,11 +150,11 @@ func TestPeersMigrate(t *testing.T) {
 		t.Fatalf("migrated specs = %+v", specs)
 	}
 	// Idempotent: a second migrate is a no-op, and the file stays writable.
-	if err := PeersMigrate(path); err != nil {
+	if err := PeersMigrate(path, known); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
 	c, _, _ := ed25519.GenerateKey(rand.Reader)
-	if err := PeersAdd(path, bcrypto.PubKeyB64(c), "boot-c", "carol", "tcp/8080"); err != nil {
+	if err := PeersAdd(path, known, bcrypto.PubKeyB64(c), "boot-c", "carol", "tcp/8080"); err != nil {
 		t.Fatalf("add after migrate: %v", err)
 	}
 	specs, err = loadPeersFile(path)
