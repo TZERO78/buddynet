@@ -8,14 +8,6 @@ on:
 permissions:
   contents: read
 
-# Never fetch a toolchain: setup-go installs exactly the one go.mod names
-# (`toolchain go1.26.6`), and `local` makes any attempt to use another one an
-# error instead of a silent download. Without this the `toolchain` line is only a
-# minimum and a newer installed toolchain wins — which is how the released binary
-# and the CVE scan ended up on different stdlibs (A-07).
-env:
-  GOTOOLCHAIN: local
-
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -24,6 +16,25 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # A-07's gate. The point of the pin is that the stdlib govulncheck scans is
+      # the stdlib that ships — and "setup-go honours the toolchain line" did NOT
+      # hold here: with go-version-file it installed the `go` line (1.25.0), so
+      # the CVE scan ran against go1.25 while the release builds with go1.26.6.
+      # The finding, reproduced by the first attempt at fixing it.
+      #
+      # So the toolchain directive is left to the go command (GOTOOLCHAIN=auto
+      # switches to EXACTLY the pinned version when the installed one is older),
+      # and this step asserts the result instead of trusting it.
+      - name: toolchain is the pinned one
+        run: |
+          want=$(awk '/^toolchain /{print $2}' go.mod)
+          got=$(go version | awk '{print $3}')
+          echo "go.mod pins $want; this job runs $got"
+          if [ "$want" != "$got" ]; then
+            echo "::error::CI builds with $got but go.mod pins $want — everything below would test a different stdlib than the release"
+            exit 1
+          fi
 
       - name: gofmt
         run: |
@@ -82,6 +93,25 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # A-07's gate. The point of the pin is that the stdlib govulncheck scans is
+      # the stdlib that ships — and "setup-go honours the toolchain line" did NOT
+      # hold here: with go-version-file it installed the `go` line (1.25.0), so
+      # the CVE scan ran against go1.25 while the release builds with go1.26.6.
+      # The finding, reproduced by the first attempt at fixing it.
+      #
+      # So the toolchain directive is left to the go command (GOTOOLCHAIN=auto
+      # switches to EXACTLY the pinned version when the installed one is older),
+      # and this step asserts the result instead of trusting it.
+      - name: toolchain is the pinned one
+        run: |
+          want=$(awk '/^toolchain /{print $2}' go.mod)
+          got=$(go version | awk '{print $3}')
+          echo "go.mod pins $want; this job runs $got"
+          if [ "$want" != "$got" ]; then
+            echo "::error::CI builds with $got but go.mod pins $want — everything below would test a different stdlib than the release"
+            exit 1
+          fi
+
       # Known CVEs in our dependencies AND in the Go toolchain, filtered to the
       # code paths we actually call. High signal, low noise — blocking.
       # Pinned to an exact version (not @latest): a security tool runs in CI with
@@ -105,8 +135,7 @@ jobs:
       #        config-supplied paths — pervasive in net/CLI code, not vulnerabilities.
       # Every other rule (exec, SQL, weak crypto, etc.) stays blocking. Installed
       # and run with the runner's Go (setup-go above), not the dockerized action —
-      # that image bundles an older Go that GOTOOLCHAIN=local rejects against our
-      # go.mod (go >= 1.25).
+      # that image bundles an older Go than our go.mod requires (go >= 1.25).
       - name: gosec
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1

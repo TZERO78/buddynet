@@ -32,6 +32,25 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+
+      # A-07's gate. The point of the pin is that the stdlib govulncheck scans is
+      # the stdlib that ships — and "setup-go honours the toolchain line" did NOT
+      # hold here: with go-version-file it installed the `go` line (1.25.0), so
+      # the CVE scan ran against go1.25 while the release builds with go1.26.6.
+      # The finding, reproduced by the first attempt at fixing it.
+      #
+      # So the toolchain directive is left to the go command (GOTOOLCHAIN=auto
+      # switches to EXACTLY the pinned version when the installed one is older),
+      # and this step asserts the result instead of trusting it.
+      - name: toolchain is the pinned one
+        run: |
+          want=$(awk '/^toolchain /{print $2}' go.mod)
+          got=$(go version | awk '{print $3}')
+          echo "go.mod pins $want; this job runs $got"
+          if [ "$want" != "$got" ]; then
+            echo "::error::CI builds with $got but go.mod pins $want — everything below would test a different stdlib than the release"
+            exit 1
+          fi
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
       - name: build, checksum and sign
