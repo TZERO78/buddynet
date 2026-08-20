@@ -78,7 +78,7 @@ candidate and the same NAT mapping is reused for the tunnel.
 |---|---|
 | `token` | the **rendezvous secret** the server pairs on: a one-time invite token on first pairing, or the derived session secret on later reconnects (see *Pairing secret* below). The server treats it as opaque. |
 | `token_enc` | the rendezvous secret, **sealed to the server's pinned key** (NaCl sealed box; v6). Since v8 this is the ONLY form on the wire — the cleartext `token` field is no longer serialised; the server unseals this to the value the signature covers. |
-| `role` | `buddy` / `relay` |
+| `role` | `buddy` / `relay`. Covered by the signature, but the server **stores nothing from it**: it is the one field with no validator or length bound, and nothing ever read it back, so keeping it only meant retaining unvalidated attacker-chosen bytes. |
 | `id` | ephemeral per-run id (dedupes a peer's v4+v6 registrations) |
 | `pubkey` | base64 Ed25519 identity |
 | `virtual_ip` | the sender's `10.66.X.Y`. **The server does not trust this**: it derives the virtual IP from `pubkey` and rejects a registration claiming a different one. |

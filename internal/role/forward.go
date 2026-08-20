@@ -194,22 +194,34 @@ func localNetwork(addr string) (network, address string) {
 	return "tcp", addr
 }
 
-// listenLocal listens on a -L address; unix sockets are created 0600 (a stale
-// socket from an unclean exit is removed first).
+// listenLocal listens on a -L address. A unix socket is created owner-only and
+// stays that way from the first instant it exists (a stale socket from an
+// unclean exit is removed first).
+//
+// The umask is what makes that true. net.Listen creates the socket with
+// 0777 &^ umask and the listener accepts connections immediately, so chmodding
+// afterwards leaves a window in which any local user can connect — and -L has no
+// authentication of its own, so whoever gets in is spliced straight onto the
+// tunnel to the partner. The chmod stays as the belt to that suspenders: it
+// makes the final mode explicit and independent of whatever the umask was.
 func listenLocal(addr string) (net.Listener, error) {
 	network, address := localNetwork(addr)
-	if network == "unix" {
-		_ = os.Remove(address)
+	if network != "unix" {
+		return net.Listen(network, address)
 	}
-	ln, err := net.Listen(network, address)
+	_ = os.Remove(address)
+	var ln net.Listener
+	err := withTightUmask(func() error {
+		var lerr error
+		ln, lerr = net.Listen(network, address)
+		return lerr
+	})
 	if err != nil {
 		return nil, err
 	}
-	if network == "unix" {
-		if err := os.Chmod(address, 0o600); err != nil {
-			ln.Close()
-			return nil, err
-		}
+	if err := os.Chmod(address, 0o600); err != nil {
+		ln.Close()
+		return nil, err
 	}
 	return ln, nil
 }

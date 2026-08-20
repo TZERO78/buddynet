@@ -312,38 +312,86 @@ func TestUpsertRejectsThirdPeer(t *testing.T) {
 	}
 }
 
-func TestUpsertEvictsStalestOverMaxTokens(t *testing.T) {
+func TestUpsertEvictsOverMaxTokens(t *testing.T) {
 	r := newHSRegistry(time.Minute)
 	for i := 0; i < maxTokens; i++ {
 		if _, _, ok := r.upsert(regMsg(fmt.Sprintf("tok-%d", i), "A", ""), v4(1000+i)); !ok {
 			t.Fatalf("token %d unexpectedly rejected", i)
 		}
 	}
-	// Make tok-0 clearly the stalest and tok-1 clearly fresh, so eviction is
-	// deterministic: a source-spoofed one-shot token ages, a refreshed pair stays.
-	for _, p := range r.waiting["tok-0"] {
-		p.seen = time.Now().Add(-time.Hour)
-	}
-	for _, p := range r.waiting["tok-1"] {
-		p.seen = time.Now()
-	}
 
-	// A new token must NOT be hard-rejected at the cap; it evicts the stalest.
+	// A new token must NOT be hard-rejected at the cap; it evicts to make room.
 	if _, _, ok := r.upsert(regMsg("fresh", "A", ""), v4(9999)); !ok {
 		t.Fatal("new token rejected; eviction should have made room")
 	}
 	if len(r.waiting) != maxTokens {
 		t.Fatalf("table size = %d, want %d (one in, one out)", len(r.waiting), maxTokens)
 	}
-	if _, ok := r.waiting["tok-0"]; ok {
-		t.Fatal("stalest token (tok-0) should have been evicted")
-	}
 	if _, ok := r.waiting["fresh"]; !ok {
 		t.Fatal("new token not inserted after eviction")
 	}
-	if _, ok := r.waiting["tok-1"]; !ok {
-		t.Fatal("fresh token tok-1 wrongly evicted instead of the stalest")
+}
+
+// TestEvictionPrefersOlderBuckets pins down what the sampled policy actually
+// promises. It does NOT evict the globally stalest bucket any more — finding
+// A-03 showed that being exact meant scanning every bucket under the registry's
+// single mutex, ~300 µs per packet on a full table, which is a third of the
+// server's whole admitted packet budget spent where nothing else can proceed.
+//
+// What it does promise is a strong bias towards old entries: the victim is the
+// oldest of evictSample randomly sampled buckets, so with half the table ancient
+// the chance of sparing them all is 0.5^8 — under half a percent per eviction.
+// The test asserts that bias rather than a specific victim, because a specific
+// victim is exactly the guarantee that was traded away.
+func TestEvictionPrefersOlderBuckets(t *testing.T) {
+	r := newHSRegistry(time.Minute)
+	for i := 0; i < maxTokens; i++ {
+		if _, _, ok := r.upsert(regMsg(fmt.Sprintf("tok-%d", i), "A", ""), v4(1000+i)); !ok {
+			t.Fatalf("token %d unexpectedly rejected", i)
+		}
 	}
+	// Age every second bucket by an hour.
+	ancient := map[string]bool{}
+	for i := 0; i < maxTokens; i += 2 {
+		tok := fmt.Sprintf("tok-%d", i)
+		for _, p := range r.waiting[tok] {
+			p.seen = time.Now().Add(-time.Hour)
+		}
+		ancient[tok] = true
+	}
+
+	const rounds = 100
+	hits := 0
+	for i := 0; i < rounds; i++ {
+		before := map[string]bool{}
+		for tok := range r.waiting {
+			before[tok] = true
+		}
+		if _, _, ok := r.upsert(regMsg(fmt.Sprintf("new-%d", i), "A", ""), v4(20000+i)); !ok {
+			t.Fatalf("round %d: insertion rejected", i)
+		}
+		// Exactly one bucket must have disappeared.
+		var victim string
+		gone := 0
+		for tok := range before {
+			if _, still := r.waiting[tok]; !still {
+				victim, gone = tok, gone+1
+			}
+		}
+		if gone != 1 {
+			t.Fatalf("round %d: %d buckets disappeared, want exactly 1", i, gone)
+		}
+		if ancient[victim] {
+			hits++
+		}
+	}
+	// 0.5^8 per round says ~99.6% expected; anything at or above 90 out of 100 is
+	// far outside the noise and still fails loudly if the sampling is removed or
+	// the comparison is inverted.
+	if hits < 90 {
+		t.Fatalf("eviction hit an aged bucket only %d/%d times — the age bias is gone", hits, rounds)
+	}
+	t.Logf("aged buckets were evicted %d/%d times (sampled policy, evictSample=%d)", hits, rounds, evictSample)
 }
 
 func TestObserveCapsCandidatesAndFlagsV6(t *testing.T) {
