@@ -221,6 +221,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `./lab/pentest/run-probe.sh`: 26 passed / 2 failed before, 32 passed / 0 failed
   after, with the relay's own refusal reasons asserted in the server log.
 
+### Added (Testing) — a live revocation lab, with the old binary as the control
+
+- `lab/test-revocation.sh` runs the operator's actual sequence on loopback: pair
+  two buddies through their manifests, pull a payload across, revoke one **while
+  the other is running**, then `SIGHUP`, then a full restart — and finally allow
+  it back and require the tunnel to return, because a revocation has to be a door
+  and not a wall. It counts a completed tunnel *or* a re-verified partner as
+  "came back": a pairing that gets as far as `partner-verified` has already
+  defeated the revocation, and on loopback the hole punch that follows is the
+  flakier half.
+
+  The A/B is external: the same scenario runs a second time against the binary
+  built from the audited commit, which **must** show the resurrection. Without
+  that half, "nothing came back" is also what a broken harness produces — and the
+  first two versions of this lab were exactly that, one counting `DISCONNECTED`
+  as a new connection (it ends in `CONNECTED:`) and one restarting a buddy with
+  empty paths because bash functions do not close over another function's locals.
+
 ### Changed — Unraid plugin: "Forget buddy" is a real revocation now
 
 - The button used to wipe `known_peers` and restart the service. That was never a

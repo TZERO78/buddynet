@@ -727,19 +727,46 @@ func TestMultiSourceFloodStaysBounded(t *testing.T) {
 	// behind and therefore cannot rescue. That residual is pre-existing and is
 	// stated in the docs rather than papered over here.
 	const n = 900
+	// Count only the flood's own verifications: the victim's legitimate bind above
+	// already spent one, and comparing the raw counter to n made "900 of 900" read
+	// as 901 (that off-by-one is what the failure message used to show).
+	before := h.s.statVerify.Load()
 	start := time.Now()
 	h.flood(t, "", n)
 	elapsed := time.Since(start)
+	verified := h.s.statVerify.Load() - before
 
-	verified := h.s.statVerify.Load()
+	// The guarantee is a RATE, so the ceiling has to be expressed in time: the
+	// bucket starts full at twice the rate and refills at the rate while the burst
+	// runs. A fixed number would only be testing how fast the machine is — which is
+	// exactly how this assertion first failed on slower CI, and how it kept failing
+	// under load afterwards, because the "verified >= n" check below was still an
+	// absolute one.
+	// Before the skip below can be trusted, the constant it is computed from has
+	// to be sane: if sigGlobalRate were raised until the ceiling covered the whole
+	// flood with NO time elapsed, there would be no bound left — and skipping
+	// would hide precisely that. This is the guard that keeps a load-tolerant
+	// assertion from turning into a way to never assert anything.
+	if burst := budgetCeiling(sigGlobalRate, 0); burst >= n {
+		t.Fatalf("sigGlobalRate=%g allows %d verifications before any time passes — "+
+			"the global signature budget cannot bound a %d-bind flood at all",
+			float64(sigGlobalRate), burst, n)
+	}
+	max := budgetCeiling(sigGlobalRate, elapsed)
+	if max >= n {
+		// On a machine slow (or loaded) enough that the burst takes longer than the
+		// bucket needs to refill n tokens, the budget legitimately covers every
+		// bind and nothing here is decided. Say so instead of failing (which blames
+		// the code for a scheduling artifact) or passing (which would be a green
+		// that proved nothing).
+		t.Skipf("the %d-bind flood took %s; the budget ceiling for that span is %d, "+
+			"so this run cannot distinguish a working bound from a missing one",
+			n, elapsed.Round(time.Millisecond), max)
+	}
 	if verified >= n {
 		t.Fatalf("%d of %d flood binds reached signature verification — the global budget did not hold", verified, n)
 	}
-	// The guarantee is a RATE, so the ceiling has to be expressed in time: the
-	// bucket starts full at twice the rate and refills at the rate while the burst
-	// runs. A fixed number here would only be testing how fast the machine is —
-	// which is exactly how this assertion first failed on slower CI.
-	if max := budgetCeiling(sigGlobalRate, elapsed); verified > max {
+	if verified > max {
 		t.Fatalf("%d verifications in %s is over the budget ceiling %d (burst %d + %g/s)",
 			verified, elapsed.Round(time.Millisecond), max, 2*sigGlobalRate, float64(sigGlobalRate))
 	}

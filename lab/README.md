@@ -167,6 +167,32 @@ admitted, and that one `/64` cannot fill the global session table and lock an
 unrelated prefix out. See `pentest/README.md` for why the probe's `relay-hoard`
 scene does not cover this.
 
+## Revocation test (finding A-01: `peers remove` must actually stick)
+
+No root, no Docker — two buddies and a handshake server on loopback:
+
+```bash
+./test-revocation.sh                     # → 18 passed (takes ~10 minutes)
+```
+
+`peers remove` used to be undone by the buddy process that was still running: the
+worker held the bootstrap token in memory, fell back to it once the session was
+gone, re-paired, and wrote the session line back — so the `SIGHUP` that was meant
+to APPLY the revocation restarted the buddy instead, and it survived a restart.
+
+The lab pairs A and B through their manifests, pulls a payload across, then
+revokes B **while A is running** and watches whether A takes up with it again —
+counting a completed tunnel *or* a re-verified partner, because a pairing that
+gets as far as `partner-verified` has already defeated the revocation. Then
+`SIGHUP`, then a full restart. Finally it allows the buddy back and requires the
+tunnel to return, so the revocation is a door and not a wall.
+
+The A/B is external and total: the whole scenario runs a second time against the
+binary built from the audited commit (`fa046a6`), which **must** show the
+resurrection. Without that half, "nothing came back" would also be what a broken
+harness produces. `--reauth-interval 10s` is what forces the running worker to
+take a fresh attempt at all; `SKIP_BASE=1` drops the A/B half (and says so).
+
 ## Relay ticket test (v5: a relay serves only sessions your server authorised)
 
 Needs root for network namespaces; no Docker, no `lab/.env`, no WireGuard module:
