@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.2.0] — 2026-08-20
+
+Hardening release from the 2026-08-20 audit: it closes two controls that were
+failing **silently** — a `--peer-key` that stopped being consulted, and a
+revocation a still-running buddy could undo — plus the shipped systemd unit that
+could not start, a self-test that reported green while authorizing nothing, and a
+toolchain pin that did not pin.
+
+**Two behaviour changes to know before you update:**
+
+1. A `--peer-key` that contradicts the key stored from an earlier pairing now
+   **refuses the connection** instead of being ignored. If your buddy rotated
+   their key and you updated the flag, you also have to drop the stored session:
+   `peers remove <old key>`, then pair again with a new invite.
+2. `peers remove` (and *Forget buddy* in the Unraid plugin) is now **permanent
+   until you lift it** with `peers allow`. A revoked buddy cannot return through
+   a stored session or an old bootstrap token.
+
+No wire-format change: `protocol.Version` stays at **8**, so v5.1.x and v5.2.0
+nodes pair with each other.
+
 ### Changed (Security, BEHAVIOUR CHANGE) — `--peer-key` is enforced on every connect
 
 - **`--peer-key` stopped being consulted as soon as a buddy had paired once.**
@@ -1181,7 +1202,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.1.1...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.2.0...HEAD
+[v5.2.0]: https://github.com/TZERO78/buddynet/compare/v5.1.1...v5.2.0
 [v5.1.1]: https://github.com/TZERO78/buddynet/compare/v5.1.0...v5.1.1
 [v5.1.0]: https://github.com/TZERO78/buddynet/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/TZERO78/buddynet/compare/v4.1.1...v5.0.0

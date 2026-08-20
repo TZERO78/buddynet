@@ -288,7 +288,7 @@ $last = trim(shell_exec("grep -aE 'ONLINE|OFFLINE|REACHABLE|DISCONNECTED|waiting
 $ident = trim(shell_exec("grep -aoE 'identity [A-Za-z0-9+/=]{40,}' /var/log/buddynet.log 2>/dev/null | tail -n 1 | cut -d' ' -f2"));
 // Our own virtual IP is a pure function of our identity key (identity IS
 // address, see crypto/keys.go): 10.66.X.Y with X,Y = SHA-256(pubkey)[0:2],
-// network/broadcast folded off. Needed for the BuddyShare mount info.
+// network/broadcast folded off. Needed for the SMB mount info.
 $vip = '';
 if ($ident) {
   $h = hash('sha256', base64_decode($ident), true);
@@ -347,7 +347,7 @@ function bnShow(id,b){var e=document.getElementById(id);
 function bnGen(id){var a=new Uint8Array(48);crypto.getRandomValues(a);
   var s=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_');
   var e=document.getElementById(id);e.value=s;e.type='text';}
-// BuddyShare needs the WireGuard plane and :445 in the scope. Never silently:
+// SMB access needs the WireGuard plane and :445 in the scope. Never silently:
 // this ADJUSTS THE VISIBLE FIELDS so the user sees exactly what will apply.
 function bnShare(sel){
   if(sel.value!=='enable') return;
@@ -415,7 +415,7 @@ WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGua
 Exposed ports (--expose, WireGuard only) — the port(s) your buddy may reach on THIS server over the tunnel, e.g. "873" or "873,8080" or "tcp/873,udp/51820"; "all" = explicit whole-host access. **Empty = NOTHING is exposed (fail-closed, secure default)** — your buddy cannot reach any service here until you name a port:
 : <input type="text" name="EXPOSE" value="<?=v($cfg,'EXPOSE')?>" placeholder="empty = nothing exposed (secure default)">
 
-_(BuddyShare — share folders with your buddy over SMB)_ (_(needs WireGuard; selecting Enabled fills in WireGuard + port 445 above, visibly)_):
+_(SMB access for your buddy — expose Samba over the tunnel)_ (_(needs WireGuard; selecting Enabled fills in WireGuard + port 445 above, visibly)_):
 : <select name="BUDDYSHARE" onchange="bnShare(this)">
   <option value="disable" <?=v($cfg,'BUDDYSHARE')=='disable'?'selected':''?>>_(Disabled)_</option>
   <option value="enable"  <?=v($cfg,'BUDDYSHARE')=='enable'?'selected':''?>>_(Enabled)_</option>
@@ -458,9 +458,9 @@ set "Token file" above and leave the Token field empty. The service then starts
 on array start, once that file is available.
 
 ---
-####BuddyShare
+####SMB access for your buddy
 
-_(BuddyShare — your buddy reaches exactly ONE thing on this server, Samba on port 445, and inside Samba only the shares you grant to the share user. Everything else stays invisible, fail-closed.)_
+_(With this enabled your buddy reaches exactly ONE thing on this server, Samba on port 445, and inside Samba only the shares you grant to the share user. Everything else stays invisible, fail-closed. BuddyNet only carries the connection — the shares, users and rights are Unraid's own.)_
 _(Folder rights are plain Unraid: set the share to Secure or Private and grant the share user Read-only or Read-Write under Shares.)_
 
 <?php if (count($pubshares)): ?>
@@ -587,7 +587,7 @@ EXPOSE="$(trim "${EXPOSE:-}")"
 is_running() { [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; }
 
 install_lang() {
-  # Our German dictionary for the BuddyShare section — picked up by the webGUI's
+  # Our German dictionary for the SMB section — picked up by the webGUI's
   # parse_plugin() when a German language pack is active. Re-copied here because
   # boot-time install order of plugin vs language pack is not guaranteed.
   if [ -d /usr/local/emhttp/languages/de_DE ] && [ -f /boot/config/plugins/buddynet/lang-de_DE-buddynet.txt ]; then
@@ -740,21 +740,21 @@ esac
 </INLINE>
 </FILE>
 
-<!-- German strings for the BuddyShare section. Loaded by the webGUI's own
+<!-- German strings for the SMB section. Loaded by the webGUI's own
      parse_plugin() mechanism from languages/<locale>/buddynet.txt when a German
      language pack is installed and active; falls back to English otherwise.
      Kept on flash; copied into place at install and service start. -->
 <FILE Name="&plgPATH;/lang-de_DE-buddynet.txt">
 <INLINE>
 <![CDATA[
-; BuddyNet plugin — deutsche Übersetzung (BuddyShare-Sektion).
+; BuddyNet plugin — deutsche Übersetzung (SMB-Sektion).
 ; Schlüssel = englischer Text nach den Regeln von Translations.php
 ; (Zeichen ?{}|&~![]()/\:*^."' entfernt, Mehrfach-Leerzeichen zusammengefasst).
-BuddyShare — share folders with your buddy over SMB=BuddyShare — Ordner per SMB mit deinem Buddy teilen
+SMB access for your buddy — expose Samba over the tunnel=SMB-Zugriff für deinen Buddy — Samba über den Tunnel freigeben
 needs WireGuard; selecting Enabled fills in WireGuard + port 445 above, visibly=braucht WireGuard; bei Aktivierung werden oben sichtbar WireGuard + Port 445 eingetragen
 Share user for your buddy=Share-User für deinen Buddy
 an Unraid user YOU create under Users — this plugin never creates or changes users=ein Unraid-User, den DU unter Users anlegst — dieses Plugin legt nie User an und ändert keine
-BuddyShare — your buddy reaches exactly ONE thing on this server, Samba on port 445, and inside Samba only the shares you grant to the share user Everything else stays invisible, fail-closed=BuddyShare — dein Buddy erreicht auf diesem Server genau EINE Sache, Samba auf Port 445, und innerhalb von Samba nur die Shares, die du dem Share-User gibst. Alles andere bleibt unsichtbar, fail-closed
+With this enabled your buddy reaches exactly ONE thing on this server, Samba on port 445, and inside Samba only the shares you grant to the share user Everything else stays invisible, fail-closed BuddyNet only carries the connection — the shares, users and rights are Unraids own=Mit dieser Einstellung erreicht dein Buddy auf diesem Server genau EINE Sache, Samba auf Port 445, und innerhalb von Samba nur die Shares, die du dem Share-User gibst. Alles andere bleibt unsichtbar, fail-closed. BuddyNet transportiert nur die Verbindung — Shares, User und Rechte sind Unraids eigene
 Folder rights are plain Unraid set the share to Secure or Private and grant the share user Read-only or Read-Write under Shares=Ordner-Rechte sind pures Unraid — stelle den Share auf Secure oder Private und vergib dem Share-User unter Shares Read-only oder Read-Write
 Public shares are visible to your buddy=Public-Shares sind für deinen Buddy sichtbar
 These shares are set to Public, so ANY SMB client — including your buddy once the tunnel is up — can open them=Diese Shares stehen auf Public — JEDER SMB-Client kann sie öffnen, auch dein Buddy, sobald der Tunnel steht
@@ -1091,7 +1091,7 @@ CFG
 fi
 chmod 0600 "$PLG/buddynet.cfg"
 
-# German strings for the BuddyShare section (webGUI parse_plugin mechanism);
+# German strings for the SMB section (webGUI parse_plugin mechanism);
 # silently skipped when no German language pack is installed.
 if [ -d /usr/local/emhttp/languages/de_DE ] && [ -f "$PLG/lang-de_DE-buddynet.txt" ]; then
   cp -f "$PLG/lang-de_DE-buddynet.txt" /usr/local/emhttp/languages/de_DE/buddynet.txt

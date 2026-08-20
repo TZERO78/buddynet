@@ -7,6 +7,22 @@ identity straight from the trusted channel the invite travelled over. On success
 a long-lived **session secret** is derived from the encrypted channel and stored;
 all later reconnects use that secret — the invite is never seen again.
 
+## Five things that are easy to confuse
+
+| Term | What it is | Lifetime | If it leaks |
+|---|---|---|---|
+| **Invite** (`bnet1.<token>.<key>`) | A one-time pairing string: a rendezvous token plus the inviter's public key. Handed over out of band. | Until the first pairing, or `--invite-timeout` | Someone else can take the joiner's place **until it is used**. Treat it as a password. |
+| **Identity key** (`id.key`) | The node's long-term Ed25519 key. It *is* the node's identity, and its virtual IP is derived from it. | Forever, until you replace it | Whoever holds it is that node. Revoke it on the other side and re-key. |
+| **Buddy key** / `--peer-key` | The *partner's* public key, pinned on this side. Public information — pinning it is what makes a substituted partner fail. | As long as you keep it | Nothing. It is public. |
+| **SAS** (six characters, e.g. `K7QX2M`) | A short code derived from both keys **and the live session**, compared once by a human on first contact when nothing was pinned. | One pairing attempt | Nothing by itself — it is only meaningful during that attempt. |
+| **Session secret** | Derived from the encrypted channel after a successful pairing and stored locally. Later reconnects use it instead of the invite. | Until revoked or re-paired | It is a rendezvous credential; the partner key stays pinned, so it does not by itself let anyone impersonate your buddy. |
+
+And one more, because it is the pair to all of them: **revocation** is a local
+decision on *your* node — it removes a buddy's session, its manifest entry, and
+records the key so it cannot come back. It is not something the handshake server
+does for you, and it cannot tear down a direct tunnel that is already up
+(see [PEERS.md](PEERS.md) and [SECURITY.md](../SECURITY.md#82-revoking-access)).
+
 ## Quick start
 
 **On the inviter** (the machine hosting the service):
@@ -90,7 +106,7 @@ session secret is used automatically.
 | `--invite` | — | Mint a ONE-TIME invite, print it, and wait for the joiner. It carries this node's public key, so the joiner pins this identity. Expires after `--invite-timeout` (default 15 min) without a first pairing. |
 | `--join=INVITE` | `BUDDYNET_JOIN` | Join with the invite your buddy gave you. A key-bearing invite (`bnet1.…`) pins them automatically; a bare token falls back to trust-on-first-use. A malformed invite is refused. |
 | `--invite-timeout` | — | How long to wait for the first pairing before giving up on the invite. Default `15m`. Re-run `--invite` for a fresh token after expiry. |
-| `--peer-key KEY` | `BUDDYNET_PEER_KEY` | Pin the buddy's Ed25519 public key (base64). Strongest: any key mismatch is refused outright, no SAS needed. |
+| `--peer-key KEY` | `BUDDYNET_PEER_KEY` | Pin the buddy's Ed25519 public key (base64). Strongest: any key mismatch is refused outright, no SAS needed. Checked on **every** connect, reconnects included — if it contradicts the key stored from an earlier pairing, the buddy refuses to connect and says how to re-pair (since v5.2.0; v5.1.x stopped consulting it once a session existed). Removing the flag is **not** a revocation. |
 | `--known-peers PATH` | `BUDDYNET_KNOWN_PEERS` | Trust-on-first-use store. Defaults to `~/.config/buddynet/known_peers`. Holds one `token-hash → pubkey` entry per paired buddy. |
 | `--no-interactive` | — | Never prompt for SAS. A NEW unknown buddy key is refused rather than learned. Use for daemons and Unraid. Combine with `--peer-key`. |
 | `--sas-timeout` | — | How long to wait for the code to be typed in. Default `30s`. A timeout aborts the connection and stores nothing. |
@@ -252,7 +268,7 @@ ExecStart=/usr/local/bin/buddynet \
   --role=buddy \
   --key /var/lib/buddynet/id.key \
   --server vps.example:51820 \
-  --server-key SERVER_KEY \ \
+  --server-key SERVER_KEY \
   --peer-key PARTNER_KEY \
   --no-interactive \
   -L 0.0.0.0:9000

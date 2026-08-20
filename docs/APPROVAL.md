@@ -1,9 +1,18 @@
 # Approval Mode — client allowlist
 
-By default the handshake server pairs any two buddies that share a valid token.
-**Approval mode** adds a server-side allowlist: only clients whose Ed25519 public
-key appears in the authorized-clients file may pair. Everyone else is logged as
-pending and silently dropped.
+By default — **open mode** — the handshake server pairs any two buddies that
+present the same valid token. **Approval mode** adds a server-side allowlist:
+only clients whose Ed25519 public key appears in the authorized-clients file may
+pair. Everyone else is logged as pending and silently dropped.
+
+**What holding a token does and does not grant.** A token is a rendezvous
+credential, not an identity and not an authorization. Someone who obtains one can
+ask the server to pair them, and in open mode the server will — but they still
+cannot become your buddy: the buddy keys are pinned end to end, so a substituted
+partner is refused on the buddy side, with no human involved on the invite path.
+What a token-holder can do is occupy a pairing slot and keep the legitimate pair
+from meeting — a denial of service, not a break. Approval mode removes even that,
+by refusing an unknown key before it can occupy anything.
 
 ### Where the two checks happen
 
@@ -44,7 +53,7 @@ Start the handshake server with `--authorized`:
 
 ```bash
 buddynet --role=handshake \
-  --key /var/lib/buddynet/id.key \ \
+  --key /var/lib/buddynet/id.key \
   --authorized /etc/buddynet/authorized_clients
 ```
 
@@ -101,7 +110,7 @@ approves the code without ever seeing the raw key.
 
    ```bash
    buddynet --role=buddy \
-     --server vps.example:51820 --server-key SERVER_KEY \ \
+     --server vps.example:51820 --server-key SERVER_KEY \
      --key /var/lib/buddynet/id.key \
      --code MY_ENROLLMENT_CODE \
      --join=TOKEN -L 127.0.0.1:9000
@@ -300,7 +309,7 @@ For a private fleet you can add a network-level pre-filter on top of the allowli
 ```bash
 buddynet --role=handshake \
   --authorized /etc/buddynet/authorized_clients \
-  --allow-cidr 10.0.0.0/8,192.168.0.0/16 \ \
+  --allow-cidr 10.0.0.0/8,192.168.0.0/16 \
   --key /var/lib/buddynet/id.key
 ```
 
