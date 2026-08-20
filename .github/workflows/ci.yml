@@ -8,6 +8,14 @@ on:
 permissions:
   contents: read
 
+# Never fetch a toolchain: setup-go installs exactly the one go.mod names
+# (`toolchain go1.26.6`), and `local` makes any attempt to use another one an
+# error instead of a silent download. Without this the `toolchain` line is only a
+# minimum and a newer installed toolchain wins — which is how the released binary
+# and the CVE scan ended up on different stdlibs (A-07).
+env:
+  GOTOOLCHAIN: local
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -15,7 +23,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       - name: gofmt
         run: |
@@ -72,7 +80,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
-          go-version: stable
+          go-version-file: go.mod
 
       # Known CVEs in our dependencies AND in the Go toolchain, filtered to the
       # code paths we actually call. High signal, low noise — blocking.

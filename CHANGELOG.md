@@ -88,17 +88,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated YAML, which reads as "no buddies". It now goes through the same
   atomic rename as everything else.
 
+### Fixed (Supply chain) — the toolchain pin did not pin
+
+- **`go.mod` declared `toolchain go1.25.13`, and the shipped v5.1.1 binary was
+  built with go1.26.6.** The `toolchain` directive is a minimum/preference, not a
+  ceiling: under `GOTOOLCHAIN=auto` a newer installed toolchain wins, and
+  `setup-go` with `go-version: stable` installs the newest. Three official build
+  paths, two Go versions.
+
+  The reproducibility mismatch is not the damage. The damage is that
+  **`govulncheck` covered the 1.25.13 standard library, not the one in the
+  artifact** — the blocking CVE gate was scanning a different stdlib than the one
+  being released.
+
+  Pinned **forward**, to the version that actually produced the release:
+  `toolchain go1.26.6` in `go.mod`, `go-version-file: go.mod` in ci/release/fuzz
+  (setup-go honours the `toolchain` line since v6, and it wins over the `go`
+  line), `GOTOOLCHAIN: local` so nothing can fetch anything else, and
+  `golang:1.26.6-alpine` **by exact version and digest** in the Dockerfile. The
+  `go` line stays at 1.25.0, so a distro packager on Go 1.25.x with
+  `GOTOOLCHAIN=local` can still build; only `GOTOOLCHAIN=auto` fetches 1.26.6.
+  `govulncheck` against 1.26.6: no vulnerabilities.
+
+  Reproducing a release build (the `--depth 1 --no-tags` is **not** optional —
+  with tags, Go stamps a different module version into the binary and the hash
+  will not match):
+
+  ```bash
+  git clone --depth 1 --no-tags --branch vX.Y.Z https://github.com/TZERO78/buddynet
+  cd buddynet
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOTOOLCHAIN=go1.26.6 \
+    go build -trimpath -ldflags="-s -w -X main.version=vX.Y.Z" -o bn ./cmd/buddynet
+  sha256sum bn   # == buddynet-linux-amd64.sha256
+  ```
+
 ### Fixed — an interrupted `flock` no longer looks like a refused lock
 
 - The advisory file lock waited with a single `flock(LOCK_EX)` and reported any
   error as "cannot lock". That wait sits in the kernel, and the Go runtime's
-  asynchronous preemption delivers `SIGURG` to running threads, so under load an
-  unrelated preemption can return `EINTR` — which, with the deliberate
-  fail-closed policy, turns a scheduling event into a refused write. It showed up
-  as one flaky refusal in the trust-state tests under full-suite load once every
-  writer of `known_peers` started going through this lock (it was not reproduced
-  in repeated runs afterwards; `EINTR` is the only mechanism that fits, and
-  retrying it is correct regardless). The wait is now retried on `EINTR`.
+  asynchronous preemption delivers `SIGURG` to running threads, so an unrelated
+  preemption can return `EINTR` — which, with the deliberate fail-closed policy,
+  would turn a scheduling event into a refused write. The wait is now retried on
+  `EINTR`. This is hardening, not a fix for an observed failure: it was suspected
+  behind a flaky test, but the flake turned out to be the test's own doing (it
+  left a goroutine parked on the lock, which then wrote into a temp directory the
+  framework was already removing). The retry is correct regardless; the test now
+  drains that goroutine.
 
 ### Fixed — the shipped public-handshake systemd unit could not start
 

@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,7 +54,9 @@ func TestAuditLearnPeerIgnoresTheStoreLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquireLock: %v", err)
 	}
-	defer unlock()
+	var once sync.Once
+	release := func() { once.Do(unlock) }
+	defer release()
 
 	done := make(chan error, 1)
 	go func() { done <- learnPeer(store, "some-token", keyB64) }()
@@ -65,6 +68,13 @@ func TestAuditLearnPeerIgnoresTheStoreLock(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Log("A-02 fixed: learnPeer waits for the store lock, like every other writer of this file")
+		// Release and DRAIN before returning. Leaving the parked writer to wake up
+		// during t.TempDir's cleanup makes it write into a directory being removed,
+		// which fails the test for a reason that has nothing to do with the lock.
+		release()
+		if lerr := <-done; lerr != nil {
+			t.Fatalf("learnPeer failed once the lock was released: %v", lerr)
+		}
 		return
 	}
 
