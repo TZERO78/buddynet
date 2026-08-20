@@ -48,6 +48,32 @@ download is refused.
   (delete `id.key` — note this changes your virtual IP, so your buddy must
   re-pin your new key).
 
+## First contact — four steps, no terminal on either side
+
+Either side can start. Whoever does is "you" below:
+
+1. **You:** on the settings page, click **create invite** and apply. Send the
+   whole `bnet1.…` string to your buddy over a channel you both trust (a call,
+   Signal). Your own *Invite* field keeps the bare token — that is correct.
+2. **Your buddy:** pastes that string into their *Invite* field and applies. The
+   invite carries your identity, so their side pins **you** automatically. They
+   type nothing into their *Buddy key* field.
+3. **Your buddy:** copies their own identity (shown at the top of their BuddyNet
+   page) and sends it back to you.
+4. **You:** paste it into *Buddy key* and apply. Both sides are pinned, the
+   tunnel comes up.
+
+Between steps 1 and 4 your log says the Buddy key is missing and the connection
+is refused — that is the expected in-between state, not a fault.
+
+Never paste your own invite into your own *Invite* field: it carries *your*
+identity, so the node would pin itself as the partner and refuse everything with
+`partner identity MISMATCH`.
+
+Nobody has to be online at the same time, and nobody types a code. The trust
+comes from the channel you sent the invite and the identity over — the same
+place a spoken safety code would have come from.
+
 ## Security
 
 Unraid runs the buddy **headless**, so there is no terminal to compare the
