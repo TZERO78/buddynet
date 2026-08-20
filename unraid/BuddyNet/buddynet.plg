@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.08.20.4">
+<!ENTITY version   "2026.08.20.5">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,22 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.08.20.5
+- **The plugin can create an invite now.** Until today it could only *join* one,
+  so pairing two Unraid servers meant dropping into a shell on one of them. The
+  *Invite* row has a **create invite** button: it mints a fresh rendezvous token,
+  puts that in your own field, and shows the full `bnet1.…` string to send to
+  your buddy. That string carries your identity, so their side pins **you**
+  automatically — nothing for them to type into their Buddy key field.
+- **First contact is four steps and neither side needs a terminal** — see the new
+  section on the settings page and in the plugin README. Nobody has to be online
+  at the same time and nobody types a code: your buddy sends their identity back
+  and you paste it into *Buddy key*.
+- **Your identity now comes from the binary instead of being grepped out of the
+  log**, so the page shows it on a fresh install and after a log rotation — which
+  is exactly when you need it for pairing.
+- Binary unchanged (still **v5.2.0** — this is a settings-page change only).
 
 ###2026.08.20.4
 - Wording only — **the binary is unchanged (still v5.1.1)**, nothing to re-download
@@ -318,7 +334,19 @@ $cfg = parse_plugin_cfg("buddynet");
 function v($cfg,$k,$d=''){ return htmlspecialchars(isset($cfg[$k])?$cfg[$k]:$d); }
 $running = trim(shell_exec("/etc/rc.d/rc.buddynet status 2>/dev/null"));
 $last = trim(shell_exec("grep -aE 'ONLINE|OFFLINE|REACHABLE|DISCONNECTED|waiting for buddy|tunnel error|^error' /var/log/buddynet.log 2>/dev/null | tail -n 1"));
-$ident = trim(shell_exec("grep -aoE 'identity [A-Za-z0-9+/=]{40,}' /var/log/buddynet.log 2>/dev/null | tail -n 1 | cut -d' ' -f2"));
+// The node's identity comes from the binary, not from the log: `identity` reads
+// the key file and creates NOTHING (only `init` does), so this is side-effect
+// free — and unlike the log grep it still works on a fresh install and after a
+// log rotation, which is exactly when pairing needs it. The grep stays as a
+// fallback for the case where the array (and thus id.key) is not mounted yet.
+$ident = trim(shell_exec("/usr/local/bin/buddynet --key /mnt/user/appdata/buddynet/id.key identity 2>/dev/null"));
+if (!preg_match('#^[A-Za-z0-9+/]{43}=$#', $ident)) {
+  $ident = trim(shell_exec("grep -aoE 'identity [A-Za-z0-9+/=]{40,}' /var/log/buddynet.log 2>/dev/null | tail -n 1 | cut -d' ' -f2"));
+}
+if (!preg_match('#^[A-Za-z0-9+/]{43}=$#', $ident)) $ident = '';
+// The invite blob wants the key base64URL without padding (internal/invite),
+// while `identity` prints standard base64. Convert once, here.
+$identUrl = $ident ? rtrim(strtr($ident, '+/', '-_'), '=') : '';
 // Our own virtual IP is a pure function of our identity key (identity IS
 // address, see crypto/keys.go): 10.66.X.Y with X,Y = SHA-256(pubkey)[0:2],
 // network/broadcast folded off. Needed for the SMB mount info.
@@ -375,11 +403,29 @@ socket.
 function bnShow(id,b){var e=document.getElementById(id);
   if(e.type==='password'){e.type='text';b.textContent='hide';}
   else{e.type='password';b.textContent='show';}}
-// Generate a strong 384-bit token (64 base64url chars), same shape as the
-// CLI's `buddynet gen-token`. Reveal it so it can be copied/shared.
-function bnGen(id){var a=new Uint8Array(48);crypto.getRandomValues(a);
-  var s=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_');
-  var e=document.getElementById(id);e.value=s;e.type='text';}
+// This node's identity, base64url — the half of the invite that says WHO will be
+// at the rendezvous. Empty when the node has no key yet.
+var BN_IDENT_URL = <?=json_encode($identUrl)?>;
+// Mint an invite: a strong 384-bit rendezvous token (64 base64url chars, the
+// same shape as the CLI's `buddynet gen-token`) plus this node's identity, in
+// the bnet1.<token>.<key> shape internal/invite parses.
+//
+// Note which value goes where. OUR field gets the BARE TOKEN; the BLOB goes to
+// the buddy. Pasting our own blob into our own field would pin our own key as
+// the partner's, and the connection would be refused.
+function bnInvite(id){
+  if(!BN_IDENT_URL){
+    alert("This node has no identity yet, so it cannot mint an invite.\n\nStart the service once to create it, then reload this page.");
+    return;
+  }
+  var a=new Uint8Array(48);crypto.getRandomValues(a);
+  var s=btoa(String.fromCharCode.apply(null,a)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+  var e=document.getElementById(id);e.value=s;e.type='text';
+  var o=document.getElementById('bn_invite_blob');
+  o.value='bnet1.'+s+'.'+BN_IDENT_URL;
+  o.select();
+}
+// BuddyShare needs the WireGuard plane and :445 in the scope. Never silently:
 // SMB access needs the WireGuard plane and :445 in the scope. Never silently:
 // this ADJUSTS THE VISIBLE FIELDS so the user sees exactly what will apply.
 function bnShare(sel){
@@ -408,8 +454,11 @@ Handshake server (host:port):
 Server key (public pin — must match the server's identity):
 : <input type="text" name="SERVER_KEY" value="<?=v($cfg,'SERVER_KEY')?>" placeholder="server Ed25519 public key, base64">
 
-Invite from your buddy (`bnet1.…`, pins their identity) — for testing; prefer the file below:
-: <input type="password" id="bn_tok" name="TOKEN" value="<?=v($cfg,'TOKEN')?>"> <button type="button" onclick="bnShow('bn_tok',this)" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">show</button> <button type="button" onclick="bnGen('bn_tok')" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">generate</button>
+Invite (`bnet1.…`) — paste the one your buddy sent you, or click "create invite" to start the pairing yourself. For testing; prefer the file below:
+: <input type="password" id="bn_tok" name="TOKEN" value="<?=v($cfg,'TOKEN')?>"> <button type="button" onclick="bnShow('bn_tok',this)" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">show</button> <button type="button" onclick="bnInvite('bn_tok')" style="align-self:flex-start;flex:0 0 auto;display:inline-block;width:auto;min-width:0;padding:1px 10px;margin-top:.2em">create invite</button>
+
+Your invite to send your buddy (filled in by "create invite" — it carries your identity, so it pins you on their side):
+: <input type="text" id="bn_invite_blob" readonly placeholder="click &quot;create invite&quot; above — then send this whole string to your buddy" style="font-family:monospace">
 
 Invite file (on the array — overrides the field above, recommended):
 : <input type="text" name="TOKEN_FILE" value="<?=v($cfg,'TOKEN_FILE')?>" placeholder="/mnt/user/appdata/buddynet/token — holds the bnet1.… invite (chmod 0600)">
@@ -474,6 +523,27 @@ use the names on the Unraid host itself, route the `.buddy` TLD to that resolver
 **Lazy tunnel** keeps the -L listener open but defers the encrypted tunnel until
 the first connection actually arrives (needs -L set) — handy when a backup tool
 connects only occasionally.
+
+####First contact — four steps, no terminal on either side
+
+1. **You:** click *create invite* above and **Apply**. Send the whole `bnet1.…`
+   string to your buddy over a channel you both trust (a call, Signal).
+2. **Your buddy:** pastes it into their *Invite* field and applies. The invite
+   carries your identity, so their side pins **you** automatically — they type
+   nothing into their Buddy key field.
+3. **Your buddy:** copies their own identity (shown at the top of their BuddyNet
+   page) and sends it back to you.
+4. **You:** paste that into *Buddy key* above and apply. Both sides are now
+   pinned and the tunnel comes up.
+
+Between step 1 and step 4 the log says the Buddy key is missing and the
+connection is refused. That is the expected in-between state, not a fault: your
+buddy pinned you in step 2, and you pin them in step 4.
+
+Send your buddy the invite, and never paste your own invite back into your own
+Invite field: it carries *your* identity, so this node would pin **itself** as
+the partner and refuse every connection with `partner identity MISMATCH`. Your
+own field holds the bare token — "create invite" puts it there for you.
 
 This node runs the **buddy** role. Its identity key, trust store and peer cache
 live on the array under `/mnt/user/appdata/buddynet/`. Because Unraid runs the
