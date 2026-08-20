@@ -167,6 +167,32 @@ admitted, and that one `/64` cannot fill the global session table and lock an
 unrelated prefix out. See `pentest/README.md` for why the probe's `relay-hoard`
 scene does not cover this.
 
+## Revocation test (finding A-01: `peers remove` must actually stick)
+
+No root, no Docker — two buddies and a handshake server on loopback:
+
+```bash
+./test-revocation.sh                     # → 18 passed (takes ~10 minutes)
+```
+
+`peers remove` used to be undone by the buddy process that was still running: the
+worker held the bootstrap token in memory, fell back to it once the session was
+gone, re-paired, and wrote the session line back — so the `SIGHUP` that was meant
+to APPLY the revocation restarted the buddy instead, and it survived a restart.
+
+The lab pairs A and B through their manifests, pulls a payload across, then
+revokes B **while A is running** and watches whether A takes up with it again —
+counting a completed tunnel *or* a re-verified partner, because a pairing that
+gets as far as `partner-verified` has already defeated the revocation. Then
+`SIGHUP`, then a full restart. Finally it allows the buddy back and requires the
+tunnel to return, so the revocation is a door and not a wall.
+
+The A/B is external and total: the whole scenario runs a second time against the
+binary built from the audited commit (`fa046a6`), which **must** show the
+resurrection. Without that half, "nothing came back" would also be what a broken
+harness produces. `--reauth-interval 10s` is what forces the running worker to
+take a fresh attempt at all; `SKIP_BASE=1` drops the A/B half (and says so).
+
 ## Relay ticket test (v5: a relay serves only sessions your server authorised)
 
 Needs root for network namespaces; no Docker, no `lab/.env`, no WireGuard module:
@@ -206,6 +232,27 @@ forwarding which never touches `bnetN` (LAN→LAN2) keeps working; that the vict
 own outbound connections to the buddy keep working; and that LAN→buddy forwarding
 is blocked — deliberately, until subnet routing exists as its own option. Every
 LAN check runs over IPv4 and IPv6.
+
+## Scoped-exposure test with a real service (`test-smb-scope.sh`)
+
+Needs root, the `wireguard` module, and samba/smbclient/cifs-utils:
+
+```bash
+sudo -v && ./test-smb-scope.sh
+```
+
+Three namespaces. One buddy runs a stock `smbd` bound to `0.0.0.0` and exposes
+**only** `:445` over the WireGuard data plane; the other reaches it at the VIP.
+SMB is used here because it is the awkward case — a large service that listens on
+everything and must not become reachable beyond the tunnel. It asserts that the
+exposed port works through the tunnel while an unexposed one stays blocked, that
+a service started *before* the interface exists still serves it, that a wrong
+password is refused by the service's own layer, that `mount.cifs` works, and that
+removing the exposure closes the port again (fail-closed).
+
+BuddyNet has no file-sharing feature; what is under test here is the scope, not
+Samba. Running SMB, rsync or anything else over a tunnel is your own deployment
+decision, and that service's security remains yours.
 
 ## Firewall rule-order test
 

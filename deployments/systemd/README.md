@@ -8,9 +8,10 @@ above 1024.
 
 | File | Role |
 |---|---|
-| `buddynet-handshake.service` | matchmaking server (`--role=handshake`) |
+| `buddynet-handshake.service` | handshake server (`--role=handshake`) |
 | `buddynet-relay.service` | blind relay (`--role=relay`) |
 | `buddynet-buddy@.service` | per-tunnel buddy, one instance per `<name>.env` |
+| `buddynet-public-handshake.service` | the single-purpose `buddynet-handshake` binary for a PUBLIC matchmaker: no relay, no data path, no writable state, identity injected read-only via `LoadCredential` |
 | `buddynet-tmpfiles.conf` | enforces `0700`/`0600` on `/etc/buddynet` (token files) |
 | `journald@buddynet.conf` | size-capped private journal (see "Logging") |
 
@@ -34,9 +35,9 @@ sudo systemctl daemon-reload
 ```bash
 sudo systemctl enable --now buddynet-handshake
 sudo systemctl enable --now buddynet-relay      # optional fallback relay
-# print the server key your buddies pin:
-sudo systemctl show -p MainPID --value buddynet-handshake  # then:
-sudo -u "$(...)" buddynet --role=handshake --key /var/lib/buddynet-handshake/id.key identity
+# print the server key your buddies pin (the unit stores it in its
+# StateDirectory, which is root-readable):
+sudo buddynet --role=handshake --key /var/lib/buddynet-handshake/id.key identity
 ```
 
 Change a port without editing the unit:

@@ -5,6 +5,285 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [v5.2.0] — 2026-08-20
+
+Hardening release from the 2026-08-20 audit: it closes two controls that were
+failing **silently** — a `--peer-key` that stopped being consulted, and a
+revocation a still-running buddy could undo — plus the shipped systemd unit that
+could not start, a self-test that reported green while authorizing nothing, and a
+toolchain pin that did not pin.
+
+**Two behaviour changes to know before you update:**
+
+1. A `--peer-key` that contradicts the key stored from an earlier pairing now
+   **refuses the connection** instead of being ignored. If your buddy rotated
+   their key and you updated the flag, you also have to drop the stored session:
+   `peers remove <old key>`, then pair again with a new invite.
+2. `peers remove` (and *Forget buddy* in the Unraid plugin) is now **permanent
+   until you lift it** with `peers allow`. A revoked buddy cannot return through
+   a stored session or an old bootstrap token.
+
+No wire-format change: `protocol.Version` stays at **8**, so v5.1.x and v5.2.0
+nodes pair with each other.
+
+### Changed (Security, BEHAVIOUR CHANGE) — `--peer-key` is enforced on every connect
+
+- **`--peer-key` stopped being consulted as soon as a buddy had paired once.**
+  On a reconnect the pin came from the stored session (`known_peers`), and the
+  branch that compares it never reached the code that enforces `--peer-key`. So
+  changing the flag — which `SECURITY.md` §8.2 offered as one of four ways to
+  revoke a buddy — silently did nothing: the old key kept connecting.
+
+  Now **both** pins must match. If the configured `--peer-key` contradicts the
+  stored session pin, the buddy **refuses to connect at all**, and it stops
+  *before* registering with the handshake server — both keys are local, so the
+  outcome is already decided and there is no reason to hand the server this
+  node's rendezvous token and observed endpoints for a pairing that must not
+  happen. The partner key the server (or the offline cache) then vouches for is
+  checked against both pins as well, which covers the other case: a server that
+  names a different partner.
+
+  **What you may notice:** a node whose buddy legitimately rotated its key, and
+  whose `--peer-key` was updated to the new one, is now refused instead of
+  quietly connecting to the old key. That refusal is the point. It names both
+  keys and the way out:
+
+  ```
+  buddynet --known-peers <path> peers remove <old key>   # or "Forget buddy" in the plugin
+  ```
+
+  followed by a new invite. The stored session is **not** deleted automatically —
+  a mismatch is a suspicion, not an instruction to destroy state.
+
+  **`--peer-key` is deliberately not enforced** where it cannot mean one buddy:
+  it is already rejected together with `--peers-file`, and with several stored
+  sessions and no manifest the buddy now logs a `WARNING` instead of pretending
+  the flag applies.
+
+### Fixed (Security) — a revoked buddy stays revoked
+
+- **`peers remove` could be undone by the buddy process that was still running,
+  and the undo survived the `SIGHUP` the command told you to send.** The removal
+  dropped the manifest line and the stored session, and both files were correct
+  immediately afterwards — but the running worker still held the bootstrap token
+  in memory from when it started. With the session gone it fell back to that
+  token, re-paired, and wrote the session line back; since the worker set is the
+  manifest UNION the stored sessions, the `SIGHUP` restarted the buddy as a
+  session-only peer. The revocation was gone, and it stayed gone across restarts.
+
+  Revocation is now a **permanent local list of keys** (`<known_peers>.revoked`,
+  `0600`, atomically written). The presence of a key IS the revocation: no
+  expiry, no garbage collection — a tombstone that ages out is precisely when the
+  zombie comes back. It is enforced at every door: the reconnect attempt (the
+  worker stops with `peer-stopped … buddy revoked`), `saveSession` (no session
+  can be stored for a revoked key), `learnPeer` (no trust-on-first-use), the
+  trust decision itself, and the worker set assembled on `SIGHUP`.
+
+  `peers remove` also stopped reading the bootstrap token from the copy frozen at
+  worker start — it re-reads the manifest each round, so a removed entry takes
+  effect immediately rather than at the next restart.
+
+- **Lifting a revocation is now possible, and explicit.** `peers allow <key>`
+  lifts one (no manifest needed — the single-buddy setup the Unraid plugin runs),
+  and `peers add` on a revoked buddy lifts it instead of reporting
+  `already listed`, which is what used to leave a buddy silently locked out with
+  no way back. Pair again with a **new** invite: the old session secret is gone.
+  `peers list` shows revoked buddies with status `REVOKED`.
+
+- **The whole local trust state is written under one lock, in a fixed order.**
+  Manifest, session lines, TOFU lines and revocations are one state, not four.
+  Revoking writes tombstone → session → manifest; allowing runs the other way,
+  so a crash between any two steps leaves the *safe* side (refused) rather than
+  "no longer configured but still allowed back".
+
+- **`learnPeer` took no lock at all (A-02).** Every other writer of `known_peers`
+  does a locked read-modify-write; this one was a bare `O_APPEND`, so a
+  trust-on-first-use line written inside another writer's window was lost when
+  that writer renamed its snapshot into place. It now takes the same lock and
+  writes the same atomic way.
+
+- **The peers manifest was written with a plain `os.WriteFile` (A-12)** — neither
+  atomic nor locked, the one trust file left out. A crash mid-write left a
+  truncated YAML, which reads as "no buddies". It now goes through the same
+  atomic rename as everything else.
+
+### Fixed (Supply chain) — the toolchain pin did not pin
+
+- **`go.mod` declared `toolchain go1.25.13`, and the shipped v5.1.1 binary was
+  built with go1.26.6.** The `toolchain` directive is a minimum/preference, not a
+  ceiling: under `GOTOOLCHAIN=auto` a newer installed toolchain wins, and
+  `setup-go` with `go-version: stable` installs the newest. Three official build
+  paths, two Go versions.
+
+  The reproducibility mismatch is not the damage. The damage is that
+  **`govulncheck` covered the 1.25.13 standard library, not the one in the
+  artifact** — the blocking CVE gate was scanning a different stdlib than the one
+  being released.
+
+  Pinned **forward**, to the version that actually produced the release:
+  `toolchain go1.26.6` in `go.mod`, `go-version-file: go.mod` in ci/release/fuzz
+  (setup-go honours the `toolchain` line since v6, and it wins over the `go`
+  line), `GOTOOLCHAIN: local` so nothing can fetch anything else, and
+  `golang:1.26.6-alpine` **by exact version and digest** in the Dockerfile. The
+  `go` line stays at 1.25.0, so a distro packager on Go 1.25.x with
+  `GOTOOLCHAIN=local` can still build; only `GOTOOLCHAIN=auto` fetches 1.26.6.
+  `govulncheck` against 1.26.6: no vulnerabilities.
+
+  Reproducing a release build (the `--depth 1 --no-tags` is **not** optional —
+  with tags, Go stamps a different module version into the binary and the hash
+  will not match):
+
+  ```bash
+  git clone --depth 1 --no-tags --branch vX.Y.Z https://github.com/TZERO78/buddynet
+  cd buddynet
+  GOOS=linux GOARCH=amd64 CGO_ENABLED=0 GOTOOLCHAIN=go1.26.6 \
+    go build -trimpath -ldflags="-s -w -X main.version=vX.Y.Z" -o bn ./cmd/buddynet
+  sha256sum bn   # == buddynet-linux-amd64.sha256
+  ```
+
+### Fixed — an interrupted `flock` no longer looks like a refused lock
+
+- The advisory file lock waited with a single `flock(LOCK_EX)` and reported any
+  error as "cannot lock". That wait sits in the kernel, and the Go runtime's
+  asynchronous preemption delivers `SIGURG` to running threads, so an unrelated
+  preemption can return `EINTR` — which, with the deliberate fail-closed policy,
+  would turn a scheduling event into a refused write. The wait is now retried on
+  `EINTR`. This is hardening, not a fix for an observed failure: it was suspected
+  behind a flaky test, but the flake turned out to be the test's own doing (it
+  left a goroutine parked on the lock, which then wrote into a temp directory the
+  framework was already removing). The retry is correct regardless; the test now
+  drains that goroutine.
+
+### Fixed — the shipped public-handshake systemd unit could not start
+
+- **`deployments/systemd/buddynet-public-handshake.service` passed
+  `--quic-handshake`**, which protocol v8 removed. The binary exits 2 on an
+  unknown flag, so the service failed on every start for a full release, and
+  nothing in CI ever looked at a shipped file. The flag is gone from the unit.
+
+  Two texts recommended the same removed flag — one of them inside a *security*
+  warning printed when approval mode is off, which is the worst place to send an
+  operator after a flag that makes the binary refuse to start. Both now say what
+  is true: the control plane is QUIC/TLS 1.3 unconditionally since v8, so there
+  is nothing to select and no flag to select it with. (A leftover half-sentence
+  in the README from the same removal is fixed too.)
+
+- **New gate: flag drift.** Both binaries now register their flags in one
+  `registerFlags(fs *flag.FlagSet)`, and a test enumerates them through a
+  throwaway `FlagSet` — asking the flag package itself rather than pattern-
+  matching `main.go`, because a pattern is a second definition that can drift
+  from the first. It scans the *active* artifacts only (systemd units, the
+  compose file, the Unraid plugin, the lab scripts) by explicit list: the
+  CHANGELOG and `docs/plans/` are supposed to name removed flags, and a gate with
+  false alarms gets switched off. It ignores comments, and it resolves `$BIN`
+  per file, so a lab script pointing that name at another tool is not charged to
+  buddynet. A positive control plants a removed flag in a temporary artifact and
+  requires the scan to report it — a gate that silently matches nothing looks
+  exactly like a clean run.
+
+  CI additionally runs `systemd-analyze verify` over the units, with the binaries
+  installed first so `ExecStart` resolves. To be honest about it: that validates
+  the *unit*, not whether the binary accepts the flags, and it would **not** have
+  caught this finding. The flag-drift test is the gate; `systemd-analyze` is the
+  complement. `systemd-analyze security` runs informational only — its score
+  moves with the systemd version.
+
+### Fixed — `docker compose up relay` pulled an old release
+
+- The compose file had `build:` on the handshake service and a
+  `ghcr.io/tzero78/buddynet:v5.0.0` tag on **both**. `up --build` built locally
+  and tagged the result v5.0.0, but starting the relay on its own **pulled**
+  v5.0.0 from the registry — a different, older binary than the rest of the
+  deployment, silently. Both services now build from this checkout and carry a
+  local tag; nothing is pulled. The file documents the release-deployment
+  variant explicitly: no `build:` at all, both services pinned to the same
+  immutable **digest** — never a floating tag, and never a digest next to a
+  `build:`.
+
+### Added — the relay ticket verifier is fuzzed nightly
+
+- `internal/ticket`'s `FuzzParse` and `FuzzVerify` were shipped but missing from
+  the nightly fuzz matrix — the one parser that is permanently reachable from the
+  internet on every relay bind. Both are in it now.
+
+### Removed — dead code and comments that described a vanished world
+
+- `clonePending` and the `authorizer.writeMu` field have been unreachable since
+  the stateless-server rewrite (v5.0.0): there is no pending file to snapshot or
+  serialise any more. `go vet` does not see unused unexported functions or
+  fields, so they sat there. The CI comment listing gosec exclusions named two
+  rules (`G123`, `G703`) that the command has not excluded for some time — the
+  comment was *stricter*-wrong than reality, but wrong.
+
+### Fixed (Testing) — the pentest probe was authorizing nothing on the relay
+
+- **Two relay scenes reported PASS without a single leg ever being admitted.**
+  The relay has verified tickets since v5.0.0, but the probe still bound legs
+  with a bare session token, so every bind was dropped at the ticket gate. For
+  `relay-3rd-leg` and `wg-relay-blind` that showed up as a FAIL for the wrong
+  reason; for `relay-reflection` and `relay-hoard` it showed up as **green**,
+  because "no ack" means both "the cap held" and "refused for want of a ticket"
+  and the probe could not tell them apart.
+
+  The relay scenes are rebuilt around the real scheme: the probe registers two
+  buddies with the handshake server, collects the signed permits it issues, and
+  binds with a proof of possession over the relay's current cookie — exactly as a
+  buddy does. Every scene now starts from a pair that **demonstrably forwards**
+  before it asserts that anything is refused. New scenes cover a captured ticket
+  without (and with a forged) proof, a bind claiming a session its ticket does not
+  name, a fresh valid ticket that must not displace a leg held by another
+  ephemeral key, a ticket minted for a different relay id, and the per-source leg
+  cap — the last one against a relay started with `--relay-max-legs-per-ip 2`, so
+  two legs are accepted and forwarding before the third is refused. Verified by
+  falsification: pointed at an uncapped relay, the cap scene fails.
+
+  `./lab/pentest/run-probe.sh`: 26 passed / 2 failed before, 32 passed / 0 failed
+  after, with the relay's own refusal reasons asserted in the server log.
+
+### Added (Testing) — a live revocation lab, with the old binary as the control
+
+- `lab/test-revocation.sh` runs the operator's actual sequence on loopback: pair
+  two buddies through their manifests, pull a payload across, revoke one **while
+  the other is running**, then `SIGHUP`, then a full restart — and finally allow
+  it back and require the tunnel to return, because a revocation has to be a door
+  and not a wall. It counts a completed tunnel *or* a re-verified partner as
+  "came back": a pairing that gets as far as `partner-verified` has already
+  defeated the revocation, and on loopback the hole punch that follows is the
+  flakier half.
+
+  The A/B is external: the same scenario runs a second time against the binary
+  built from the audited commit, which **must** show the resurrection. Without
+  that half, "nothing came back" is also what a broken harness produces — and the
+  first two versions of this lab were exactly that, one counting `DISCONNECTED`
+  as a new connection (it ends in `CONNECTED:`) and one restarting a buddy with
+  empty paths because bash functions do not close over another function's locals.
+
+### Changed — Unraid plugin: "Forget buddy" is a real revocation now
+
+- The button used to wipe `known_peers` and restart the service. That was never a
+  revocation: the buddy key and the invite live in `buddynet.cfg` on the flash,
+  untouched by the wipe, so the same buddy re-paired within seconds — and the
+  dialog claimed the key would be "re-learned on the next connect
+  (trust-on-first-use)", which cannot happen at all in the plugin (it always runs
+  `--no-interactive`, where an unknown key is refused, never learned).
+
+  It now runs `peers remove` for the configured buddy — tombstone plus session —
+  and leaves the service stopped, because the node has no buddy any more. A new
+  **Allow buddy again** button lifts the revocation and starts the service; it
+  refuses unless a key *and* an invite are configured, so the revocation is never
+  lifted before there is something new to pin. `reset identity` and uninstall
+  still delete everything, revocation list included — there the identity is gone,
+  so there is nothing left for a tombstone to protect.
+
+### Fixed (Docs)
+
+- `SECURITY.md` §8.2 claimed that *removing* the `--peer-key` pin revokes a
+  buddy. It does not, and it will not: with no pin there is nothing to compare
+  and the stored session pin governs. Revocation is `peers remove <key>` (or
+  "Forget buddy") **plus a new invite**; the section now says so.
+
 ## [v5.1.1] — 2026-08-19
 
 ### Fixed (Security) — the relay cookie now covers the source PORT
@@ -923,7 +1202,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.1.1...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.2.0...HEAD
+[v5.2.0]: https://github.com/TZERO78/buddynet/compare/v5.1.1...v5.2.0
 [v5.1.1]: https://github.com/TZERO78/buddynet/compare/v5.1.0...v5.1.1
 [v5.1.0]: https://github.com/TZERO78/buddynet/compare/v5.0.0...v5.1.0
 [v5.0.0]: https://github.com/TZERO78/buddynet/compare/v4.1.1...v5.0.0

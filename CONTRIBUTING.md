@@ -32,11 +32,23 @@ gofmt -l ./cmd ./internal ./pkg   # must be empty
 go vet ./...
 go test -race ./...
 go build ./...
-govulncheck ./...                 # security pass
+
+# the security pass CI runs (same versions):
+go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
+govulncheck ./...
+go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
+gosec -severity medium -exclude=G104,G115,G117,G304,G402 ./...
 ```
 
-- Keep changes focused; match the surrounding code style (see
-  [CLAUDE.md](CLAUDE.md) for conventions).
+CI additionally validates the shipped systemd units and checks that no shipped
+artifact passes a flag the binaries do not define. Official builds use the exact
+toolchain on the `toolchain` line of `go.mod`; each job asserts it got that
+version.
+
+- Keep changes focused and match the style of the file you are editing: errors
+  wrapped with `fmt.Errorf("context: %w", err)`, stdlib `log` (no structured
+  logger), stdlib `testing` (no assertion library), and every function doing I/O
+  taking a `context.Context` first and honouring cancellation.
 - Anything touching the control plane, crypto, or trust logic should stay
   **additive and backward-compatible** where possible, and bump
   `protocol.Version` when the wire format changes.
