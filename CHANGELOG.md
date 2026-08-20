@@ -88,6 +88,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   truncated YAML, which reads as "no buddies". It now goes through the same
   atomic rename as everything else.
 
+### Fixed (Testing) — the pentest probe was authorizing nothing on the relay
+
+- **Two relay scenes reported PASS without a single leg ever being admitted.**
+  The relay has verified tickets since v5.0.0, but the probe still bound legs
+  with a bare session token, so every bind was dropped at the ticket gate. For
+  `relay-3rd-leg` and `wg-relay-blind` that showed up as a FAIL for the wrong
+  reason; for `relay-reflection` and `relay-hoard` it showed up as **green**,
+  because "no ack" means both "the cap held" and "refused for want of a ticket"
+  and the probe could not tell them apart.
+
+  The relay scenes are rebuilt around the real scheme: the probe registers two
+  buddies with the handshake server, collects the signed permits it issues, and
+  binds with a proof of possession over the relay's current cookie — exactly as a
+  buddy does. Every scene now starts from a pair that **demonstrably forwards**
+  before it asserts that anything is refused. New scenes cover a captured ticket
+  without (and with a forged) proof, a bind claiming a session its ticket does not
+  name, a fresh valid ticket that must not displace a leg held by another
+  ephemeral key, a ticket minted for a different relay id, and the per-source leg
+  cap — the last one against a relay started with `--relay-max-legs-per-ip 2`, so
+  two legs are accepted and forwarding before the third is refused. Verified by
+  falsification: pointed at an uncapped relay, the cap scene fails.
+
+  `./lab/pentest/run-probe.sh`: 26 passed / 2 failed before, 32 passed / 0 failed
+  after, with the relay's own refusal reasons asserted in the server log.
+
 ### Changed — Unraid plugin: "Forget buddy" is a real revocation now
 
 - The button used to wipe `known_peers` and restart the service. That was never a
