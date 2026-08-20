@@ -68,12 +68,19 @@ stating plainly:
 > trust-on-first-use here. If the key is not pinned, the connection does not come
 > up.
 
-So pin your buddy — either with a `bnet1.…` invite, which carries the inviter's
-key and pins it for you, or by pasting their key into the **Buddy key** field
-(every node prints its own identity at startup). A pinned key that later
-contradicts the key stored from an earlier pairing also stops the connection:
-that is a re-pin or a revocation, and it needs *Forget buddy* plus a new invite.
+So your buddy's identity has to be pinned before the tunnel can come up, and it
+comes from one of two sources:
 
-The invite is a bearer secret — keep it in the `0600` token file on the array,
+- a **`bnet1.…` invite** carries your buddy's identity and BuddyNet pins it from
+  there. Nothing has to go into the **Buddy key** field.
+- a **bare token** (the older format) carries no identity. There you **must**
+  fill in the **Buddy key** field yourself — every node prints its own identity
+  at startup — or the connection is refused.
+
+Since v5.2.0 a pinned key that contradicts the key stored from an earlier pairing
+also stops the connection. That is a re-pin or a revocation, and it needs
+*Forget buddy* plus a new invite.
+
+The invite is a bearer secret — keep it in the `0600` invite file on the array,
 not in the flash config. See the project [README](../../README.md) and
 [SECURITY.md](../../SECURITY.md).
