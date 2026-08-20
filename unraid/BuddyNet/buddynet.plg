@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.08.19.1">
+<!ENTITY version   "2026.08.20">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,22 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.08.20
+- Wording only — **the binary is unchanged (still v5.1.1)**, nothing to re-download
+  and nothing about your existing setup changes.
+- **Corrected the claims about the Buddy key that stopped being true in v5.1.0.**
+  The settings page, this plugin's README and the service log all said you *must*
+  set the **Buddy key** or the connection is refused. That only ever applied to a
+  **bare token**. A `bnet1.…` invite carries your buddy's identity and BuddyNet
+  pins it from there — no Buddy key needed. All three now say which case is which,
+  and the service logs a NOTE instead of a WARNING when you paste a key-bearing
+  invite without a Buddy key.
+- The *Token* wording on the settings page now consistently says **Invite**,
+  matching the field names.
+- The invite is now handed to the daemon through the environment instead of the
+  command line, so it no longer shows up in `ps` for other processes on the
+  server.
 
 ###2026.08.19.1
 - Pinned to buddynet **v5.1.1** — a security fix for the **relay** role. **Update
@@ -379,7 +395,7 @@ Invite from your buddy (`bnet1.…`, pins their identity) — for testing; prefe
 Invite file (on the array — overrides the field above, recommended):
 : <input type="text" name="TOKEN_FILE" value="<?=v($cfg,'TOKEN_FILE')?>" placeholder="/mnt/user/appdata/buddynet/token — holds the bnet1.… invite (chmod 0600)">
 
-Buddy key (public pin — your buddy's identity, **required headless**):
+Buddy key (public pin — your buddy's identity; **only needed for a bare legacy token**, a `bnet1.…` invite pins by itself):
 : <input type="text" name="PEER_KEY" value="<?=v($cfg,'PEER_KEY')?>" placeholder="buddy Ed25519 identity, base64">
 
 Expose local port (-L) — to push backups TO your buddy:
@@ -404,7 +420,7 @@ Lazy tunnel (--lazy) — defer the tunnel until the first -L connection (needs -
   </select>
 
 
-WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGuard instead of QUIC; the partner is reachable natively at its VIP (10.66.X.Y). Needs the Buddy key above pinned:
+WireGuard data plane (--wireguard) — carry the peer tunnel over kernel WireGuard instead of QUIC; the partner is reachable natively at its VIP (10.66.X.Y). Needs your buddy's identity pinned — from a `bnet1.…` invite or the Buddy key field above:
 : <select name="WIREGUARD">
   <option value="disable" <?=v($cfg,'WIREGUARD')=='disable'?'selected':''?>>Disabled</option>
   <option value="enable"  <?=v($cfg,'WIREGUARD')=='enable'?'selected':''?>>Enabled</option>
@@ -443,17 +459,26 @@ connects only occasionally.
 This node runs the **buddy** role. Its identity key, trust store and peer cache
 live on the array under `/mnt/user/appdata/buddynet/`. Because Unraid runs the
 buddy headless, there is no terminal to compare the first-contact **safety check
-(SAS)** — so you **must pin your buddy** by entering its identity in the Buddy
-key field above (the buddy prints its identity at startup, or run
-`buddynet --role=handshake --key … identity` on the server for the server key).
-Without a pin the connection is refused, never trusted blindly. See the project
-README and SECURITY.md.
+(SAS)** — so your buddy's identity has to be pinned up front. There are two ways
+to get that pin, and you need exactly one of them:
+
+* **A `bnet1.…` invite** in the Invite field (or invite file) — it carries your
+  buddy's identity, so BuddyNet pins it straight from the invite. Nothing to
+  enter in the Buddy key field. This is the recommended way.
+* **A bare token** (the older format, no `bnet1.` prefix) carries no identity. In
+  that case you **must** fill in the Buddy key field with your buddy's identity
+  (each node prints its identity at startup; for the server key, run
+  `buddynet --role=handshake --key … identity` on the server).
+
+Either way an unknown key is refused, never trusted blindly: a bare token with no
+Buddy key set will not connect. See the project README and SECURITY.md.
 
 **Secret note:** the USB flash is FAT, so file permissions are not enforced there
-— a Token typed above is effectively readable. For real protection put the token
-in a file on the array (e.g. `/mnt/user/appdata/buddynet/token`, `chmod 0600`),
-set "Token file" above and leave the Token field empty. The service then starts
-on array start, once that file is available.
+— an invite typed into the field above is effectively readable. For real
+protection put the invite in a file on the array (e.g.
+`/mnt/user/appdata/buddynet/token`, `chmod 0600`), set "Invite file" above and
+leave the Invite field empty. The service then starts on array start, once that
+file is available.
 
 ---
 ####BuddyShare
@@ -594,16 +619,36 @@ start() {
   is_running && { echo "running"; return 0; }
   [ -x "$BIN" ] || { echo "binary missing"; return 1; }
   mkdir -p "$STATE" 2>/dev/null || { echo "appdata unavailable (is the array started?)"; return 1; }
+  # Prefer the token from a file on the array (real 0600 perms) over the flash
+  # cfg value; /boot is FAT and cannot enforce permissions. Only override when the
+  # file is non-empty and readable (an empty file must not blank out the token).
+  # Resolved before the args are built because the pin below depends on WHICH
+  # kind of invite this is.
+  tok="$TOKEN"
+  if [ -n "$TOKEN_FILE" ] && [ -s "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ]; then
+    ftok="$(trim "$(tr -d '\r\n' < "$TOKEN_FILE")")"
+    [ -n "$ftok" ] && tok="$ftok"
+  fi
   # Headless: there is no terminal to compare a first-contact SAS, so run
-  # --no-interactive (an unknown buddy key is refused, never learned blind) and
-  # pin the buddy with --peer-key. Without a pin the buddy will refuse to connect.
+  # --no-interactive (an unknown buddy key is refused, never learned blind).
   args=(--role=buddy --server "$SERVER" --server-key "$SERVER_KEY"
         --key "$STATE/id.key" --known-peers "$STATE/known_peers"
         --peers "$STATE/peers.json" --no-interactive)
+  # Where the pin comes from depends on the invite: a bnet1.… invite CARRIES the
+  # inviter's identity and pins it by itself, so the Buddy key is optional there.
+  # Only a bare legacy token has nothing to pin, and headless has no SAS prompt —
+  # that is the case where a missing Buddy key really does mean "refused".
   if [ -n "$PEER_KEY" ]; then
     args+=(--peer-key "$PEER_KEY")
   else
-    echo "WARNING: no Buddy key set — headless has no SAS prompt, so the connection will be refused. Set the Buddy key (your buddy's identity) to pin it." >>"$LOG"
+    case "$tok" in
+      bnet1.*)
+        echo "NOTE: no Buddy key set — not needed here: the bnet1.… invite carries your buddy's identity and is pinned from it." >>"$LOG"
+        ;;
+      *)
+        echo "WARNING: no Buddy key set and the invite is a bare token, which carries no identity — headless has no SAS prompt, so the connection will be refused. Either paste the full bnet1.… invite your buddy generated, or set the Buddy key (your buddy's identity) to pin it." >>"$LOG"
+        ;;
+    esac
   fi
   [ -n "$LISTEN" ]  && args+=(-L "$LISTEN")
   [ -n "$FORWARD" ] && args+=(-forward "$FORWARD")
@@ -633,17 +678,9 @@ start() {
       echo "NOTE: WireGuard is scoped by default — no Exposed ports set, so your buddy reaches NOTHING on this server (fail-closed). Set e.g. 873, or 'all' for explicit whole-host access." >>"$LOG"
     fi
   fi
-  # Prefer the token from a file on the array (real 0600 perms) over the flash
-  # cfg value; /boot is FAT and cannot enforce permissions. Only override when the
-  # file is non-empty and readable (an empty file must not blank out the token).
-  tok="$TOKEN"
-  if [ -n "$TOKEN_FILE" ] && [ -s "$TOKEN_FILE" ] && [ -r "$TOKEN_FILE" ]; then
-    ftok="$(trim "$(tr -d '\r\n' < "$TOKEN_FILE")")"
-    [ -n "$ftok" ] && tok="$ftok"
-  fi
-  # token via env so it does not appear in ps
-  args+=(--join "$tok")
-  nohup "$BIN" "${args[@]}" >>"$LOG" 2>&1 &
+  # The invite goes in via the environment (BUDDYNET_JOIN), not argv, so it does
+  # not show up in ps for every user on the box. Resolved further up.
+  BUDDYNET_JOIN="$tok" nohup "$BIN" "${args[@]}" >>"$LOG" 2>&1 &
   echo $! > "$PIDFILE"
   echo "started"
 }

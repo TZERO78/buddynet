@@ -771,7 +771,8 @@ BuddyNet is a **two-person (small-circle) tool** to connect a handful of hosts
 securely — deliberately **not** a mesh VPN and not measured against Tailscale or
 Netbird. Concretely:
 
-- **Hard cap of 48 buddies** (fail-closed). For more, use a mesh VPN — that is a
+- **16 buddies per node recommended, hard cap of 48** (fail-closed). The cap is a
+  guardrail, not a capacity target. For more, use a mesh VPN — that is a
   different tool.
 - **Connects hosts, not networks.** It routes only a partner's VIP `/32`, never
   the LANs/VLANs behind it — it is not a site-to-site/subnet router.

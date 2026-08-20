@@ -51,9 +51,17 @@ download is refused.
 ## Security
 
 Unraid runs the buddy **headless**, so there is no terminal to compare the
-first-contact safety check (SAS). You must therefore **pin your buddy** with the
-**Buddy key** field (each node logs its own identity at startup); the service
-runs `--no-interactive`, so an unknown key is refused rather than trusted blind.
-The token is a bearer secret — keep it in the `0600` token file, not the flash
+first-contact safety check (SAS). Your buddy's identity therefore has to be
+pinned before the connection comes up — from one of two sources:
+
+- a **`bnet1.…` invite** carries your buddy's identity, and BuddyNet pins it from
+  there. Nothing to fill into the **Buddy key** field.
+- a **bare token** (the older format) carries no identity, so there you **must**
+  set the **Buddy key** field yourself (each node logs its own identity at
+  startup).
+
+The service runs `--no-interactive` either way, so an unknown key is refused
+rather than trusted blind — a bare token with no Buddy key set will not connect.
+The invite is a bearer secret — keep it in the `0600` invite file, not the flash
 config. See the project [README](../../README.md) and
 [SECURITY.md](../../SECURITY.md).
