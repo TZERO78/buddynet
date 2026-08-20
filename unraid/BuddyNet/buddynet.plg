@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.08.19.1">
+<!ENTITY version   "2026.08.20.2">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
