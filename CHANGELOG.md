@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — SLSA build provenance for release artifacts
+
+- The release workflow now generates a **SLSA build provenance attestation** for
+  both shipped binaries (`actions/attest`, pinned by commit SHA), alongside the
+  existing keyless cosign bundles. Verified with:
+
+  ```bash
+  gh attestation verify buddynet-linux-amd64 --repo TZERO78/buddynet
+  ```
+
+  That command needs **GitHub CLI 2.49 or newer** (where the `attestation`
+  command set landed); the docs say so, because distribution packages lag —
+  Ubuntu 24.04 ships 2.45, which just answers `unknown command "attestation"`.
+
+  This is additive: nothing about the cosign bundles, checksums or SBOM changes.
+  The two checks are not redundant — the cosign bundle is a file next to the
+  binary and verifies **offline**, while the attestation is fetched from GitHub
+  and additionally binds the artifact to the source commit it was built from. It
+  is therefore worth nothing if GitHub itself is your adversary; the bundle plus
+  a rebuild remains the check that does not depend on GitHub.
+- The build job gains `attestations: write`. It deliberately does **not** take
+  `artifact-metadata: write`: that permission only covers storage records, which
+  require `push-to-registry`, and this job attests files rather than an OCI image.
+- **Attestations exist only for releases built after this change.** For v5.2.0
+  and older, `gh attestation verify` correctly reports that it found none — the
+  README and SECURITY.md §8.3 say so rather than implying blanket coverage.
+
+
 ### Changed — toolchain and pinned base images
 
 - **Toolchain pin moved from `go1.26.6` to `go1.26.7`** in `go.mod`, and the

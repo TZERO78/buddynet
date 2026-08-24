@@ -395,17 +395,41 @@ cosign verify-blob --bundle buddynet-linux-amd64.bundle \
 # -> Verified OK
 ```
 
+Releases **after v5.2.0** additionally carry a [SLSA build
+provenance](https://slsa.dev/provenance/) attestation, which needs no extra file
+next to the binary:
+
+```bash
+gh attestation verify buddynet-linux-amd64 --repo TZERO78/buddynet
+# -> Verification succeeded!
+```
+
+This needs **GitHub CLI 2.49 or newer** — the `attestation` command set does not
+exist in older ones, and distribution packages lag (Ubuntu 24.04 still ships
+2.45, which answers `unknown command "attestation"`). Check with `gh --version`.
+
+**v5.2.0 and older have none** — for those, `gh attestation verify` correctly
+reports that no attestation was found. Use the `cosign` bundle above.
+
 Each release also carries an SPDX SBOM (`buddynet-<tag>-sbom.spdx.json`).
 (Releases up to v1.1.0 used separate `.sig`/`.pem` files; v1.1.2 onward uses the
 single `.bundle`.)
 
-What that does and does not give you, plainly: the bundle proves the release
-workflow in this repository produced that exact file, and the checksum proves
-your copy is intact. There is **no SLSA provenance attestation** yet, so
-`gh attestation verify` will not find anything. Rebuilding a release yourself is
-possible — v5.1.1 was reproduced bit-for-bit — but the recipe matters: clone with
-`--depth 1 --no-tags`, then build with the pinned toolchain, or the module
-version stamped into the binary differs and the hash will not match.
+What that does and does not give you, plainly. These checks answer different
+questions, which is why all three exist:
+
+- the **cosign bundle** proves the release workflow in this repository produced
+  that exact file, and verifies **offline** from the `.bundle` sitting next to
+  the binary;
+- the **attestation** additionally binds the file to the source commit it was
+  built from, and is fetched from GitHub rather than shipped as a file — so it
+  needs network access, and it does not help you if GitHub is what you distrust;
+- the **checksum** only proves your copy is intact.
+
+Rebuilding a release yourself is possible — v5.1.1 was reproduced bit-for-bit —
+but the recipe matters: clone with `--depth 1 --no-tags`, then build with the
+pinned toolchain, or the module version stamped into the binary differs and the
+hash will not match.
 
 ## Status & Roadmap
 
