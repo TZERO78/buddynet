@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `docs/CONNECTIVITY.md`, and a test that keeps such pointers alive
+
+- **`docs/CONNECTIVITY.md`.** The "no path to the partner" error already told
+  operators to read that file (`noPathAdvice` in `internal/role/connect.go`) —
+  but the file did not exist. A dead link, handed to somebody at the moment
+  nothing works. It now covers what the fallback chain tried, why hole punching
+  fails structurally behind symmetric NAT or CGNAT, and what actually fixes it.
+- It also states plainly what does **not** fix it: forwarding a port to the
+  buddy. A buddy binds an *ephemeral* UDP port (`net.ListenUDP` with `Port: 0`),
+  so the number changes on every start and there is no flag to pin it. Port
+  forwarding applies to the VPS side, not to a buddy.
+- **`TestDocReferencesExist`** — every `docs/*.md` path named anywhere in this
+  module's Go sources must resolve to a real file. The dead pointer above
+  survived because a missing file is not a compile error and no test read the
+  string. Proven to fail on the real case, not just to pass: with
+  `docs/CONNECTIVITY.md` moved away, the test goes red naming
+  `internal/role/connect.go`.
+
+
 ### Added — SLSA build provenance for release artifacts
 
 - The release workflow now generates a **SLSA build provenance attestation** for
