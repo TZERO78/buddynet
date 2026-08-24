@@ -15,7 +15,7 @@ toolchain go1.26.6
 
 require (
 	filippo.io/edwards25519 v1.2.0
-	github.com/miekg/dns v1.1.72
+	github.com/miekg/dns v1.1.73
 	github.com/quic-go/quic-go v0.61.0
 	golang.org/x/crypto v0.55.0
 	golang.org/x/term v0.45.0
@@ -24,9 +24,6 @@ require (
 
 require (
 	github.com/kr/text v0.2.0 // indirect
-	golang.org/x/mod v0.37.0 // indirect
 	golang.org/x/net v0.57.0 // indirect
-	golang.org/x/sync v0.22.0 // indirect
 	golang.org/x/sys v0.47.0 // indirect
-	golang.org/x/tools v0.47.0 // indirect
 )
