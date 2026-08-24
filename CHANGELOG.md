@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.2.1] — 2026-08-24
+
+Documentation-integrity release from an external audit. **No protocol change, no
+new flags, no behaviour change in the binaries** — but two of the findings were
+security-relevant, because an operator following the documentation got a weaker
+system than the repository ships. The build pipeline also gains SLSA provenance.
+
+Ordered by what it means for you:
+
+- **If you set up your VPS firewall by copying the example out of
+  `docs/VPS-HOWTO.md`, re-apply `deployments/nftables.conf` (or
+  `iptables.rules`).** The page carried an older copy in which the generic
+  `established,related` accept sat *before* the UDP rate limits, which made the
+  limit on the handshake port unreachable after the server's first reply. The
+  shipped files were always correct.
+- **If your handshake server serves only people you know, turn on approval mode
+  (`--authorized`).** It is now documented as the recommended setting rather than
+  optional hardening, because a leaked invite does not expire the way these docs
+  used to claim.
+- **From this release on, artifacts carry a SLSA build provenance attestation**
+  in addition to the cosign bundles.
+
+
 ### Fixed (Docs/Security) — trust and DoS semantics stated accurately (M-01, M-03, L-01)
 
 From the same external audit as the firewall finding. All three reproduced
@@ -1409,7 +1432,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.2.0...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.2.1...HEAD
+[v5.2.1]: https://github.com/TZERO78/buddynet/compare/v5.2.0...v5.2.1
 [v5.2.0]: https://github.com/TZERO78/buddynet/compare/v5.1.1...v5.2.0
 [v5.1.1]: https://github.com/TZERO78/buddynet/compare/v5.1.0...v5.1.1
 [v5.1.0]: https://github.com/TZERO78/buddynet/compare/v5.0.0...v5.1.0
