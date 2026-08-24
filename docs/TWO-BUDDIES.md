@@ -49,9 +49,15 @@ buddynet --role=buddy --server vps.example:51820 --server-key SERVER_KEY \
 rsync -a /data/ rsync://localhost:9000/backup/
 ```
 
-`--invite` mints a **one-time** invite; `--join` consumes it. It is valid only
-until the first pairing (`--invite-timeout`, default 15 min) — a stolen invite is
-worthless afterwards.
+`--invite` mints an invite; `--join` uses it. Once paired, both sides switch to a
+stored session secret and stop presenting it — that is the sense in which it is
+"one-time". The **server** does not mark it spent, though, and
+`--invite-timeout` (default 15 min) bounds how long the inviter *waits*, not how
+long the token is accepted. A stolen invite cannot get anyone into your tunnel
+(your buddy is pinned by key), but on an **open-mode** server it can still let two
+strangers pair with each other on your box. Running the handshake server with
+`--authorized` closes that — see
+[INVITE.md](INVITE.md#what-a-leaked-invite-is-worth).
 
 The joiner is done at that point: the key inside the invite is pinned, so nothing
 is asked of it. The inviter asks once for the six-character code shown on the

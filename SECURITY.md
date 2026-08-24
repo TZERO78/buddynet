@@ -248,10 +248,34 @@ The pairing secret is split so the value that actually travels is short-lived:
   keying material + both keys) and store it next to the partner key. It is
   **never transmitted** — both sides compute the same value, and a man in the
   middle (a different session per side) derives a different one.
-- All later **reconnects use the stored session secret** as the rendezvous token;
-  the invite token is retired after first use. So a leaked invite is worthless
-  after 15 min or after the first connect, and the long-lived secret never
-  appears in a chat log or on the wire.
+- All later **reconnects use the stored session secret** as the rendezvous token,
+  so the long-lived secret never appears in a chat log or on the wire, and the
+  legitimate buddies stop presenting the invite once they are paired.
+
+  **Be precise about what "one-time" means here, because it is a client-side
+  property, not a server-side one.** The handshake server keeps no list of spent
+  tokens: it holds a token's rendezvous slot for as long as somebody keeps
+  registering on it, evicts it on the liveness TTL, and will create it again for
+  the next registration that presents the same string. `--invite-timeout` bounds
+  how long the *inviter* waits, not how long the token is accepted. So a leaked
+  invite is **not** worthless after 15 minutes.
+
+  What a leaked invite does and does not get an attacker, in open mode:
+
+  - A token slot holds **two** identities (`maxIDsPerToken`). If both are taken by
+    the legitimate pair, a third registration is refused as a squat and logged
+    (`SECURITY: event=squat-rejected`).
+  - If the slot is **free** — the pair is not currently connected, or has moved on
+    to its session secret — two *foreign* keys presenting that token can be paired
+    with each other. They get signed `PEER_LIST`s and, where relay tickets are
+    enabled, tickets for your relay. That is **unauthorised use of your
+    infrastructure**: your bandwidth and your matchmaker, for strangers.
+  - It does **not** get them into your tunnel. Your buddy is pinned by key, so a
+    substituted partner fails on your side regardless of what the server said.
+
+  **[Approval mode](docs/APPROVAL.md) closes this**, because an unapproved key is
+  refused when its signed `REGISTER` is handled, whatever token it presents. On a
+  server that is only ever meant to serve people you know, run it — see §5.4.
 - **`--join`** is the legacy mode: a single fixed token used for rendezvous on
   every reconnect (no session secret). Fine for scripted/daemon setups,
   especially together with `--peer-key`.
@@ -366,9 +390,12 @@ contact (§4.3).
   spoofed-source memory exhaustion.
 - **No reflection/amplification.** Covered structurally by §5.2; the server is
   never a useful UDP reflector.
-- **Rate limiting before crypto.** A global ceiling bounds total per-packet crypto
-  so a flood cannot saturate the read loop, and a bounded per-source bucket keeps
-  one address from consuming the budget.
+- **Bounded work per source, but *after* the TLS handshake.** A global ceiling
+  and a bounded per-source bucket keep one address from consuming the request
+  budget. Note where this sits: on the handshake server these are BuddyNet's own
+  limits, and quic-go has already completed the TLS handshake by the time they
+  run. The relay is the one that filters before any crypto, because it owns its
+  UDP read loop. See §5.5 — this distinction used to be blurred in these docs.
 - **Replay rejection (approval mode).** Every `REGISTER` carries a fresh 128-bit
   nonce inside its signature; a bounded cache rejects a repeated
   `(pubkey, nonce)` within the freshness window. Only **approved** keys occupy a
@@ -410,7 +437,11 @@ contact (§4.3).
   `/60`, or a botnet, still commands several. Use `--allow-cidr` or a firewall for
   a relay that should not be open to strangers.
 - **Network allowlist.** `--allow-cidr` restricts which source networks may reach
-  the relay **and** the handshake server, dropping others before any crypto.
+  the relay **and** the handshake server. On the **relay** the check runs before
+  any crypto (second in its fixed order, right after the size cap). On the
+  **handshake server** it runs as early as the QUIC library allows — before the
+  connection takes one of the 256 slots, but *after* the TLS handshake quic-go
+  performed to produce that connection (§5.5).
 - **Anonymised logs.** Tokens are logged only as a hash (the log-tag HMAC key is
   HKDF-derived from the identity, never the raw seed).
 - **Locked-down deployment.** Ships as a distroless/non-root image and a
@@ -444,6 +475,52 @@ is no `code → key` record to read or alter in between; see
 [docs/APPROVAL.md](docs/APPROVAL.md).
 
 ---
+
+
+### 5.5 What an unauthenticated source can cost you (the pre-TLS boundary)
+
+Earlier versions of these documents said BuddyNet drops disallowed sources
+"before any crypto". That is true of the **relay** and false of the **handshake
+server**, and the difference matters when you are sizing a public VPS.
+
+**Relay** — it owns its UDP read loop, so its fixed check order really does run
+before any cryptography: size cap → CIDR → per-source rate limit → cookie →
+(only then) ticket parse and two signature verifications. A source that fails the
+cookie never causes an Ed25519 verification and never gets state allocated.
+
+**Handshake server** — the control plane is QUIC, and quic-go owns the packet
+path. In order:
+
+1. **QUIC Retry for every unvalidated source** (`VerifySourceAddress` is
+   unconditionally on). A **spoofed** source gets a stateless Retry token back and
+   nothing else: no connection, no memory, no handshake. This is the real
+   anti-spoofing and anti-reflection boundary.
+2. **The TLS 1.3 handshake runs** — including the Ed25519 client certificate
+   exchange — because quic-go only hands over a connection that is already
+   established. This is unavoidable with this library, and it is asymmetric
+   crypto performed for a peer BuddyNet has not yet looked at.
+3. `--allow-cidr` is checked, and a disallowed source's connection is closed
+   **before** it occupies one of the 256 connection slots.
+4. Global and per-source (`/64`) connection caps.
+5. Per-source request rate limit inside the connection.
+6. Approval mode, when enabled, on the signed `REGISTER`.
+
+**So the honest boundary is this:** an attacker who can receive packets at its
+claimed address — i.e. is not spoofing — can make the handshake server perform
+**one TLS handshake per connection attempt** before `--allow-cidr` or
+`--authorized` are consulted. Neither flag protects against that; they protect
+what comes after it. A spoofing attacker cannot even get that far.
+
+Bounding *that* cost is the firewall's job, which is why the shipped ruleset
+rate-limits the handshake port at `limit rate 100/second burst 50 packets` with
+an explicit drop for the excess — and why the rule's placement before the generic
+`established,related` accept is load-bearing. See
+[docs/VPS-HOWTO.md](docs/VPS-HOWTO.md) and `deployments/nftables.conf`.
+
+This is a small VPS's realistic exposure, not a theoretical one. It is also the
+kind of load a distributed volumetric attacker can produce against anything, at
+which point it is an infrastructure problem rather than a BuddyNet one.
+
 
 ## 6. The data planes
 

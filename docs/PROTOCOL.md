@@ -413,9 +413,9 @@ endpoint — the relay forwards ciphertext and never sees content.
 | Forging a peer's virtual IP in the roster | the server derives `virtual_ip` from `pubkey` and rejects any other claim |
 | Grafting a captured enrollment code onto another key | `code_enc` is inside the registration signature |
 | Spoofed-source memory blowup | hard caps on tokens / ids / candidates; capped+pruned approval-mode maps |
-| Flooding the listener (CPU) | global + per-source rate limit before any crypto |
+| Flooding the listener (CPU) | QUIC address validation (Retry) for every unvalidated source, then a global + per-source connection cap and a per-source request limit. Note the order: quic-go completes the TLS handshake **before** it hands the connection over, so a source that passes Retry can cost a handshake before any BuddyNet check runs — see SECURITY.md §5.5 |
 | Turning a server into a reflector | source address validated by QUIC's handshake before any `PEER_LIST`; the relay's own cookie (`HMAC(key, epoch‖src-IP‖src-port)`, reply smaller than request) does the same for a bind |
-| Turning a **relay** into a reflector / traffic launderer | a bind binds no leg until the source echoes an address-validation cookie (`HMAC(per-process key, epoch‖src-IP)`, reply smaller than the bind); a spoofed source can never validate |
+| Turning a **relay** into a reflector / traffic launderer | a bind binds no leg until the source echoes an address-validation cookie (`HMAC(per-process key, epoch‖src-IP‖src-port)`, reply smaller than the bind); a spoofed source can never validate |
 | **Using someone else's relay** (bandwidth, capacity hoarding) | a relay admits only sessions a named handshake server authorised (signed ticket) and/or named networks; it refuses to start with neither, and `0.0.0.0/0` is not an accepted answer |
 | **Replaying a captured relay ticket** | the ticket is bound to an ephemeral key the binder must sign with; the signature covers the relay's own address-bound, rotating cookie |
 | Spending a ticket at a **different relay** | the ticket names the relay by id and the signature covers it |

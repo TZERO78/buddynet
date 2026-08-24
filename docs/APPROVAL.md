@@ -11,8 +11,17 @@ ask the server to pair them, and in open mode the server will — but they still
 cannot become your buddy: the buddy keys are pinned end to end, so a substituted
 partner is refused on the buddy side, with no human involved on the invite path.
 What a token-holder can do is occupy a pairing slot and keep the legitimate pair
-from meeting — a denial of service, not a break. Approval mode removes even that,
-by refusing an unknown key before it can occupy anything.
+from meeting — and, if the slot is free, pair with a *second* stranger holding the
+same token, which gets both of them signed `PEER_LIST`s and (where relay tickets
+are enabled) tickets for your relay. So it is denial of service **plus
+unauthorised use of your infrastructure**, but never a break into a tunnel.
+
+The server keeps no record of spent tokens, so this does not expire on its own:
+`--invite-timeout` bounds how long the inviter waits, not how long a token is
+accepted (see [INVITE.md](INVITE.md#what-a-leaked-invite-is-worth)). Approval mode
+is what removes it — an unapproved key is refused when its signed `REGISTER` is
+handled, before it can occupy a slot or be paired with anyone. **On a server that
+only ever serves people you know, run it.**
 
 ### Where the two checks happen
 
@@ -313,5 +322,10 @@ buddynet --role=handshake \
   --key /var/lib/buddynet/id.key
 ```
 
-Datagrams from outside the listed CIDRs are dropped before any crypto — cheaper
-than an allowlist check for high-volume abuse. See [OPERATIONS.md](OPERATIONS.md).
+Sources outside the listed CIDRs are refused before the connection takes one of
+the server's slots — cheaper than an allowlist check for high-volume abuse. On the
+handshake server that is *after* the TLS handshake quic-go already performed, not
+before it; only the relay filters before any crypto. See
+[SECURITY.md §5.5](../SECURITY.md#55-what-an-unauthenticated-source-can-cost-you-the-pre-tls-boundary)
+for what an unauthenticated source can actually cost, and
+[OPERATIONS.md](OPERATIONS.md) for the flag itself.

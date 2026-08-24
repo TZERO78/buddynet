@@ -183,8 +183,10 @@ default-drop rulesets fighting over the input hook. Everything in
   `limit rate` clause blunts floods without needing to know who connects.
 - **If your buddies *do* have static IPs**, you can tighten further as
   defence-in-depth — either add `ip saddr { A, B }` before the `accept` in the nft
-  rule, **or** (cleaner) use BuddyNet's own `--allow-cidr` (step 8), which drops
-  out-of-range sources before any crypto.
+  rule, **or** (cleaner) use BuddyNet's own `--allow-cidr` (step 8), which refuses
+  out-of-range sources before they occupy a connection slot. Note it does **not**
+  save you the TLS handshake on the handshake port — only the firewall rule above
+  does that (see [SECURITY.md §5.5](../SECURITY.md#55-what-an-unauthenticated-source-can-cost-you-the-pre-tls-boundary)).
 - **Already running ufw / firewalld?** They own the `filter`/`inet` space with
   their own default policy. Rather than stack a second default-drop table (order
   and policy can fight), add the two UDP ports and SSH to *that* tool instead —
@@ -371,12 +373,25 @@ you want to review a longer period, export before it expires — see
 
 ---
 
-## 8. Optional hardening
+## 8. Hardening
 
-Neither is required — the defaults (QUIC control plane, key pinning, default-drop
-firewall) are already secure. Add these if you want a smaller surface.
+The defaults (QUIC control plane, key pinning, default-drop firewall) are secure
+on their own. The first item below is nevertheless **the recommended setting for a
+server you run privately** — one that is only ever meant to serve you and the
+people you invited. The second is situational.
 
-**Approval mode — "known buddies only."** Only operator-approved keys may pair.
+### Approval mode — recommended for a private server
+
+**Turn this on unless you deliberately want a server strangers may use.** Without
+it the server is in *open mode*: it pairs any two buddies presenting the same
+valid token, and it keeps **no list of spent tokens**. An old invite that leaks
+therefore still works — not to get into your tunnel (your buddy is pinned by key,
+so a substituted partner fails on your side), but to let **two strangers pair with
+each other** on your matchmaker and, where relay tickets are enabled, draw tickets
+for your relay. That is your bandwidth and your box, used by people you never
+approved. See [INVITE.md](INVITE.md#what-a-leaked-invite-is-worth).
+
+Approval mode ends that: only operator-approved keys may pair.
 The rejection happens when the server handles the client's signed `REGISTER` and
 checks the key against the allowlist — *not* at the TLS handshake, which
 authenticates the key but does not decide whether it is allowed. So an
@@ -399,8 +414,10 @@ sudo -u buddynet-handshake buddynet \
 See [APPROVAL.md](APPROVAL.md).
 
 **Source allowlist (`--allow-cidr`).** If every buddy has a known/static network,
-drop everything else before any crypto — a cheap pre-filter that complements the
-firewall:
+refuse everything else before it occupies a connection slot — a cheap filter that
+complements the firewall. On the relay it runs before any crypto; on the handshake
+server the TLS handshake has already happened by then, so the firewall rule is
+what bounds *that* cost (§5.5 of SECURITY.md):
 
 ```bash
 #   ExecStart=/usr/local/bin/buddynet --role=handshake,relay \
