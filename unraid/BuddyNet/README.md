@@ -16,7 +16,7 @@ https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet
 
 Then configure under **Tools → BuddyNet**.
 
-The install pins one buddynet release — currently **v5.2.0** — and verifies the
+The install pins one buddynet release — currently **v5.2.1** — and verifies the
 downloaded `buddynet-linux-amd64` against its published SHA256, so a corrupted or
 tampered download is refused. The pinned version and its checksum are in
 `buddynet.plg` (`BINVER` / `BINSHA`) and move together on each release.
