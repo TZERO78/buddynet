@@ -358,7 +358,7 @@ go test ./...
 **Go versions.** Building needs **Go 1.25.0 or newer** — that is the minimum in
 `go.mod`. Official builds (CI, releases, the container image) all use the exact
 toolchain pinned on the `toolchain` line of the same file, currently
-**go1.26.6**, and each CI job verifies that it really got that version. So
+**go1.26.7**, and each CI job verifies that it really got that version. So
 "minimum to build" and "what the released binary was built with" are two
 different numbers on purpose.
 

@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — toolchain and pinned base images
+
+- **Toolchain pin moved from `go1.26.6` to `go1.26.7`** in `go.mod`, and the
+  `FROM golang:` line in `deployments/Dockerfile` moved with it (exact version
+  **and** digest, `sha256:28d89ee9…`) — that build path does not read `go.mod`,
+  so the two pins have to be bumped together or they drift apart (A-07).
+  go1.26.7 is a bug-fix release for `net/http`; the last security fixes were in
+  go1.26.6, so this is not a security-driven bump.
+- **Deliberately not go1.27.x.** Go 1.27.0 was released the same day as 1.26.7
+  and is a fresh major release. Building, `go vet` and `go test -race` all pass
+  under go1.27.0 here, so nothing blocks the move — it is simply left for a
+  separate, deliberate step once that line has had a patch release or two.
+- The version-drift explanation above the toolchain gate in `ci.yml`,
+  `fuzz.yml` and `release.yml` no longer names a specific patch version. The
+  gate itself always read the `toolchain` line dynamically; only the comment
+  had to be re-edited on every bump, which is the same drift it warns about.
+- `deployments/Dockerfile` runtime base bumped to the current
+  `gcr.io/distroless/static:nonroot` digest (`sha256:1c2c046…`).
+- `github.com/miekg/dns` 1.1.72 → 1.1.73. Upstream replaced its `tools.go` with
+  a `tool` directive, which drops **three indirect dependencies**
+  (`golang.org/x/mod`, `golang.org/x/sync`, `golang.org/x/tools`) from this
+  module's graph. No API change; BuddyDNS is unaffected.
+
 ### Fixed (Security) — three findings from the parallel 2026-08-20 audit pass
 
 These were reproduced on `main` **after** v5.2.0 shipped, from a second audit
