@@ -1,6 +1,8 @@
 # BuddyNet VPS firewall (iptables), the iptables-restore equivalent of
 # nftables.conf: default-drop input, with only SSH and the two BuddyNet UDP
-# ports open. The UDP ports are rate-limited to blunt floods.
+# ports open. The HANDSHAKE port is rate-limited to blunt floods; the RELAY port
+# deliberately is not, because it carries tunnel data (see the comment at that
+# rule).
 #
 # Edit the two BuddyNet dports below to match your --listen settings, then:
 #   sudo iptables-restore < deployments/iptables.rules

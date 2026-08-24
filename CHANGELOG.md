@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (Security) — the VPS guide documented a weaker firewall than it ships
+
+Reported externally, reproduced here against `main`. `deployments/nftables.conf`
+and `deployments/iptables.rules` are correct; **`docs/VPS-HOWTO.md` carried its
+own, older copy of the ruleset**, and that copy was the one with the hole in it.
+An operator who followed the page instead of applying the file got:
+
+- **`ct state established,related accept` placed BEFORE the UDP rate limits.**
+  Netfilter marks a UDP flow established once it has seen traffic in both
+  directions, so after the server's first answer every later packet of that
+  5-tuple matched the generic accept and the 100/s limit was never reached — on
+  exactly the 24/7 port the limit exists to protect. The shipped files put the
+  UDP rules first *and* drop the excess explicitly, and say why in a comment.
+- **A 100 packets/s cap on the relay port**, which carries tunnel *data*. That
+  throttles legitimate traffic and is not a bandwidth budget. The shipped files
+  deliberately leave that port unlimited and point at `--allow-cidr` and traffic
+  shaping instead.
+- The page also called the two rulesets "the exact same policy" with "two
+  rate-limited UDP ports" — neither is true any more.
+
+The page no longer carries a second copy of the ruleset at all: it describes what
+the shipped file does and why the ordering is load-bearing, and tells you to
+apply the file. **`TestDocsDoNotRestateShippedFirewall`** enforces that no
+document under `docs/` restates a BuddyNet UDP filter rule. It is proven against
+the real case: restore the old `docs/VPS-HOWTO.md` and it fails, naming the
+copied rule. It also fails loudly if the pattern stops matching the shipped
+files, so it cannot go vacuously green. Same failure class as A-05, one artifact
+over — see `internal/flagdrift`.
+
+### Fixed — leftovers from removing `--quic-handshake`
+
+Protocol v8 removed the flag and made the control plane QUIC/TLS 1.3
+unconditional. The prose that used to explain the switch was edited down but not
+repaired, leaving instructions that were wrong and, in one place, harmful:
+
+- `docs/VPS-HOWTO.md` told operators to "turn on the encrypted control plane" by
+  adding a **bare `Environment=`** to a systemd override — twice, once directly
+  above an `ExecStart` that expands `${BUDDYNET_LISTEN}`. An empty assignment
+  **resets every `Environment=` the unit set**, and the handshake unit sets
+  `BUDDYNET_LISTEN=[::]:51820`, so following that instruction would start the
+  service with an empty `--listen`. Both occurrences are gone, and the override
+  example now assigns a value; the trap is documented where it can be stepped in.
+- `deployments/systemd/README.md` still described the control plane as
+  "defaults to UDP" with QUIC as an option, and its sentence was cut mid-string.
+- `docs/VPS-HOWTO.md` said approval mode rejects outsiders "at the TLS
+  handshake". It does not: TLS authenticates the key, and the allowlist decision
+  is made when the signed `REGISTER` is handled (`authz.allowed` in
+  `internal/role/handshake.go`). An unapproved client completes TLS and is
+  refused before any pairing state exists for it.
+- Both shipped firewall files claimed in their own headers that "the UDP ports
+  are rate-limited", contradicting the rule comment a few lines below. Corrected
+  to name the handshake port.
 ### Added — `docs/CONNECTIVITY.md`, and a test that keeps such pointers alive
 
 - **`docs/CONNECTIVITY.md`.** The "no path to the partner" error already told

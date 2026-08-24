@@ -96,40 +96,38 @@ service.
 
 > ⚠️ **Read this first:** the ruleset sets the input policy to **drop** and
 > explicitly re-allows **SSH on port 22**. If your SSH runs on a different port,
-> change `port_ssh` below *before* applying, or you will lock yourself out. Keep
+> change `port_ssh` in that file *before* applying, or you will lock yourself out. Keep
 > your current SSH session open until you've confirmed a second one works.
 
 BuddyNet ships a ready ruleset — [`deployments/nftables.conf`](../deployments/nftables.conf).
-It is default-drop and opens only SSH and the two BuddyNet UDP ports,
-rate-limited against floods:
+**Apply that file; do not retype it from here.** This page deliberately no longer
+carries a second copy: it used to, the two drifted apart, and the copy here was
+the one with the hole in it.
 
-```nft
-#!/usr/sbin/nft -f
-define port_handshake = 51820      # keep in sync with --listen
-define port_relay     = 51821      # keep in sync with --relay-listen
-define port_ssh       = 22         # change if your SSH is elsewhere
+What the shipped policy does, and why the order matters:
 
-table inet buddynet {
-    chain input {
-        type filter hook input priority filter; policy drop;
+- **default-drop** input, with loopback, ICMP/ICMPv6 (PMTU discovery) and **SSH**
+  explicitly allowed.
+- The **handshake port** (`51820`) is rate-limited — `limit rate 100/second burst
+  50 packets` — and this rule sits **before** the generic
+  `ct state established,related accept`, followed by an **explicit drop** of the
+  excess. Both details are load-bearing. Netfilter marks a UDP flow established
+  as soon as it has seen traffic in both directions, so once the server answers
+  the first packet, a generic `established` accept placed earlier would wave
+  through every later packet of that 5-tuple and the limit would never be
+  reached. And without the explicit drop, over-limit packets simply fall through
+  to that accept. QUIC also multiplexes many connections over one UDP flow, so
+  conntrack is not a per-connection quota either.
+- The **relay port** (`51821`) deliberately has **no packet-rate limit**. It
+  carries tunnel *data*: a rate that is safe for a control plane would throttle
+  the tunnel itself. Its abuse ceilings live in the relay (per-source bind rate
+  limit, legs per source, session cap); bandwidth is a shaping problem (`tc`, an
+  nftables meter sized for your link, a provider egress budget), not something a
+  fixed packets-per-second rule expresses. Restrict **who** may reach it instead:
+  `--allow-cidr`, or firewall the port to your buddies' addresses.
 
-        iif lo accept                      # loopback
-        ct state established,related accept # answers to your own connections
-        ct state invalid drop
-
-        ip protocol icmp accept            # PMTU discovery + ping
-        ip6 nexthdr icmpv6 accept
-
-        tcp dport $port_ssh accept         # management — don't lock yourself out
-
-        # control + relay, rate-limited so a flood can't saturate the read loop
-        udp dport $port_handshake limit rate 100/second burst 50 packets accept
-        udp dport $port_relay     limit rate 100/second burst 50 packets accept
-    }
-    chain forward { type filter hook forward priority filter; policy drop; }
-    chain output  { type filter hook output  priority filter; policy accept; }
-}
-```
+Read the file itself for the full commentary — every rule there says why it is
+where it is.
 
 Apply and persist it:
 
@@ -149,9 +147,11 @@ sudo nft list table inet buddynet
 ### Still on iptables? (the equivalent)
 
 nftables is the modern default, but plenty of hosts still run iptables — so
-BuddyNet ships the **exact same policy** as an iptables ruleset,
-[`deployments/iptables.rules`](../deployments/iptables.rules) (default-drop
-input; only SSH + the two rate-limited UDP ports):
+BuddyNet ships the same policy as an iptables ruleset,
+[`deployments/iptables.rules`](../deployments/iptables.rules): default-drop
+input, SSH, a **rate-limited handshake port with an explicit drop for the
+excess**, and the relay port accepted **without** a packet-rate limit — the same
+ordering, and the same reasoning, as the nftables file above.
 
 ```bash
 # same SSH-lockout warning applies — check the --dport 22 line first
@@ -221,15 +221,23 @@ sudo systemctl daemon-reload
 ```
 
 The handshake unit stores its identity key under `/var/lib/buddynet-handshake/`
-(created `0700`). **Turn on the encrypted control plane** — set QUIC on the server
-(and later on every buddy; the transport must match on both ends):
+(created `0700`). **There is nothing to switch on here:** the control plane is
+QUIC/TLS 1.3 unconditionally since protocol v8 — `--quic-handshake` was removed
+with it, and there is no plaintext transport left to fall back to.
+
+To change the listen address, override the variable the unit actually defines:
 
 ```bash
 sudo systemctl edit buddynet-handshake
 # add:
 #   [Service]
-#   Environment=
+#   Environment=BUDDYNET_LISTEN=[::]:7000
 ```
+
+> ⚠️ Never write a bare `Environment=` in an override. An empty assignment
+> **resets every** `Environment=` the unit set — including `BUDDYNET_LISTEN`,
+> which `ExecStart` expands — so the service starts with an empty `--listen`.
+> Always give the variable a value.
 
 Without this, a `REGISTER` (including the pairing token) travels in **cleartext**
 and the server logs a `WARNING`. Keep QUIC on — it's the secure default.
@@ -368,13 +376,16 @@ you want to review a longer period, export before it expires — see
 Neither is required — the defaults (QUIC control plane, key pinning, default-drop
 firewall) are already secure. Add these if you want a smaller surface.
 
-**Approval mode — "known buddies only."** Only operator-approved keys may pair;
-outsiders are rejected at the TLS handshake, before they reach any logic:
+**Approval mode — "known buddies only."** Only operator-approved keys may pair.
+The rejection happens when the server handles the client's signed `REGISTER` and
+checks the key against the allowlist — *not* at the TLS handshake, which
+authenticates the key but does not decide whether it is allowed. So an
+unapproved client completes TLS and is then refused before any pairing state is
+created for it:
 
 ```bash
 sudo systemctl edit buddynet-handshake
 #   [Service]
-#   Environment=
 #   ExecStart=                       # reset, then re-specify with --authorized
 #   ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} \
 #     --key ${STATE_DIRECTORY}/id.key \
