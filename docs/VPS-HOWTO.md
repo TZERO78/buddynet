@@ -76,6 +76,15 @@ buddynet --version
 A binary signed by anything other than this repository's workflow fails the check
 — don't run it (see [SECURITY.md §8.3](../SECURITY.md#83-release-integrity)).
 
+For releases after v5.2.0 you can also check the build provenance attestation, if
+the box has **GitHub CLI 2.49 or newer** (`gh --version` — Ubuntu 24.04's package
+is 2.45 and does not have the command). `cosign` above stays the offline check
+and is enough on its own:
+
+```bash
+gh attestation verify buddynet-linux-amd64 --repo TZERO78/buddynet
+```
+
 ---
 
 ## 3. Set up the firewall (nftables)
