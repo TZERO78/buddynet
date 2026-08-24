@@ -20,7 +20,8 @@ jobs:
       # A-07's gate. The point of the pin is that the stdlib govulncheck scans is
       # the stdlib that ships — and "setup-go honours the toolchain line" did NOT
       # hold here: with go-version-file it installed the `go` line (1.25.0), so
-      # the CVE scan ran against go1.25 while the release builds with go1.26.6.
+      # the CVE scan ran against go1.25 while the release builds with the version
+      # on the `toolchain` line.
       # The finding, reproduced by the first attempt at fixing it.
       #
       # So the toolchain directive is left to the go command (GOTOOLCHAIN=auto
@@ -96,7 +97,8 @@ jobs:
       # A-07's gate. The point of the pin is that the stdlib govulncheck scans is
       # the stdlib that ships — and "setup-go honours the toolchain line" did NOT
       # hold here: with go-version-file it installed the `go` line (1.25.0), so
-      # the CVE scan ran against go1.25 while the release builds with go1.26.6.
+      # the CVE scan ran against go1.25 while the release builds with the version
+      # on the `toolchain` line.
       # The finding, reproduced by the first attempt at fixing it.
       #
       # So the toolchain directive is left to the go command (GOTOOLCHAIN=auto
