@@ -46,10 +46,14 @@ Change a port without editing the unit:
 sudo systemctl edit buddynet-handshake     # add: [Service] Environment=BUDDYNET_LISTEN=[::]:7000
 ```
 
-The handshake control plane defaults to UDP (with a source-address cookie, so the
-server is never a reflector). To use QUIC instead, set `Environment=
-on the handshake unit **and** in every buddy's `.env` — the transport must match
-on both ends.
+The handshake control plane is **QUIC/TLS 1.3 unconditionally** since protocol
+v8 — there is no plaintext UDP transport to choose any more, and no flag to
+switch between them. The source-address validation that the old UDP path did
+with a cookie is QUIC's own address validation now.
+
+> ⚠️ In an override, never write a bare `Environment=`. An empty assignment
+> resets **every** `Environment=` the unit set — including `BUDDYNET_LISTEN`,
+> which `ExecStart` expands. Always assign a value, as in the example above.
 
 ### Buddy (per tunnel)
 
