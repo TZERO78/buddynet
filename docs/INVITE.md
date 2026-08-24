@@ -1,6 +1,6 @@
 # Pairing — invite, join, trust, and sessions
 
-BuddyNet's pairing model is **one-time, key-bearing invites**: the inviter mints
+BuddyNet's pairing model is **key-bearing invites, used once by the pair**: the inviter mints
 a short-lived invite, hands it to the joiner out of band, and the two nodes pair
 once. The invite carries the inviter's **public key**, so the joiner pins that
 identity straight from the trusted channel the invite travelled over. On success
@@ -11,7 +11,7 @@ all later reconnects use that secret — the invite is never seen again.
 
 | Term | What it is | Lifetime | If it leaks |
 |---|---|---|---|
-| **Invite** (`bnet1.<token>.<key>`) | A one-time pairing string: a rendezvous token plus the inviter's public key. Handed over out of band. | Until the first pairing, or `--invite-timeout` | Someone else can take the joiner's place **until it is used**. Treat it as a password. |
+| **Invite** (`bnet1.<token>.<key>`) | A rendezvous token plus the inviter's public key, handed over out of band. "One-time" describes what the *legitimate* sides do with it — they stop using it once paired. | The pair stops using it after the first pairing; the **server** never marks it spent | Someone else can take the joiner's place while the slot is free — and can keep trying later, because the server keeps no list of spent tokens. Treat it as a password, and see ["What a leaked invite is worth"](#what-a-leaked-invite-is-worth). |
 | **Identity key** (`id.key`) | The node's long-term Ed25519 key. It *is* the node's identity, and its virtual IP is derived from it. | Forever, until you replace it | Whoever holds it is that node. Revoke it on the other side and re-key. |
 | **Buddy key** / `--peer-key` | The *partner's* public key, pinned on this side. Public information — pinning it is what makes a substituted partner fail. | As long as you keep it | Nothing. It is public. |
 | **SAS** (six characters, e.g. `K7QX2M`) | A short code derived from both keys **and the live session**, compared once by a human on first contact when nothing was pinned. | One pairing attempt | Nothing by itself — it is only meaningful during that attempt. |
@@ -99,11 +99,41 @@ session secret is used automatically.
 > *not* accepted is a **mangled** invite — a truncated or edited `bnet1.…` string
 > is an error, never a quiet downgrade to the unpinned path.
 
+## What a leaked invite is worth
+
+The docs used to say a leaked invite was "worthless after 15 minutes or after the
+first connect". That was wrong, and worth being exact about.
+
+**"One-time" is a client-side property.** After the first pairing the two buddies
+switch to a stored session secret and stop presenting the invite. The handshake
+server, however, keeps **no list of spent tokens**: it holds a token's rendezvous
+slot while somebody registers on it, drops the slot on the liveness TTL, and
+creates it again for the next registration presenting the same string.
+`--invite-timeout` bounds how long the **inviter waits**, not how long the token
+is accepted.
+
+In open mode (no `--authorized`), somebody holding an old invite therefore gets:
+
+| | |
+|---|---|
+| Slot already held by both buddies | A third registration is **refused** as a squat, and logged: `SECURITY: event=squat-rejected`. A token slot holds two identities, no more. |
+| Slot free (pair not connected, or moved on to its session secret) | Two **foreign** keys presenting that token can be paired **with each other** — signed `PEER_LIST`s, and relay tickets where those are enabled. |
+| Your tunnel | **Not reachable.** Your buddy is pinned by key; a substituted partner fails on your side no matter what the server said. |
+
+So the exposure is **unauthorised use of your infrastructure** — your matchmaker
+and your relay's bandwidth, for strangers — not access to your data. It needs an
+actual leak; there is no brute-force path to a token.
+
+**Close it with approval mode.** With `--authorized`, an unapproved key is refused
+when its signed `REGISTER` is handled, whatever token it presents. For a server
+that is only ever meant to serve people you know, that is the setting to run —
+see [APPROVAL.md](APPROVAL.md).
+
 ## Flags
 
 | Flag | Env | Description |
 |------|-----|-------------|
-| `--invite` | — | Mint a ONE-TIME invite, print it, and wait for the joiner. It carries this node's public key, so the joiner pins this identity. Expires after `--invite-timeout` (default 15 min) without a first pairing. |
+| `--invite` | — | Mint an invite, print it, and wait for the joiner. It carries this node's public key, so the joiner pins this identity. `--invite-timeout` (default 15 min) bounds how long **this side waits** — it does not make the token unusable server-side; see [What a leaked invite is worth](#what-a-leaked-invite-is-worth). |
 | `--join=INVITE` | `BUDDYNET_JOIN` | Join with the invite your buddy gave you. A key-bearing invite (`bnet1.…`) pins them automatically; a bare token falls back to trust-on-first-use. A malformed invite is refused. |
 | `--invite-timeout` | — | How long to wait for the first pairing before giving up on the invite. Default `15m`. Re-run `--invite` for a fresh token after expiry. |
 | `--peer-key KEY` | `BUDDYNET_PEER_KEY` | Pin the buddy's Ed25519 public key (base64). Strongest: any key mismatch is refused outright, no SAS needed. Checked on **every** connect, reconnects included — if it contradicts the key stored from an earlier pairing, the buddy refuses to connect and says how to re-pair (since v5.2.0; v5.1.x stopped consulting it once a session existed). Removing the flag is **not** a revocation. |

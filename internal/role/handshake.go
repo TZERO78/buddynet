@@ -464,7 +464,10 @@ func Handshake(ctx context.Context, cfg HandshakeConfig) error {
 	} else {
 		log.Print("approval mode OFF: any client that knows a token may pair. A token-holder can " +
 			"thereby harvest the partner's endpoints from the signed PEER_LIST, and (only against a buddy " +
-			"run with --lab) MITM it. Restrict with --authorized; always pin buddies with --peer-key. " +
+			"run with --lab) MITM it. No token is ever marked spent here, so an OLD invite still works: " +
+			"two strangers presenting one can be paired with each other on this server (and issued relay " +
+			"tickets), which is your bandwidth, though never entry into a pinned tunnel. " +
+			"Restrict with --authorized; always pin buddies with --peer-key. " +
 			"(The control plane is QUIC/TLS 1.3 unconditionally since v8, so the token never travels " +
 			"in cleartext either way.)")
 	}

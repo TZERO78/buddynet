@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (Docs/Security) — trust and DoS semantics stated accurately (M-01, M-03, L-01)
+
+From the same external audit as the firewall finding. All three reproduced
+against the code before anything was rewritten.
+
+**M-01 — "before any crypto" was true of the relay and false of the handshake
+server.** Several documents (and two flag help strings) promised that
+`--allow-cidr` and the rate limits drop traffic before any cryptography. The
+relay does exactly that: it owns its UDP read loop, and its fixed order is size
+cap → CIDR → per-source rate → cookie → signature checks. The handshake server
+cannot: the control plane is QUIC, and quic-go only hands over a connection whose
+**TLS 1.3 handshake, Ed25519 client certificate included, has already completed**
+— the source code said so all along (`internal/tunnel/control.go`), the docs did
+not. New **SECURITY.md §5.5** names the actual boundary:
+
+- a **spoofing** source gets a stateless QUIC Retry token and nothing else — no
+  connection, no memory, no handshake;
+- a source that can receive at its claimed address can make the server perform
+  **one TLS handshake per connection attempt** before `--allow-cidr` or
+  `--authorized` are consulted. Neither flag prevents that; they bound what comes
+  after it. The firewall's rate limit on the handshake port is what bounds that
+  cost — which is also why its placement before `established,related` matters.
+
+**M-03 — "one-time invite" is a client-side property, not a server-side one.**
+SECURITY.md claimed a leaked invite was "worthless after 15 min or after the first
+connect". It is not: the handshake server keeps **no list of spent tokens**, and
+`--invite-timeout` bounds how long the *inviter waits*. What a leaked invite
+actually gets someone in open mode is now written out in `docs/INVITE.md`:
+
+- a slot already held by both buddies refuses a third registration as a squat
+  (`SECURITY: event=squat-rejected`; a slot holds two identities);
+- a **free** slot lets two *foreign* keys pair **with each other**, drawing signed
+  `PEER_LIST`s and, where enabled, relay tickets — unauthorised use of your
+  matchmaker and bandwidth;
+- your tunnel stays out of reach, because the buddy is pinned by key.
+
+The server's open-mode startup log now says this too, rather than only mentioning
+endpoint harvesting.
+
+**Approval mode is now documented as the recommended setting for a private
+server**, not as optional hardening: `docs/VPS-HOWTO.md` §8 leads with it and says
+why, and `docs/APPROVAL.md` states what a token-holder can do — including the
+stranger-pairs-stranger case it previously omitted.
+
+**L-01 — `docs/PROTOCOL.md` still described the relay's address-validation cookie
+as `HMAC(key, epoch‖src-IP)`.** It has bound the **port** as well since v5.1.1;
+without it, two hosts behind one NAT could hijack each other's leg. The
+implementation was fixed then, the table was not.
+
+
 ### Fixed (Security) — the VPS guide documented a weaker firewall than it ships
 
 Reported externally, reproduced here against `main`. `deployments/nftables.conf`

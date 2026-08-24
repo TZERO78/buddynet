@@ -69,7 +69,7 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 			"path to the Ed25519 identity key (buddies pin this; created if missing, but for a public server inject it read-only and back it up). Empty = EPHEMERAL (regenerates on restart — buddies would have to re-pin; not for production)."),
 		ttl: fs.Duration("ttl", 0, "liveness window for a registration (0 = default 10s)"),
 		allowCIDR: fs.String("allow-cidr", "",
-			"comma-separated CIDRs allowed to reach the server; other sources are dropped before any crypto (empty = open to all, the norm for a public server)"),
+			"comma-separated CIDRs allowed to reach the server; other sources are refused before they occupy a connection slot -- after the TLS handshake QUIC already ran, not before it (empty = open to all, the norm for a public server)"),
 		debug: fs.Bool("debug", false, "verbose, security-sensitive logging (avoid on a public server — leaks pairing metadata)"),
 	}
 }
