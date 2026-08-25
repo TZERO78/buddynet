@@ -1,0 +1,25 @@
+# The image build needs the Go sources and nothing else. Without this file the
+# ENTIRE working tree goes to the daemon as build context — 23 MB of it, including
+# the demo recordings and the lab's runtime state. That is not just slow: the lab
+# writes files owned by the container user, and the build then dies with
+# "checking context: no permission to read from lab/party/hub.peers" on a machine
+# that has run the demos.
+.git
+.github
+.claude
+
+# Lab, demos and their runtime state (some of it not readable by this user).
+lab
+media
+
+# Documentation and deployment templates — none of it is copied into the image.
+docs
+deployments
+unraid
+*.md
+LICENSE
+
+# Local build output.
+dist
+buddynet
+buddynet-handshake
