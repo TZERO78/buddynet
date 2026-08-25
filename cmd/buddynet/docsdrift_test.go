@@ -344,3 +344,74 @@ func TestMarkdownLinksAndAnchorsResolve(t *testing.T) {
 			"pattern is broken, and this test would pass vacuously", files, links)
 	}
 }
+
+// TestShippedFirewallLimitsPerSourceBeforeGlobal pins the rule ORDER on the
+// handshake port in both shipped rulesets.
+//
+// The port is limited twice: a per-source bucket (nftables `meter`, iptables
+// `hashlimit`) and a global ceiling (`limit`). Which comes first is not a matter
+// of taste. A global limit is source-blind, so ahead of the per-source rule it
+// drops a share of every sender's packets — including those of the buddy the
+// fairness rule exists to protect. lab/test-firewall-fairness.sh measures the
+// difference: a legitimate buddy keeps 15% of its unopposed throughput with the
+// global limit alone, 77% with global first, and 100% with per-source first.
+//
+// That lab test needs root, netns and a few minutes. This one is the cheap
+// always-on guard that runs in CI on every change, so the order cannot be
+// swapped back by an edit that never gets a lab run.
+//
+// It deliberately checks the RULES, not the prose around them. The comment above
+// these rules once numbered them in the opposite order to the rules themselves,
+// which is how this test came to exist — but a gate on comment wording would be
+// guessing at English, while the order of two lines is a fact.
+func TestShippedFirewallLimitsPerSourceBeforeGlobal(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("locate module root: %v", err)
+	}
+
+	for _, tc := range []struct {
+		file      string
+		perSource *regexp.Regexp
+		global    *regexp.Regexp
+	}{
+		{
+			file:      "deployments/nftables.conf",
+			perSource: regexp.MustCompile(`(?m)^\s*udp dport \$?port_handshake.*\bmeter\b`),
+			global:    regexp.MustCompile(`(?m)^\s*udp dport \$?port_handshake\s+limit rate`),
+		},
+		{
+			file:      "deployments/iptables.rules",
+			perSource: regexp.MustCompile(`(?m)^-A INPUT -p udp --dport \d+ .*\bhashlimit\b`),
+			global:    regexp.MustCompile(`(?m)^-A INPUT -p udp --dport \d+ -m limit\b`),
+		},
+	} {
+		b, rerr := os.ReadFile(filepath.Join(root, tc.file)) // #nosec G304 -- fixed path in this module
+		if rerr != nil {
+			t.Errorf("read %s: %v", tc.file, rerr)
+			continue
+		}
+		body := string(b)
+
+		ps := tc.perSource.FindStringIndex(body)
+		gl := tc.global.FindStringIndex(body)
+		if ps == nil {
+			t.Errorf("%s has no per-source rate limit on the handshake port — one loud "+
+				"source can spend the whole budget (audit finding M-02)", tc.file)
+		}
+		if gl == nil {
+			t.Errorf("%s has no global rate ceiling on the handshake port — nothing bounds "+
+				"what many sources together cost the box", tc.file)
+		}
+		if ps == nil || gl == nil {
+			continue
+		}
+		if ps[0] > gl[0] {
+			t.Errorf("%s puts the global ceiling BEFORE the per-source limit. A global limit "+
+				"is source-blind: ahead of the per-source rule it drops a share of every "+
+				"sender's packets, so a flood still costs your buddies ~23%% of their "+
+				"throughput (measured by lab/test-firewall-fairness.sh). Per-source first.",
+				tc.file)
+		}
+	}
+}
