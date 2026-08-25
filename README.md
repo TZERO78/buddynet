@@ -64,6 +64,39 @@ A small VPS is the usual choice. A machine on your own internet connection also
 works when it is reliably reachable through a public IP or current DNS name.
 The buddies themselves may sit behind ordinary NAT or CGNAT.
 
+## Install
+
+**You do not have to build anything.** Every release ships ready-to-run binaries
+for Linux **amd64** and **arm64**. They are statically linked, so there is no
+runtime, no glibc requirement and nothing to install alongside them — download,
+make executable, run.
+
+```bash
+# pick your architecture: buddynet-linux-amd64 or buddynet-linux-arm64
+curl -LO https://github.com/TZERO78/buddynet/releases/latest/download/buddynet-linux-amd64
+curl -LO https://github.com/TZERO78/buddynet/releases/latest/download/buddynet-linux-amd64.sha256
+sha256sum -c buddynet-linux-amd64.sha256
+
+sudo install -m0755 buddynet-linux-amd64 /usr/local/bin/buddynet
+buddynet --version
+```
+
+Before you put it on a public server, **verify the signature** as well — every
+release is keyless-signed with cosign/Sigstore, and each artifact ships a
+`.bundle` next to it. The exact command is in
+[Setup — install the binary](docs/SETUP.md#2-install-the-binary-verified).
+
+Each release also contains `buddynet-handshake-linux-{amd64,arm64}` — a separate,
+single-purpose binary for running a **public** matchmaker — and an SPDX SBOM.
+
+**Unraid users need none of this:** the [plugin](#unraid-plugin) downloads the
+pinned release itself and refuses a binary whose checksum does not match.
+
+**Linux only.** Windows and macOS builds were dropped in v3.0.1 and are not
+planned. There is no published container image either — `deployments/docker-compose.yml`
+builds locally from this repository, so Docker is the one path that does need a
+checkout.
+
 ## Quickstart: two buddies and one VPS
 
 For production, follow the hardened [setup guide](docs/SETUP.md). The commands
@@ -204,17 +237,20 @@ The README describes the normal path. Detailed protocol, security and unusual
 deployment behaviour belongs in the linked documents so that each statement has
 one authoritative home.
 
-## Build
+## Build from source
+
+Only needed if you want to change something, review the code you run, or build a
+container image — see [Install](#install) for the normal path.
 
 ```bash
 go build -ldflags="-s -w" -o buddynet ./cmd/buddynet
 go test ./...
 ```
 
-Official releases are available for Linux amd64 and arm64. Release assets include
-checksums, Sigstore bundles and an SPDX SBOM; see
-[verifying a release](docs/SETUP.md#2-install-the-binary-verified) before
-installing a binary on a public server.
+Releases are built by [`release.yml`](.github/workflows/release.yml) from a
+tagged commit, signed, and published with a SLSA build provenance attestation, so
+a downloaded binary can be traced back to the workflow and commit that produced
+it.
 
 ## License and project status
 
