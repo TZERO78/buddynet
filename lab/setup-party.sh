@@ -69,6 +69,9 @@ done
 echo "==> Writing manifests (Model A: each peer pinned by key)..."
 # hub talks to every buddy; each buddy talks only to the hub. The per-pair token
 # is shared between the hub line and that buddy's line.
+# A previous demo run may have left these owned by the container user (the hub
+# rewrites its manifest on `peers remove`), and then truncating them fails.
+rm -f party/*.peers
 { echo "# hub's buddies — one tunnel each"; echo "buddies:"; } > party/hub.peers
 for b in "${BUDDIES[@]}"; do
     tok="party-token-${b}"

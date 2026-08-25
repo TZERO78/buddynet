@@ -143,6 +143,8 @@ buddynet --peers-file /var/lib/buddynet/peers peers remove PEER
 buddynet --peers-file /var/lib/buddynet/peers peers allow PEER
 ```
 
+![One hub holding five buddy tunnels: peers list, a .buddy name lookup, revoking one buddy and inviting them back](media/multipeer-demo.gif)
+
 See [Operations — Many buddies](docs/OPERATIONS.md#many-buddies-multipeer) for
 the manifest format, routing and revocation behaviour.
 
