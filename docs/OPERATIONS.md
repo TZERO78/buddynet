@@ -45,15 +45,25 @@ made an on-path pairing squat possible in the first place.
 
 ### Locking the control plane to known buddies (`--authorized`)
 
-In **approval mode** (`--authorized <allowlist>`) the QUIC control plane pins
-clients by key at the **TLS handshake**: every buddy presents its Ed25519 identity
-certificate, and the server rejects any key not on the allowlist **before** it can
-send a `REGISTER`. A non-allowlisted node never reaches the matchmaking logic — the
-same early rejection a firewall gives, enforced cryptographically (no PKI; the key
-is pinned directly, mirroring how the buddy pins the server key). The server logs:
+In **approval mode** (`--authorized <allowlist>`) the control plane separates
+**authentication** from **authorization**, and the split is deliberate:
+
+- **TLS authenticates every client.** Each buddy presents an Ed25519 identity
+  certificate and TLS 1.3 makes it sign the transcript, so the key handed up is one
+  it demonstrably holds. `REGISTER.pubkey` must equal that key or the connection is
+  closed with nothing stored.
+- **The allowlist decides per `REGISTER`**, not at the TLS handshake. An
+  allowlisted key registers; an unknown key carrying a valid sealed enrollment code
+  becomes a pending enrollment; an unknown key without one is refused.
+
+A TLS-layer allowlist gate would make code-based enrollment impossible — a key that
+was never approved could not complete the handshake, so its sealed code could never
+reach the operator (that was the bug fixed in v4.1.0). Unknown keys are therefore
+rate-limited far more tightly than allowlisted ones (2/s per source, 20/s global).
+The server logs:
 
 ```
-approval mode: QUIC control pins clients to the allowlist at the TLS handshake
+approval mode: QUIC control authenticates every client by key at the TLS handshake; the allowlist decision (allow / enroll with a code / refuse) is made per REGISTER
 ```
 
 ```bash

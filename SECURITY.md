@@ -276,9 +276,6 @@ The pairing secret is split so the value that actually travels is short-lived:
   **[Approval mode](docs/APPROVAL.md) closes this**, because an unapproved key is
   refused when its signed `REGISTER` is handled, whatever token it presents. On a
   server that is only ever meant to serve people you know, run it — see §5.4.
-- **`--join`** is the legacy mode: a single fixed token used for rendezvous on
-  every reconnect (no session secret). Fine for scripted/daemon setups,
-  especially together with `--peer-key`.
 
 This is hygiene, not a new confidentiality guarantee — impersonation is already
 caught by `--peer-key`/SAS. It shrinks the exposure of the one secret you hand to

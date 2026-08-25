@@ -283,8 +283,12 @@ See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** and
   in approval mode. The control plane is QUIC/TLS 1.3 unconditionally, so it
   encrypts the token and validates source addresses without a cookie round-trip.
 - Restrict **who** can reach a server role with `--allow-cidr` (comma-separated
-  CIDRs; relay **and** handshake). Disallowed sources are dropped before any
-  crypto, so a private relay/handshake needs no separate firewall.
+  CIDRs; relay **and** handshake). On the **relay** a disallowed source is dropped
+  before any crypto. On the **handshake server** the check runs after QUIC/TLS —
+  quic-go owns the packet path there, so TLS has already run by the time the CIDR
+  is seen (see [SECURITY.md §5.5](SECURITY.md#55-what-an-unauthenticated-source-can-cost-you-the-pre-tls-boundary)).
+  Run a host or cloud firewall **as well**: it is the only layer that caps what an
+  unauthenticated source can cost you before TLS.
 - A direct tunnel isn't revocable centrally — the server isn't in the data path.
   `--reauth-interval` periodically rebuilds the tunnel so a revocation or token
   rotation takes effect within the interval (off by default; see

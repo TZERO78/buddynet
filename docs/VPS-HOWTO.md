@@ -241,9 +241,6 @@ sudo systemctl edit buddynet-handshake
 > which `ExecStart` expands — so the service starts with an empty `--listen`.
 > Always give the variable a value.
 
-Without this, a `REGISTER` (including the pairing token) travels in **cleartext**
-and the server logs a `WARNING`. Keep QUIC on — it's the secure default.
-
 ---
 
 ## 5. Create the identity, start it, and note the server key
@@ -308,7 +305,11 @@ journalctl --namespace=buddynet -u buddynet-handshake -f
 
 On the coordinator you don't create tunnels — your two machines do, using the
 server address + the key from step 5. The friendly flow uses a **one-time
-invite** (valid 15 min or until first pairing):
+invite** — one-time in the sense that the two legitimate sides retire it after
+they pair. The server never marks it spent, and `--invite-timeout` (default
+15 min) bounds how long the *inviter waits*, not how long the token is accepted:
+treat a leaked invite as live until you rotate it, and see
+[INVITE.md](INVITE.md#what-a-leaked-invite-is-worth).
 
 ```bash
 # On machine A — mint an invite (prints a TOKEN):

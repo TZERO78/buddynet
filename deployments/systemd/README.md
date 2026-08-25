@@ -81,5 +81,9 @@ journalctl --namespace=buddynet -u buddynet-handshake -f
 ## Firewall
 
 See [`../nftables.conf`](../nftables.conf) / [`../iptables.rules`](../iptables.rules)
-for a default-drop ruleset that opens only SSH and the two BuddyNet UDP ports
-(rate-limited against floods).
+for a default-drop ruleset that opens only SSH and the two BuddyNet UDP ports.
+Only the **handshake** port carries a packet-rate limit; the **relay** port
+deliberately does not, because it carries tunnel data and a control-plane rate
+would throttle the tunnel itself. That limit is a single global token bucket: it
+caps what floods cost the VPS, it does **not** guarantee availability under
+attack — one noisy source can consume the shared budget.

@@ -1036,10 +1036,12 @@ SECURITY — please read
 
 TRANSPORT
   The handshake control plane is encrypted with QUIC/TLS 1.3 — ALWAYS, since v8:
-  the pairing token never travels in cleartext, source addresses are validated by
-  the QUIC handshake (the server is never a reflector), and with --authorized the
-  server pins clients to the allowlist at the TLS handshake. There is no plain-UDP
-  control plane left to select, and therefore no flag to select it with.
+  the pairing token never travels in cleartext and source addresses are validated
+  by the QUIC handshake (the server is never a reflector). TLS AUTHENTICATES every
+  client by its Ed25519 key but authorizes none: with --authorized the allowlist
+  decision is made per signed REGISTER, because enrollment needs an unknown key to
+  be able to deliver its sealed code. There is no plain-UDP control plane left to
+  select, and therefore no flag to select it with.
 
 FLAGS
 `, appName, appVersion())

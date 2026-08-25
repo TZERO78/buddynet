@@ -52,9 +52,10 @@ the whole control plane (matchmaking, signed `PEER_LIST`, pinning/TOFU, the
 fallback chain, the blind relay, the 48-buddy cap) is unchanged. No protocol
 version bump: the wire format between buddy and server is identical.
 
-> **The control plane is always QUIC/plain — never WireGuard.** Matchmaking runs
-> over (encrypted, source-validated, and — with `--authorized` —
-> pinning clients to the allowlist at the TLS handshake; see
+> **The control plane is always QUIC — never WireGuard.** Matchmaking runs over
+> QUIC/TLS 1.3 (encrypted, source-validated, every client authenticated by its
+> Ed25519 key; with `--authorized` the allowlist decision is made per `REGISTER`,
+> not at the TLS handshake — see
 > [OPERATIONS.md](OPERATIONS.md) and [APPROVAL.md](APPROVAL.md)). Keeping control
 > off WireGuard is deliberate: the server would otherwise key peers by identity and
 > a buddy's N concurrent registrations would collide, breaking per-buddy endpoint
