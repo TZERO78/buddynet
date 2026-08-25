@@ -84,6 +84,8 @@ See [`../nftables.conf`](../nftables.conf) / [`../iptables.rules`](../iptables.r
 for a default-drop ruleset that opens only SSH and the two BuddyNet UDP ports.
 Only the **handshake** port carries a packet-rate limit; the **relay** port
 deliberately does not, because it carries tunnel data and a control-plane rate
-would throttle the tunnel itself. That limit is a single global token bucket: it
-caps what floods cost the VPS, it does **not** guarantee availability under
-attack — one noisy source can consume the shared budget.
+would throttle the tunnel itself. The handshake limit is two rules in a
+load-bearing order — a per-source meter, then a global ceiling — so one loud
+source cannot spend everybody's budget. It still does not guarantee availability
+under attack: many sources together fill the global ceiling, and a saturated
+uplink never reaches the firewall.

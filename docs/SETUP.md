@@ -115,11 +115,21 @@ What the shipped policy does, and why the order matters:
   cap); bandwidth is a shaping problem (`tc`, an nftables meter sized for your
   link, a provider egress budget). Restrict **who** may reach it instead.
 
-Be honest about what the limit buys: it is a **single global token bucket**. It
-caps what a flood costs your VPS, but it does not guarantee availability under
-attack — one noisy source can consume the shared budget and crowd out legitimate
-pairings. For a link under real pressure you need your provider's DDoS handling,
-not a packets-per-second rule.
+The handshake port is limited **twice, and the order matters**: a per-source
+meter first, then a global ceiling. A plain `limit` is attached to the rule, not
+to the sender, so on its own one loud source spends the shared budget and crowds
+everybody else out — measured, not assumed: with only the global limit,
+[`lab/test-firewall-fairness.sh`](../lab/test-firewall-fairness.sh) saw a
+legitimate buddy keep **15%** of its packets next to a single flooding source.
+Per-source first brings that to **100%** while the flood stays throttled, because
+the global ceiling then only ever sees traffic that has already been tamed.
+
+Be honest about what this does and does not buy. It stops one source from
+starving the others and caps what any flood costs your CPU. It does **not** make
+you immune: a botnet spread across many addresses still fills the global ceiling,
+and traffic that saturates your uplink never reaches your firewall at all. For a
+link under real pressure you need your provider's DDoS handling, not a
+packets-per-second rule.
 
 Read the shipped file itself for the full commentary — every rule says why it is
 where it is. Then apply and persist it (nftables shown; the iptables file has the

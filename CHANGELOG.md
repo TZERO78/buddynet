@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (Security) — the handshake port is rate-limited per source, not just globally
+
+`deployments/nftables.conf` and `deployments/iptables.rules` now limit the
+handshake port with a **per-source meter first, then a global ceiling**. A plain
+`limit` is attached to the rule rather than to the sender, so a single loud
+source could spend the whole shared budget and crowd out legitimate pairings
+(audit finding M-02).
+
+The order is load-bearing, the same way the position of the
+`established,related` accept is. A global limit is source-blind: put it first and
+it drops a share of everybody's packets, the buddy you are protecting included.
+Put the per-source meter first and the global ceiling only ever sees traffic that
+has already been tamed.
+
+Measured with the new [`lab/test-firewall-fairness.sh`](lab/test-firewall-fairness.sh)
+— one flooding source, one legitimate buddy, counted against that buddy's
+unopposed throughput:
+
+| ruleset | buddy keeps |
+|---|---:|
+| global limit only (before) | 15% |
+| global first, then per-source | 77% |
+| per-source first, then global (now) | 100% |
+
+This is not immunity, and the docs say so: many sources together still fill the
+global ceiling, and traffic that saturates the uplink never reaches the firewall.
+
 ### Changed (Security, BEHAVIOUR CHANGE) — the shipped private server templates are fail-closed
 
 `deployments/systemd/buddynet-handshake.service` and the `handshake` service in

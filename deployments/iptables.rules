@@ -24,7 +24,15 @@
 # so once the server answers the first packet, every later packet of that 5-tuple
 # matched the accept and the limit was never reached. The excess must also be
 # dropped explicitly, or it falls through to the established rule.
--A INPUT -p udp --dport 51820 -m limit --limit 100/second --limit-burst 50 -j ACCEPT
+# Two limits, in this order: a GLOBAL emergency ceiling that protects the box
+# whatever the sources, then PER-SOURCE fairness so one loud address cannot spend
+# the shared budget. With only the global limit, lab/test-firewall-fairness.sh
+# measured a legitimate buddy keeping 15% of its packets next to one flood.
+# (hashlimit needs xt_hashlimit; it ships with the standard iptables modules.)
+-A INPUT -p udp --dport 51820 -m hashlimit --hashlimit-above 50/second \
+    --hashlimit-burst 50 --hashlimit-mode srcip --hashlimit-name bn-hs \
+    --hashlimit-htable-expire 60000 -j DROP
+-A INPUT -p udp --dport 51820 -m limit --limit 500/second --limit-burst 200 -j ACCEPT
 -A INPUT -p udp --dport 51820 -j DROP
 
 # The relay port has NO packet-rate limit on purpose: it carries tunnel DATA, and

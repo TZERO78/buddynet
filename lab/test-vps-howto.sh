@@ -50,7 +50,10 @@ echo "$RS" | grep -q 'policy drop' && ok "input policy is DROP (default-deny)" |
 echo "$RS" | grep -q 'udp dport 51820' && ok "handshake 51820 rule present" || no "51820 rule missing"
 echo "$RS" | grep -q 'udp dport 51821' && ok "relay 51821 rule present" || no "51821 rule missing"
 echo "$RS" | grep -q 'tcp dport 22 accept' && ok "ssh 22 accept present" || no "ssh rule missing"
-echo "$RS" | grep -q 'limit rate 100/second' && ok "udp rate-limit present" || no "rate-limit missing"
+echo "$RS" | grep -q 'udp dport 51820 .*limit rate over' \
+  && ok "control port has a global rate ceiling" || no "global rate ceiling missing"
+echo "$RS" | grep -qE 'udp dport 51820 .*meter .*(ip|ip6) saddr' \
+  && ok "control port has per-source fairness (meter)" || no "per-source meter missing"
 ping -c1 -W2 $PIP >/dev/null 2>&1 && ok "ICMP to coordinator works (diagnostics)" || no "ICMP blocked"
 
 udp_probe(){ # $1=port -> GOT / NONE
@@ -100,7 +103,9 @@ docker compose build >/dev/null 2>&1
 docker compose up -d server >/dev/null 2>&1
 
 # HowTo step 5: read the server key and pin it (also repairs a stale .env).
-KEY=$(docker compose run --rm server --key /var/lib/buddynet/id.key init 2>/dev/null | tr -d '\r\n')
+# `init` only prints on the FIRST run and refuses afterwards; `identity` reads.
+KEY=$( (docker compose run --rm server --key /var/lib/buddynet/id.key init 2>/dev/null \
+  || docker compose run --rm server --key /var/lib/buddynet/id.key identity 2>/dev/null) | tr -d '\r\n')
 [ -n "$KEY" ] && ok "coordinator server key read (identity subcommand)" || no "could not read server key"
 grep -q '^BUDDYNET_SERVER_KEY=' .env 2>/dev/null && sed -i "s|^BUDDYNET_SERVER_KEY=.*|BUDDYNET_SERVER_KEY=${KEY}|" .env || echo "BUDDYNET_SERVER_KEY=${KEY}" > .env
 
