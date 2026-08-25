@@ -1,7 +1,15 @@
 # Single static binary on a distroless, non-root runtime. One image, three
-# roles — choose with --role at runtime. Multi-arch images are produced by
-# buildx in CI, which runs this build per target platform so `go build` yields
-# each arch natively.
+# roles — choose with --role at runtime.
+#
+# NO IMAGE IS PUBLISHED. There is no registry to pull from: build it yourself
+# from this repository (deployments/docker-compose.yml does exactly that). The
+# deliberate trade is that a published image ages — its base would need a rebuild
+# on every CVE, whether or not BuddyNet changed — while the shipped static
+# binaries do not. CI builds this file on every change so it cannot rot, but it
+# pushes nothing.
+#
+# Building for another architecture: this is a plain single-platform build, so
+# use `docker buildx build --platform linux/arm64` if you need one.
 # Exact version AND digest, matching the `toolchain` line in go.mod: a floating
 # 1.26-alpine tag would drift away from the toolchain every other build path is
 # pinned to (A-07).

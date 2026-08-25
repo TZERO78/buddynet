@@ -86,6 +86,17 @@ jobs:
             done
           done
 
+      # Build the container image on every change. No image is published, but
+      # deployments/docker-compose.yml builds from this Dockerfile, so a broken
+      # one is a broken deployment path for anyone using it — and until this
+      # step existed, nothing here ever built it.
+      - name: container image
+        run: |
+          docker build -f deployments/Dockerfile -t buddynet:ci .
+          # It has no shell, so the only smoke test available is the entrypoint.
+          docker run --rm buddynet:ci --version
+          docker run --rm buddynet:ci --help > /dev/null
+
   scan:
     runs-on: ubuntu-latest
     steps:
