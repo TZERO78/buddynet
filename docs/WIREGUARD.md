@@ -43,7 +43,7 @@
 >   there is nothing left it could enforce without nftables — and coming up anyway
 >   would mean routing into your LAN with no way to say so.
 > - **Per buddy:** in MultiPeer, each manifest entry can carry its own `expose:`
->   list — see [PEERS.md](PEERS.md). Precedence: per-buddy `expose` →
+>   list — see [OPERATIONS.md](OPERATIONS.md). Precedence: per-buddy `expose` →
 >   `--expose` flag → fail-closed.
 
 BuddyNet can carry the tunnel over **kernel WireGuard** instead of QUIC. It is
@@ -56,7 +56,7 @@ version bump: the wire format between buddy and server is identical.
 > QUIC/TLS 1.3 (encrypted, source-validated, every client authenticated by its
 > Ed25519 key; with `--authorized` the allowlist decision is made per `REGISTER`,
 > not at the TLS handshake — see
-> [OPERATIONS.md](OPERATIONS.md) and [APPROVAL.md](APPROVAL.md)). Keeping control
+> [OPERATIONS.md](OPERATIONS.md) and [SETUP.md](SETUP.md)). Keeping control
 > off WireGuard is deliberate: the server would otherwise key peers by identity and
 > a buddy's N concurrent registrations would collide, breaking per-buddy endpoint
 > discovery and MultiPeer — the same reason Tailscale/Netbird keep their control

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validates docs/VPS-HOWTO.md end to end — the "run your own VPS coordinator"
+# Validates docs/SETUP.md end to end — the "run your own VPS coordinator"
 # walkthrough — in two parts:
 #
 #   Part 1 (firewall): loads the SHIPPED deployments/nftables.conf into a network

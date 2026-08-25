@@ -176,7 +176,7 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 		sasTimeout:        fs.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)"),
 		inviteTimeout:     fs.Duration("invite-timeout", 15*time.Minute, "buddy: give up the first pairing (--invite/--join) after this long; the invite token is one-time"),
 		status:            fs.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)"),
-		invite:            fs.Bool("invite", false, "buddy: mint an invite, print it, and wait. The invite carries this node's public key, so your buddy pins YOUR identity from it — hand it over on a channel you trust. Afterwards reconnects use a stored session secret and this side stops presenting the invite; --invite-timeout bounds how long THIS side waits, it does not make the token unusable on the server. A leaked invite lets two strangers pair on your server (not enter your tunnel) — run the handshake server with --authorized to close that. See docs/INVITE.md"),
+		invite:            fs.Bool("invite", false, "buddy: mint an invite, print it, and wait. The invite carries this node's public key, so your buddy pins YOUR identity from it — hand it over on a channel you trust. Afterwards reconnects use a stored session secret and this side stops presenting the invite; --invite-timeout bounds how long THIS side waits, it does not make the token unusable on the server. A leaked invite lets two strangers pair on your server (not enter your tunnel) — run the handshake server with --authorized to close that. See docs/SETUP.md"),
 		join:              fs.String("join", "", "buddy: join with the one-time invite your buddy gave you. A key-bearing invite pins them automatically (no code to compare on this side); a bare token falls back to first-contact verification. On success a session secret is stored for reconnects"),
 		name:              fs.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars"),
 		dnsFlag:           fs.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)"),
@@ -1002,7 +1002,7 @@ NAMES & ON-DEMAND
 
   --name NAME --dns   Reach buddies by NAME.buddy instead of a virtual IP — a
                       local stub resolver (BuddyDNS) answers *.buddy from the
-                      live peer list. See docs/BUDDYDNS.md.
+                      live peer list. See docs/OPERATIONS.md.
   --lazy              With -L, bind the local listener immediately but defer the
                       tunnel until the first connection actually arrives (the
                       tunnel sleeps until something connects).

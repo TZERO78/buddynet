@@ -33,7 +33,7 @@ tampered download is refused. The pinned version and its checksum are in
   `<name>.buddy`) and/or enable the `--dns` resolver, which answers `*.buddy`
   queries on `127.0.0.153:53`. To use the names on the Unraid host, route the
   `.buddy` TLD to that resolver (see
-  [BUDDYDNS.md](../../docs/BUDDYDNS.md)).
+  [OPERATIONS.md](../../docs/OPERATIONS.md)).
 - **Lazy tunnel:** with `--lazy` the `-L` listener binds immediately but the
   encrypted tunnel is only dialled on the first incoming connection (needs `-L`).
 - **Live status** and a **Dashboard tile** with a buddy online/offline

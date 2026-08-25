@@ -607,7 +607,7 @@ than silently dropped.
   has nothing to confirm, and logs its code). The **inviter** is the verifying
   side and needs a terminal — for an unattended inviter, pin the joiner with
   `--peer-key` as before. See *Daemon setup* in
-  [docs/INVITE.md](docs/INVITE.md).
+  `docs/INVITE.md`.
 
 ### Changed
 
@@ -1218,7 +1218,7 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
   the per-buddy scope. This adds `gopkg.in/yaml.v3` as the project's second
   approved application dependency (after `miekg/dns`); the manifest is parsed
   strictly (unknown fields are errors) with bounded size. See
-  [docs/PEERS.md](docs/PEERS.md).
+  `docs/PEERS.md`.
 
 - **The handshake control plane is now QUIC/TLS 1.3 by default (security by
   default).** Previously plain UDP (cleartext token) was the default and opted in; now encryption is on unless you explicitly opt out
@@ -1231,7 +1231,7 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
   for the `<fp8>.buddy` fingerprint alias, so a peer's self-asserted name can no
   longer shadow another peer's fingerprint entry in the resolver. A vanity name
   like `deadbeef` is disallowed for this reason; `deadbeefx` or `web01` are fine.
-  See [docs/BUDDYDNS.md](docs/BUDDYDNS.md).
+  See `docs/BUDDYDNS.md`.
 - **systemd units gain a crash-loop circuit breaker.** `StartLimitIntervalSec=60`
   / `StartLimitBurst=5` on the handshake, relay and buddy units: a deterministic
   start failure now stops after 5 attempts instead of restarting forever under

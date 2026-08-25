@@ -105,7 +105,7 @@ failing, being revoked (`peers remove`), or reconnecting never touches the
 others. `--vip-listen` then binds each connected buddy's virtual IP on the
 loopback interface ([`internal/vip`](../internal/vip), via netlink) so
 `name.buddy:port` routes to the right buddy's tunnel. The manifest is reconciled
-live on `SIGHUP`. See [PEERS.md](PEERS.md).
+live on `SIGHUP`. See [OPERATIONS.md](OPERATIONS.md).
 
 ## Data plane: QUIC streams, or kernel WireGuard
 

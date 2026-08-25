@@ -6,12 +6,12 @@ and the `--status` probe.
 
 > **New to this?** For a friendly, start-to-finish walkthrough of standing up your
 > own VPS coordinator — install & verify, a hardened nftables firewall, systemd,
-> connecting buddies, and maintenance — see **[VPS-HOWTO.md](VPS-HOWTO.md)**. This
+> connecting buddies, and maintenance — see **[SETUP.md](SETUP.md)**. This
 > page is the flag-by-flag reference behind it.
 
 ---
 
-## QUIC control plane, the secure default)
+## QUIC control plane
 
 **The control plane is encrypted with QUIC/TLS 1.3 by default** — security by
 default. You do not need to pass anything; it is on unless you explicitly opt out
@@ -43,61 +43,40 @@ cookie for source validation and the `REGISTER` in cleartext. It is removed: the
 cookie only reproduced what QUIC does anyway, while the cleartext token was what
 made an on-path pairing squat possible in the first place.
 
-### Locking the control plane to known buddies (`--authorized`)
+### Approval mode (`--authorized`) at runtime
 
-In **approval mode** (`--authorized <allowlist>`) the control plane separates
-**authentication** from **authorization**, and the split is deliberate:
+Setting it up is in [SETUP.md — Harden](SETUP.md#approval-mode--recommended-for-a-private-server).
+What matters while it runs:
 
-- **TLS authenticates every client.** Each buddy presents an Ed25519 identity
-  certificate and TLS 1.3 makes it sign the transcript, so the key handed up is one
-  it demonstrably holds. `REGISTER.pubkey` must equal that key or the connection is
-  closed with nothing stored.
-- **The allowlist decides per `REGISTER`**, not at the TLS handshake. An
-  allowlisted key registers; an unknown key carrying a valid sealed enrollment code
-  becomes a pending enrollment; an unknown key without one is refused.
+- **TLS authenticates, the allowlist authorizes.** Every client is authenticated
+  by its Ed25519 key at the TLS handshake; whether that key may pair is decided
+  per signed `REGISTER`. An unknown key therefore reaches the application layer —
+  that is what makes code-based enrollment possible — and is refused there before
+  any pairing state exists for it.
+- **Unknown keys get their own, much tighter limiter** (2/s per source, 20/s
+  global, against 50/s and 1000/s for allowlisted traffic), so strangers cannot
+  spend an approved buddy's budget or grow the pending set.
+- **The list is re-read on change**, so approving a buddy needs no restart. Watch
+  it with the `AUTHZ:` lines below.
+- **Empty or missing list = nobody pairs.** It never falls back to open mode; the
+  server logs a `WARNING` naming the exact `approve` command.
 
-A TLS-layer allowlist gate would make code-based enrollment impossible — a key that
-was never approved could not complete the handshake, so its sealed code could never
-reach the operator (that was the bug fixed in v4.1.0). Unknown keys are therefore
-rate-limited far more tightly than allowlisted ones (2/s per source, 20/s global).
-The server logs:
-
-```
-approval mode: QUIC control authenticates every client by key at the TLS handshake; the allowlist decision (allow / enroll with a code / refuse) is made per REGISTER
-```
-
-```bash
-# Server: only allowlisted buddy keys may even open a control connection
-buddynet --role=handshake \
-  --authorized /var/lib/buddynet/clients.txt --key /var/lib/buddynet/id.key
-
-# Approve a buddy (get its key with `buddynet identity` on that node):
-buddynet --authorized /var/lib/buddynet/clients.txt approve <buddy-key>
-```
-
-Without `--authorized` (open mode) the QUIC handshake still encrypts the exchange
-and validates the source, but any client may connect and pairing is gated only by
-the secret token at the application layer. See [APPROVAL.md](APPROVAL.md).
-
-> This is BuddyNet's "known buddies only" control plane. The data plane can run
-> over QUIC (default) or kernel WireGuard (`--wireguard`); the control plane is
-> always QUIC/plain — never WireGuard — so per-buddy endpoint discovery and
-> MultiPeer keep working (see [WIREGUARD.md](WIREGUARD.md)).
-
-### Environment variable
-
-```bash
-export   # equivalent to
-```
-
----
+> The data plane can run over QUIC (default) or kernel WireGuard (`--wireguard`);
+> the control plane is always QUIC — never WireGuard — so per-buddy endpoint
+> discovery and MultiPeer keep working (see [WIREGUARD.md](WIREGUARD.md)).
 
 ## IP allowlists (`--allow-cidr`)
 
-A network-level pre-filter for the handshake server and/or relay. Datagrams or
-connections from sources outside the listed CIDRs are dropped **before any
-crypto**, making it a cheap first line of defence for private or fleet
-deployments.
+A network-level pre-filter for the handshake server and/or relay: sources outside
+the listed CIDRs are refused before they can occupy a connection slot.
+
+**Where it runs differs by role, and the difference matters when you size a public
+VPS.** On the **relay** the check really is pre-crypto — the relay owns its UDP
+read loop, so a disallowed source never causes a signature verification. On the
+**handshake server** quic-go owns the packet path, so the QUIC/TLS handshake has
+already happened by the time the CIDR is seen. It is a cheap way to keep strangers
+out of your slots, not a way to avoid the cost of TLS: only a firewall rule does
+that (see [SECURITY.md §5.5](../SECURITY.md#55-what-an-unauthenticated-source-can-cost-you-the-pre-tls-boundary)).
 
 ```bash
 buddynet --role=handshake,relay \
@@ -236,6 +215,246 @@ BuddyNet works P2P-only: a handshake server with no relay configuration is fully
 functional, and no relay port needs to be open anywhere. When the direct path
 fails and no relay is configured, the buddy says exactly that instead of timing
 out silently.
+
+---
+
+## Many buddies (MultiPeer)
+
+A node can hold **N tunnels to N buddies at once**, each pinned and verified
+independently. You list your buddies in a manifest, route to each by name or
+virtual IP, and add or remove them while the daemon runs.
+
+This is self-sovereign: the manifest is *your* list of who *you* talk to. There is
+no group, no admin, no shared roster — removing a buddy is a local decision that
+never touches the other peers.
+
+> **We recommend no more than 16 buddies per node — the enforced ceiling of 48 is
+> a guardrail, not a capacity target.** The 48 is a design limit, not a performance
+> one, and there is no flag to raise it: a manifest over the limit is refused with
+> a clear error, never silently truncated. If you need more simultaneous peers, use
+> something built for large meshes — that is not what BuddyNet aims to be.
+
+The manifest is YAML, hand-editable and managed by the `peers` subcommands:
+
+```yaml
+buddies:
+  - name: alice                 # optional — display name / .buddy hint
+    key: ALICE_KEY-base64...    # required — the buddy's pinned Ed25519 identity
+    token: shared-with-alice    # optional — one-time bootstrap token
+    expose: [873]               # optional — WireGuard: alice reaches ONLY tcp :873
+  - name: bob
+    key: BOB_KEY-base64...
+    expose: [8080, "udp/51820"] # bare numbers are tcp; "udp/…" for UDP
+  - key: CAROL_KEY-base64...
+    expose: all                 # explicit whole-host access for carol
+  - key: DAVE_KEY-base64...     # no expose → inherits --expose, else fail-closed
+```
+
+Every manifest buddy is pinned by key — there is no trust-on-first-use in
+multi-buddy mode, so no SAS prompt and no blind learning. `token` is used only for
+the first pairing; afterwards each buddy has its own stored session secret.
+Unknown fields are rejected, so a typo never silently changes your posture. Keep
+the file `0600` — it is the same trust domain as `known_peers`.
+
+`--peers-file` is mutually exclusive with the single-buddy pairing modes
+(`--invite` / `--join`) and with `--lazy`. Routing to more than one buddy needs
+`--vip-listen`; a single `-L` port can only reach one buddy.
+
+### Curating the list
+
+```bash
+# Show your buddies and whether each is paired yet:
+buddynet --peers-file /var/lib/buddynet/peers \
+    --known-peers /var/lib/buddynet/known_peers peers list
+# VIP            NAME   STATUS    KEY     TOKEN      EXPOSE     SOURCE
+# 10.66.18.240   alice  paired    m2x9Kp  token-set  tcp/873    manifest
+# 10.66.7.13     —      unpaired  q8Lm2A  token-set  (inherit)  manifest
+
+# Add / remove (revoke) / un-revoke:
+buddynet --peers-file … --known-peers … peers add DAVE_KEY tok --name dave --expose 873
+buddynet --peers-file … --known-peers … peers remove Zk1pQ9
+buddynet --peers-file … --known-peers … peers allow Zk1pQ9
+```
+
+> **Pass the same `--known-peers` to every `peers` command.** The stored sessions
+> and the revocation list live next to that path, so a command run without it
+> works on a different set of files. If you use the default location, omit the
+> flag everywhere.
+
+The `KEY` column is the first 6 characters of the identity key — `peers remove`
+accepts it, any unique prefix, or the full key, and refuses an ambiguous one.
+`VIP` is derived from the key, so it is always known; `NAME` is best-effort from
+the offline cache and shows `—` until the buddy has been seen via the server.
+
+**`peers remove` is a full local revocation** (since v5.2.0): it records the key on
+a permanent revocation list (`<known_peers>.revoked`), drops the stored session,
+and drops the manifest line — in that order, under one lock. All three are
+required. Removing only the files was not enough: a still-running worker held the
+bootstrap token in memory, re-paired with it and wrote the session back, so the
+`SIGHUP` meant to apply the revocation restarted the buddy instead. A revoked
+buddy is refused at every door and shows as `REVOKED` in `peers list`, so it never
+disappears silently. The list never expires; `peers allow` (or adding the buddy
+back) is the only way off it.
+
+### Routing and reload
+
+`--vip-listen PORT` binds every connected buddy's VIP (`10.66.X.Y`) on loopback and
+forwards `VIP:PORT` — and, with `--dns`, `name.buddy:PORT` — through *that* buddy's
+tunnel. The far side answers from its `--forward` target. Binding a VIP needs
+`NET_ADMIN`; without it `--vip-listen` logs a `WARNING` and routes nothing while
+the tunnels keep working.
+
+A running buddy re-reads its manifest on **`SIGHUP`** and reconciles — new buddies
+get a tunnel, removed ones are dropped, no restart:
+
+```bash
+buddynet --peers-file … peers add DAVE_KEY tok
+kill -HUP "$(pidof buddynet)"
+```
+
+Caveat: an already-established **direct** tunnel to a removed buddy persists until
+it drops, because the server is not in the data path. `--reauth-interval` (e.g.
+`1h`) bounds how long a revocation can take to bite on a live tunnel.
+
+Workers are fully independent: one buddy going offline, failing, or being removed
+never affects the others. At start and on every `SIGHUP` the worker set is the
+union of the manifest and the stored sessions, so buddies paired before they were
+listed are not dropped.
+
+---
+
+## Names (`.buddy`)
+
+Add `--name alice` to a buddy and `--dns` to whoever wants to resolve, and
+`alice.buddy` reaches that buddy over its own tunnel:
+
+```bash
+buddynet --role=buddy --server VPS:51820 --server-key SERVER_KEY \
+  --invite --forward 127.0.0.1:873 --name alice --dns
+
+ping alice.buddy                # → alice's virtual IP (10.66.X.Y)
+dig @127.0.0.153 alice.buddy    # ask the stub resolver directly
+```
+
+The buddy sends its name on `REGISTER`; the server validates it against DNS-label
+rules and relays it verbatim in `PEER_LIST`; the receiving buddy pins it in
+`peers.json` (first claim wins) and answers `<name>.buddy` from a stub resolver on
+`127.0.0.153:53`.
+
+**Name rules:** lowercase letters, digits and hyphens, starting and ending with a
+letter or digit, at most 63 characters. A label of **exactly 8 hex characters** is
+rejected — that shape is reserved for the fingerprint alias below, so a
+self-asserted name can never shadow another peer's fingerprint entry (`deadbeef` is
+refused for this reason; `deadbeefx` or `web01` are fine).
+
+**Fingerprint fallback.** Every peer is also reachable as `<fp8>.buddy`, the first
+8 hex characters of `SHA-256(pubkey)`. It works for peers without a `--name` and is
+stable as long as the key is.
+
+**Collisions are resolved on first claim.** The same key announcing a different
+name later keeps its original and logs a `WARNING`; a second key claiming a name
+already taken gets fingerprint-only addressing and a `WARNING`. Pinned names
+survive restarts via `peers.json`.
+
+With `--dns`, BuddyNet registers the `.buddy` domain with `systemd-resolved`
+(`resolvectl dns lo 127.0.0.153`, `resolvectl domain lo ~buddy`) and reverts it on
+shutdown. Without `resolvectl` it logs a `NOTE`; add `nameserver 127.0.0.153` to
+`/etc/resolv.conf` yourself, or query the stub directly.
+
+Port 53 needs privilege: run the service as root, or grant the binary
+`sudo setcap cap_net_bind_service=+ep /usr/local/bin/buddynet`. Without either,
+`--dns` logs a `WARNING` and the tunnel runs on without name resolution.
+
+---
+
+## When no path comes up
+
+You are most likely here because BuddyNet said:
+
+```
+no path to the partner: the direct connection failed and no relay is configured
+```
+
+A buddy walks a fallback chain, cheapest and most private first:
+
+| # | Path | Log label | When it exists |
+|---|------|-----------|----------------|
+| 1 | Direct P2P | `direct P2P` | the server gave you live candidates for your partner |
+| 2 | Known relay | `known relay <host:port>` | the server advertised a relay for this pair |
+| 3 | Handshake as relay | `handshake server as relay` | the server itself also runs `--role=relay` |
+| 4 | Cached peer | `cached peer (server offline)` | you paired before and `peers.json` still knows the partner |
+
+Every attempt is logged (`CONNECT: action=path-try` / `path-failed`), and a
+successful run ends with the path that won. **If the chain only ever contained
+`direct P2P`, there was no relay to fall back to** — that is the message above,
+not a mystery failure.
+
+### Why a direct connection sometimes cannot work
+
+BuddyNet hole-punches: both sides send outward simultaneously so each NAT opens a
+return path. Whether that works depends on the two NATs, and you control neither:
+
+- **Endpoint-independent NAT ("full cone") on at least one side** — punching
+  usually works. The common home-router case, and why no port forwarding is needed.
+- **Symmetric NAT on both sides** — the router picks a *different* external port
+  per destination, so the port your partner was told about is not the one that
+  reaches you. Punching cannot succeed by design.
+- **CGNAT** — you are behind the provider's NAT as well as your own. Frequently
+  symmetric, and never something you can reconfigure.
+
+BuddyNet **cannot tell you which case you are in.** It sees that the path failed,
+not how the NAT behaved — which is why the error does not promise that a relay
+would help. It usually does.
+
+### What fixes it, and what doesn't
+
+A relay forwards the already-encrypted session. It sees ciphertext and virtual
+IPs, never plaintext. Setup is under [Relay setup](#relay-setup) above; two things
+produce exactly the error at the top of this section:
+
+- **Without `--relay-endpoint`, buddies are never told the relay exists.** A
+  running relay that is not advertised is invisible — `PEER_LIST` carries its
+  address only when that flag is set, so the chain stays one entry long.
+- **A relay refuses to start without an authorization policy** (since v5.0.0). If
+  it isn't running at all, its log says why.
+
+Also check that the relay port is open in the VPS firewall. And mint the relay id
+**once** — substituting `gen-relay-id` into the start line hands out a fresh id on
+every restart and invalidates every ticket already issued.
+
+**Opening a port on the buddy does not fix it.** The buddy binds an *ephemeral*
+UDP port, so the kernel picks a different one on every start and there is no flag
+to pin it. You cannot forward a port whose number you won't know until the process
+is running. Port forwarding applies to the VPS side, not to a buddy.
+
+**Checklist**
+
+1. Is the handshake server reachable at all? `CONNECT: action=server-unreachable`
+   means the problem is before any of this — wrong `--server`, firewall, or down.
+2. Does the log show more than one path being tried? If not, no relay is
+   configured or advertised.
+3. Is `--relay-endpoint` set to the address *buddies* can reach (its public
+   host:port, not `[::]`)?
+4. Is the relay port open in the firewall, and is the relay actually running?
+5. `--punch` (default 2 s, max 60 s) can be raised on a slow link — but a longer
+   punch does not help against symmetric NAT. That is structural, not timing.
+
+---
+
+## Unattended nodes
+
+For a daemon with no human at the keyboard:
+
+- **Pin explicitly with `--peer-key`** instead of relying on the first-contact
+  code. It is checked on every connect, including reconnects from a stored
+  session.
+- **Set `--no-interactive`.** It never learns an unknown key blindly — it fails
+  instead, which is what you want unattended.
+- **Keep secrets out of argv**: `--join`, `--code` and friends read from the
+  environment (`BUDDYNET_JOIN`, …) or a file.
+- **`--reauth-interval`** periodically rebuilds tunnels so a revocation takes
+  effect within that interval on a live direct tunnel. Off by default, because it
+  trades a brief reconnect for that bound.
 
 ---
 
@@ -555,8 +774,8 @@ daemon to reconnect before binding its port.
 
 ## `--status` probe
 
-A one-shot connectivity check for scripts and monitoring. See the full
-reference in [INVITE.md — Checking the link](INVITE.md#checking-the-link).
+A one-shot connectivity check for scripts and monitoring: it brings the tunnel up,
+reports, and exits. This section is the reference for it.
 
 ```bash
 buddynet --role=buddy --server … --server-key … --join=TOKEN --status

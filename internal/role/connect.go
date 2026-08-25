@@ -365,7 +365,7 @@ func noPathAdvice(chain []relay.Path) string {
 		}
 	}
 	return "no path to the partner: the direct connection failed and no relay is configured " +
-		"(the handshake server advertises one with --relay-endpoint; see docs/CONNECTIVITY.md)"
+		"(the handshake server advertises one with --relay-endpoint; see docs/OPERATIONS.md)"
 }
 
 // primePath makes a path usable and returns the endpoint to dial. Direct

@@ -409,7 +409,7 @@ endpoint — the relay forwards ciphertext and never sees content.
 | MITM on the control path | server-signed `PEER_LIST`, pinned server key |
 | Impersonating the partner | partner cert must carry the pinned/learned pubkey |
 | MITM at first contact (TOFU) | SAS compared out of band over the TLS channel binding before the key is trusted |
-| Leaked pairing token | the invite is one-time in the **client-side** sense — the legitimate pair stops using it after first pairing, but the server never marks it spent, so treat a leaked invite as live (see [INVITE.md](INVITE.md#what-a-leaked-invite-is-worth); approval mode closes it). The long-lived session secret is derived locally from the channel binding, never in the clear on the wire, and sealed to the server's pinned key in transit (the server does see it — see above) |
+| Leaked pairing token | the invite is one-time in the **client-side** sense — the legitimate pair stops using it after first pairing, but the server never marks it spent, so treat a leaked invite as live (see [SETUP.md](../SECURITY.md#invite-token-vs-session-secret); approval mode closes it). The long-lived session secret is derived locally from the channel binding, never in the clear on the wire, and sealed to the server's pinned key in transit (the server does see it — see above) |
 | Replaying an old roster | `ts` freshness window binds each roster in time |
 | Replaying a signed registration (approval mode) | bounded cache rejects a repeated `(pubkey, nonce)` within the freshness window |
 | Forging a peer's virtual IP in the roster | the server derives `virtual_ip` from `pubkey` and rejects any other claim |
