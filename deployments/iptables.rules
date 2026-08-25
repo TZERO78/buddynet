@@ -8,9 +8,12 @@
 #   sudo iptables-restore < deployments/iptables.rules
 #   # persist with iptables-persistent / netfilter-persistent
 #
-# For IPv6 use the same file with ip6tables-restore (adjust the ICMP line to
-# icmpv6 as noted). WARNING: input policy is DROP; SSH (22) is allowed below so
-# you are not locked out — change it if your SSH runs elsewhere.
+# For IPv6, load it with ip6tables-restore and make BOTH edits first (see the
+# IPv6 section at the bottom): (1) -p icmp -> -p icmpv6, and (2) the handshake
+# rate limit's --hashlimit-srcmask 32 -> 64 (the shipped 32 groups by /32, an
+# ISP-sized block; 64 is the per-subscriber granularity). WARNING: input policy
+# is DROP; SSH (22) is allowed below so you are not locked out — change it if
+# your SSH runs elsewhere.
 *filter
 :INPUT DROP [0:0]
 :FORWARD DROP [0:0]
@@ -35,11 +38,17 @@
 # iptables modules.)
 #
 # ⚠ IPv6: change --hashlimit-srcmask to 64 before loading this with
-#   ip6tables-restore (see the IPv6 notes at the bottom). hashlimit keys on the
-#   full address by default, and a /64 is what one subscriber gets — without the
-#   mask an attacker holding a single /64 simply uses a different address per
-#   bucket and the per-source limit buys nothing. iptables (v4) REFUSES a mask
-#   above 32, so this file cannot carry both values at once.
+#   ip6tables-restore (see the IPv6 notes at the bottom). --hashlimit-srcmask sets
+#   the prefix length hashlimit groups sources by; 64 is one subscriber's
+#   allocation and the intended granularity — it caps an attacker's whole /64 to
+#   one bucket AND gives every other subscriber its own. The shipped 32 also caps
+#   an attacker /64 to one bucket, but groups by /32 (an ISP-sized block), so
+#   unrelated subscribers of one provider share a bucket and a buddy in the
+#   attacker's /32 can be crowded out. (Omitting the mask is the opposite error:
+#   hashlimit then keys the full /128, one bucket per address, letting an
+#   attacker's /64 multiply its own throughput — though the global limit below
+#   still bounds the box.) iptables (v4) REFUSES a mask above 32, so this file
+#   cannot carry both values at once.
 -A INPUT -p udp --dport 51820 -m hashlimit --hashlimit-above 50/second --hashlimit-burst 50 --hashlimit-mode srcip --hashlimit-srcmask 32 --hashlimit-name bn-hs --hashlimit-htable-expire 60000 -j DROP
 -A INPUT -p udp --dport 51820 -m limit --limit 500/second --limit-burst 200 -j ACCEPT
 -A INPUT -p udp --dport 51820 -j DROP
@@ -64,16 +73,24 @@
 #   1. -p icmp            ->  -p icmpv6      (above)
 #   2. --hashlimit-srcmask 32  ->  64        (the handshake rate limit)
 #
-# Without (2) the per-source limit is keyed on the full /128. One /64 — what a
-# single subscriber is routinely handed — then yields as many buckets as the
-# attacker cares to use, and the fairness the rule exists for is gone. nftables
-# has no such caveat: deployments/nftables.conf masks IPv6 to /64 in the rule
-# itself and needs no per-family edit.
+# Why (2): --hashlimit-srcmask is the prefix length hashlimit groups source
+# addresses by, and there are three cases. /64 is one subscriber's allocation —
+# the intended per-subscriber bucket. The shipped /32 is coarser: it still caps
+# an attacker's whole /64 to one bucket, but lumps every /64 of an ISP-sized /32
+# together, so a buddy that happens to share the attacker's /32 (same large
+# provider) is crowded out of the shared bucket — a topology-dependent case an
+# attacker cannot force, but a real one. Leaving the mask off is the opposite
+# error: hashlimit then keys the full /128 and an attacker's /64 gets one bucket
+# per address, multiplying its own throughput (the global limit still bounds the
+# box, so a buddy in a different /32 is not locked out — but the per-source
+# fairness is defeated). nftables has no such caveat: deployments/nftables.conf
+# masks IPv6 to /64 in the rule itself and needs no per-family edit.
 #
 # Verify either family with:
 #   sudo ./lab/test-firewall-fairness.sh                      # nftables, IPv4
 #   sudo ./lab/test-firewall-fairness.sh --iptables           # iptables, IPv4
 #   sudo ./lab/test-firewall-fairness.sh --ipv6               # nftables, IPv6 /64
+#   sudo ./lab/test-firewall-fairness.sh --iptables --ipv6    # iptables, IPv6 /64
 
 # Management.
 -A INPUT -p tcp --dport 22 -j ACCEPT

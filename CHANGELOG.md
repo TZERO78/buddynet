@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (Docs) — the IPv6 `srcmask` guidance stated the wrong mechanism
+
+An external review measured the actual `ip6tables` hashlimit bucketing and it does
+not match what v5.3.1's comment and this changelog claimed. `--hashlimit-srcmask`
+is the prefix length hashlimit groups sources by, and there are **three** cases,
+not two:
+
+- **no mask (`/128`)** — one bucket per address. An attacker's `/64` multiplies its
+  *own* throughput (measured 2169 vs 252 packets from 16 addresses), but the global
+  `limit` still bounds the box, so a buddy in a *different* `/32` is **not** locked
+  out (measured 94%). Multiplied buckets prove wasted fairness/bandwidth, not buddy
+  starvation — the earlier "1245 vs 249" number showed the former, never the latter.
+- **shipped `/32`** — caps an attacker's whole `/64` to one bucket (so "the
+  per-source limit buys nothing", as v5.3.1 put it, was wrong). It only crowds out a
+  buddy that shares the attacker's `/32` — same ISP-sized provider block, which the
+  attacker cannot force (measured: 100% for a buddy in a different `/32`, 6% in the
+  same one).
+- **`/64`** — one bucket per subscriber allocation: the intended granularity,
+  protecting a buddy in **all** cases.
+
+The shipped `deployments/iptables.rules` now hoists the `srcmask 32 → 64` edit into
+the quick-start header (next to the `icmp → icmpv6` edit) and states the three-case
+mechanism at the rule and in the IPv6 section. The rule value is unchanged; iptables
+(v4) still refuses a mask above 32, so the file documents the per-family edit rather
+than carrying both. nftables was and is unaffected (it masks to `/64` in the rule).
+
+Follow-up (not in this change): `lab/test-firewall-fairness.sh --ipv6` places the
+attacker and buddy in the same `/32`, so its `32`-vs-`64` result rests on exactly
+that co-location; a variant asserting a buddy in a *different* `/32` would make the
+distinction explicit.
+
 ## [v5.3.1] — 2026-08-25
 
 Follow-ups reported against v5.3.0. One of them is a real defect in a shipped
