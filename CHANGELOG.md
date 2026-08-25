@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.3.2] — 2026-08-25
+
 ### Fixed (Docs) — the IPv6 `srcmask` guidance stated the wrong mechanism
 
 An external review measured the actual `ip6tables` hashlimit bucketing and it does
@@ -1672,7 +1674,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.2.1...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.3.2...HEAD
+[v5.3.2]: https://github.com/TZERO78/buddynet/compare/v5.3.1...v5.3.2
 [v5.3.1]: https://github.com/TZERO78/buddynet/compare/v5.3.0...v5.3.1
 [v5.3.0]: https://github.com/TZERO78/buddynet/compare/v5.2.1...v5.3.0
 [v5.2.1]: https://github.com/TZERO78/buddynet/compare/v5.2.0...v5.2.1
