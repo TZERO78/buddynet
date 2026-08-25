@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.3.1] — 2026-08-25
+
+Follow-ups reported against v5.3.0. One of them is a real defect in a shipped
+file, and it was introduced by v5.3.0 itself.
+
+### Fixed — `deployments/iptables.rules` could not be loaded at all
+
+Adding the per-source limit in v5.3.0 broke the rule across two lines with a
+trailing backslash, for readability. **`iptables-restore` has no line
+continuation** and rejects the whole file with ``Bad argument `\'``. nftables
+tolerates the same edit, so a change verified against nftables looked fine while
+the iptables ruleset had stopped loading. Rules are back on one line, and
+`TestShippedIptablesRulesAreLoadable` now fails on a trailing backslash.
+
+### Fixed (Security) — IPv6 per-source fairness needs an explicit /64 mask
+
+`hashlimit` keys on the full address unless told otherwise. On IPv6 that is a
+/128, while a /64 is what one subscriber routinely gets — so an attacker holding
+a single /64 uses a different address per packet and collects a bucket for each,
+and the per-source limit buys nothing. Measured with the extended lab test: five
+attacking addresses in one /64 get **1245** packets through with /128 keying and
+**249** with /64 keying.
+
+`--hashlimit-srcmask 32` is now explicit in the file, with the ip6tables edit
+(`32` → `64`) documented at the rule and in a dedicated IPv6 section; iptables(v4)
+refuses a mask above 32, so one file cannot carry both. nftables was never
+affected — it masks to /64 in the rule itself.
+
+### Added — the fairness test covers all four combinations
+
+`lab/test-firewall-fairness.sh` gained `--iptables` and `--ipv6`, so the shipped
+iptables ruleset is now actually loaded and measured rather than assumed to match
+the nftables one. The IPv6 runs flood from five addresses inside one /64 and
+assert that the **whole prefix** was held to one source's share — without that
+assertion the run was green even with /128 keying, because the buddy still
+survives as long as the flood stays under the global ceiling. That is precisely
+the kind of vacuously-green check this project has been bitten by before.
+
+### Fixed (Docs) — the last M-01 leftovers
+
+- Both firewall files introduced the two limits with "in this order" and then
+  numbered them global-first, while the rules (correctly) run per-source first.
+  Fixed, and gated by `TestShippedFirewallLimitsPerSourceBeforeGlobal`, which
+  asserts the rule order in CI — the lab test measures the same property but
+  needs root and minutes, so it cannot catch a swap on an ordinary change.
+- `SECURITY.md` and `docs/PROTOCOL.md` called the invite "valid only until the
+  first pairing" and corrected it two paragraphs later. Both now say it in one
+  breath: the legitimate clients use it until the first successful pairing, and
+  the server neither expires it nor marks it spent.
+- `docs/PROTOCOL.md` had a link labelled `SETUP.md` pointing at `SECURITY.md`, an
+  artifact of the consolidation's mass rewrite.
+
 ## [v5.3.0] — 2026-08-25
 
 Closes an external re-audit of v5.2.1 (M-01, M-02, L-01) and, more importantly,
@@ -1590,6 +1642,7 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
   and SAS verification.
 
 [Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.2.1...HEAD
+[v5.3.1]: https://github.com/TZERO78/buddynet/compare/v5.3.0...v5.3.1
 [v5.3.0]: https://github.com/TZERO78/buddynet/compare/v5.2.1...v5.3.0
 [v5.2.1]: https://github.com/TZERO78/buddynet/compare/v5.2.0...v5.2.1
 [v5.2.0]: https://github.com/TZERO78/buddynet/compare/v5.1.1...v5.2.0

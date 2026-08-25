@@ -240,8 +240,10 @@ identity key**:
 
 The pairing secret is split so the value that actually travels is short-lived:
 
-- **`--invite` / `--join`** mint/use a **one-time, key-bearing invite**, valid
-  only until the first pairing (`--invite-timeout`, default 15 min). It carries
+- **`--invite` / `--join`** mint/use a **one-time, key-bearing invite**: the
+  legitimate clients use it only until the first successful pairing, and the
+  server neither expires it nor marks it spent (`--invite-timeout`, default
+  15 min, bounds how long the *inviter waits*). It carries
   the inviter's public key, so the joiner pins it (see §4.3). On the first
   SAS-confirmed (or `--peer-key`-pinned) pairing, both ends **derive a long-lived
   session secret from the channel binding** (`HKDF`-style over the exported

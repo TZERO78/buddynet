@@ -415,3 +415,54 @@ func TestShippedFirewallLimitsPerSourceBeforeGlobal(t *testing.T) {
 		}
 	}
 }
+
+// TestShippedIptablesRulesAreLoadable guards two things iptables-restore is
+// strict about and a reader's eye is not.
+//
+// `iptables-restore` parses line by line and has NO line-continuation syntax: a
+// rule broken across lines with a trailing backslash makes the whole file fail
+// to load with "Bad argument `\'". Reformatting a long rule for readability —
+// which is exactly what happened when the per-source limit was added — turns the
+// shipped ruleset into one that cannot be applied at all. nftables tolerates the
+// same edit, so a change tested only against nftables looks fine.
+//
+// It also pins the IPv6 note. hashlimit keys on the full address unless told
+// otherwise, and a /64 is what one subscriber gets, so without
+// --hashlimit-srcmask an attacker holding a single /64 gets a fresh bucket per
+// address and the per-source limit buys nothing. Measured in
+// lab/test-firewall-fairness.sh --iptables --ipv6: 249 packets through with /64
+// keying, 1245 with /128. iptables(v4) refuses a mask above 32, so the file
+// cannot carry both values and has to document the per-family edit instead.
+func TestShippedIptablesRulesAreLoadable(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("locate module root: %v", err)
+	}
+	path := filepath.Join(root, "deployments/iptables.rules")
+	b, err := os.ReadFile(path) // #nosec G304 -- fixed path in this module
+	if err != nil {
+		t.Fatalf("read iptables.rules: %v", err)
+	}
+	body := string(b)
+
+	for i, line := range strings.Split(body, "\n") {
+		if strings.HasSuffix(strings.TrimRight(line, " \t"), `\`) && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			t.Errorf("deployments/iptables.rules:%d ends in a backslash. iptables-restore has "+
+				"no line continuation and rejects the WHOLE file with \"Bad argument\". "+
+				"Keep rules on one line, however long: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+
+	// The per-source rule must state its mask explicitly, so the IPv6 edit is a
+	// visible one-token change rather than a silently missing default.
+	if strings.Contains(body, "hashlimit-mode srcip") && !strings.Contains(body, "hashlimit-srcmask") {
+		t.Error("the hashlimit rule has no --hashlimit-srcmask. On IPv6 it then keys on the " +
+			"full /128, and one attacker /64 yields a bucket per address — the per-source " +
+			"limit buys nothing (measured: 1245 packets through vs 249 with /64 keying)")
+	}
+	if !strings.Contains(body, "ip6tables-restore") {
+		t.Error("iptables.rules no longer documents the ip6tables edits. The file cannot carry " +
+			"both masks (iptables refuses > 32), so the note is the only thing standing " +
+			"between an operator and a v6 ruleset whose fairness rule does nothing")
+	}
+}
