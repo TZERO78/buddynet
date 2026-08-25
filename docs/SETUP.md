@@ -389,18 +389,15 @@ therefore completes TLS and is refused before any pairing state is created for i
 and unknown keys are rate-limited far more tightly than allowlisted ones. See
 [SECURITY.md §5.5](../SECURITY.md#55-what-an-unauthenticated-source-can-cost-you-the-pre-tls-boundary).
 
-```bash
-sudo systemctl edit buddynet-handshake
-#   [Service]
-#   ExecStart=                       # reset, then re-specify with --authorized
-#   ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} \
-#     --key ${STATE_DIRECTORY}/id.key \
-#     --authorized ${STATE_DIRECTORY}/clients.txt
-```
+**The shipped `buddynet-handshake.service` already runs with `--authorized`**, so
+if you installed the units in step 4 this is on. With no approved key yet
+**nobody pairs** — that is the fail-closed part, and the server's log names the
+exact command to approve someone. If you deliberately want an open matchmaker
+that strangers may use, do not strip the flag: run
+`buddynet-public-handshake.service` instead, which is the single-purpose public
+binary with no allowlist and no writable state.
 
-With `--authorized` set and the list empty, **nobody pairs** — that is the
-fail-closed default, and the server says so at startup. Approve keys one of two
-ways:
+Approve keys one of two ways:
 
 **A — approve by public key.** Simplest when you can read the key off the other
 machine: run `buddynet identity` there, then on the server

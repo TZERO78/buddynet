@@ -87,9 +87,10 @@ buddynet --role=handshake,relay \
   --relay-id RELAY_ID
 ```
 
-Pin the displayed server key on every buddy with `--server-key`. For a private
-installation, use
-[approval mode](docs/SETUP.md#approval-mode--recommended-for-a-private-server).
+Pin the displayed server key on every buddy with `--server-key`. The shipped
+systemd unit and compose file run the private server in
+[approval mode](docs/SETUP.md#approval-mode--recommended-for-a-private-server):
+only keys you approved may pair, and until you approve one, nobody does.
 
 ### 2. Create an invite
 

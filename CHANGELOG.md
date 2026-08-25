@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (Security, BEHAVIOUR CHANGE) — the shipped private server templates are fail-closed
+
+`deployments/systemd/buddynet-handshake.service` and the `handshake` service in
+`deployments/docker-compose.yml` now pass **`--authorized`**. They are the
+templates for a PRIVATE matchmaker, and a private matchmaker that pairs anyone
+holding a token is not what their users are asking for: the server never marks a
+token spent, so one leaked invite is enough for two strangers to pair on your box
+and draw tickets for your relay. That is your bandwidth, used by people you never
+approved.
+
+**What changes for you:** if you adopt the new templates, no buddy pairs until
+you approve its key. The server logs the exact command at startup:
+
+```
+buddynet --authorized /var/lib/buddynet-handshake/clients.txt approve <CLIENT_KEY>
+```
+
+Nothing changes for a running server until you install the new unit — these are
+templates, not something an upgrade rewrites.
+
+**If you deliberately run an open matchmaker**, do not strip the flag: use
+`deployments/systemd/buddynet-public-handshake.service`, which runs the
+single-purpose `buddynet-handshake` binary — no allowlist, no writable state past
+its identity key. That split is the point: open is a different service, not a
+weakened private one.
+
 ## [v5.2.1] — 2026-08-24
 
 Documentation-integrity release from an external audit. **No protocol change, no
