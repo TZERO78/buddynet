@@ -297,12 +297,16 @@ func PeersRemove(peersFile, knownPeers, key string) error {
 	// attempt), and the operator repeats the command. The reverse order would
 	// leave "no longer configured but not revoked", which is precisely the state a
 	// still-running worker resurrected itself from.
+	// inEffect turns true the moment the tombstone is durable. From then on the
+	// buddy is refused whatever else fails, and the operator has to be told so.
+	var inEffect bool
 	err = withTrustStateLock(knownPeers, peersFile, func() error {
 		added, aerr := addRevokedLocked(trustBase(knownPeers, peersFile), keyB64)
 		if aerr != nil {
 			return aerr
 		}
 		alreadyRevoked = !added
+		inEffect = true
 		var serr error
 		if sessionRemoved, serr = removeSessionLocked(knownPeers, keyB64); serr != nil {
 			return serr
@@ -311,6 +315,18 @@ func PeersRemove(peersFile, knownPeers, key string) error {
 		return err
 	})
 	if err != nil {
+		if inEffect {
+			// Reporting this as a plain failure would be a lie in the dangerous
+			// direction: the operator reads "error", concludes the buddy still has
+			// access, and goes looking for another way to cut it off. The
+			// revocation is already durable — only the cleanup did not finish.
+			return fmt.Errorf("the revocation of %s IS ALREADY IN EFFECT — the key is on the "+
+				"revocation list and is refused at every reconnect attempt. What did NOT finish "+
+				"is the cleanup: %w\n"+
+				"  Run the same command again, or remove the buddy's entry from %s by hand. "+
+				"The buddy stays revoked either way until you run: peers allow <key>",
+				keyTag(keyB64), err, peersFile)
+		}
 		return err
 	}
 	if manifestRemoved == 0 && sessionRemoved == 0 && alreadyRevoked {

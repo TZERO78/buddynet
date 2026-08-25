@@ -14,7 +14,7 @@ import (
 var docsRef = regexp.MustCompile(`docs/[A-Za-z0-9_-]+\.md`)
 
 // TestDocReferencesExist keeps operator-facing error messages honest. The
-// "no path to the partner" advice in noPathAdvice pointed at docs/CONNECTIVITY.md
+// "no path to the partner" advice in noPathAdvice pointed at docs/OPERATIONS.md
 // for two releases while that file did not exist — a dead link handed to somebody
 // at the exact moment nothing works. Nothing caught it, because a missing file is
 // not a compile error and no test read the string.

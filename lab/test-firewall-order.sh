@@ -45,10 +45,14 @@ sudo -n ip addr add 10.99.0.1/24 dev fwordA; sudo -n ip link set fwordA up
 sudo -n ip netns exec "$NS" ip addr add 10.99.0.2/24 dev fwordB
 sudo -n ip netns exec "$NS" ip link set fwordB up
 
-# Load the ruleset with a counter on whatever handles over-limit control traffic.
+# Load the ruleset with counters: one on the control port's final accept, one on
+# every rule that drops control traffic. The port is filtered by more than one
+# rule now (per-source meter, then the global ceiling, then accept), so counting a
+# single "limit ... accept" rule would silently measure nothing.
 sed 's/\$port_handshake/51820/g; s/\$port_relay/51821/g; s/\$port_ssh/22/g; /^define/d' "$CONF" \
-  | sed 's/udp dport 51820 drop/udp dport 51820 counter drop/' \
-  | sed 's/udp dport 51820 limit rate \(.*\) accept/udp dport 51820 limit rate \1 counter accept/' \
+  | perl -0pe 's/\\\n\s*/ /g' \
+  | sed 's/^\([[:space:]]*\)udp dport 51820 accept$/\1udp dport 51820 counter accept/' \
+  | sed 's/\(udp dport 51820 .*\)drop$/\1counter drop/' \
   | sed 's/udp dport 51821 accept/udp dport 51821 counter accept/' \
   | sudo -n ip netns exec "$NS" nft -f - || { bad "ruleset does not load"; exit 1; }
 info "loaded $CONF"
@@ -72,8 +76,10 @@ sleep 1
 RULES=$(sudo -n ip netns exec "$NS" nft -a list chain inet buddynet input 2>/dev/null)
 echo "$RULES" | grep -E "5182[01]" | sed 's/^/    /'
 
-ACCEPTED=$(echo "$RULES" | grep 51820 | grep "limit rate" | grep -oP 'packets \K[0-9]+' | head -1)
-DROPPED=$(echo "$RULES"  | grep 51820 | grep " drop"      | grep -oP 'packets \K[0-9]+' | head -1)
+ACCEPTED=$(echo "$RULES" | grep 51820 | grep "counter packets" | grep " accept" | grep -oP 'packets \K[0-9]+' | head -1)
+# Sum every drop on the control port: over-limit packets may be caught by the
+# per-source meter or by the global ceiling, and either one is a correct drop.
+DROPPED=$(echo "$RULES"  | grep 51820 | grep " drop" | grep -oP 'packets \K[0-9]+' | paste -sd+ | bc)
 
 # POSITIVE CONTROL. Without this the test passes on a ruleset that drops
 # EVERYTHING on the control port — "over-limit traffic is dropped" is only

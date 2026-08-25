@@ -81,5 +81,11 @@ journalctl --namespace=buddynet -u buddynet-handshake -f
 ## Firewall
 
 See [`../nftables.conf`](../nftables.conf) / [`../iptables.rules`](../iptables.rules)
-for a default-drop ruleset that opens only SSH and the two BuddyNet UDP ports
-(rate-limited against floods).
+for a default-drop ruleset that opens only SSH and the two BuddyNet UDP ports.
+Only the **handshake** port carries a packet-rate limit; the **relay** port
+deliberately does not, because it carries tunnel data and a control-plane rate
+would throttle the tunnel itself. The handshake limit is two rules in a
+load-bearing order — a per-source meter, then a global ceiling — so one loud
+source cannot spend everybody's budget. It still does not guarantee availability
+under attack: many sources together fill the global ceiling, and a saturated
+uplink never reaches the firewall.

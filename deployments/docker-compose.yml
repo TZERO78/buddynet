@@ -50,7 +50,12 @@ services:
       - "[::]:${BUDDYNET_HANDSHAKE_PORT:-51820}"
       - --key
       - /var/lib/buddynet/id.key
-      # approval mode: also pass  --authorized /var/lib/buddynet/clients.txt
+      # Approval mode, fail-closed: only keys you approved may pair. With the file
+      # absent or empty NOBODY pairs, and the log names the approve command. Drop
+      # these two lines only if you deliberately want a matchmaker strangers may
+      # use — a leaked invite is enough to pair two of them on your relay.
+      - --authorized
+      - /var/lib/buddynet/clients.txt
       # advertise the relay:       --relay-endpoint your.vps.example:${BUDDYNET_RELAY_PORT:-51821}
       # Issue relay tickets for it (same id as the relay service below):
       - --relay-id

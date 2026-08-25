@@ -7,6 +7,163 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.3.0] — 2026-08-25
+
+Closes an external re-audit of v5.2.1 (M-01, M-02, L-01) and, more importantly,
+removes the thing that produced its findings: the same statement living in three
+to five places, so that every sweep which changed the behaviour updated only some
+of them. No protocol change — the wire format stays at v8.
+
+### Changed (Security) — the handshake port is rate-limited per source, not just globally
+
+`deployments/nftables.conf` and `deployments/iptables.rules` now limit the
+handshake port with a **per-source meter first, then a global ceiling**. A plain
+`limit` is attached to the rule rather than to the sender, so a single loud
+source could spend the whole shared budget and crowd out legitimate pairings
+(audit finding M-02).
+
+The order is load-bearing, the same way the position of the
+`established,related` accept is. A global limit is source-blind: put it first and
+it drops a share of everybody's packets, the buddy you are protecting included.
+Put the per-source meter first and the global ceiling only ever sees traffic that
+has already been tamed.
+
+Measured with the new [`lab/test-firewall-fairness.sh`](lab/test-firewall-fairness.sh)
+— one flooding source, one legitimate buddy, counted against that buddy's
+unopposed throughput:
+
+| ruleset | buddy keeps |
+|---|---:|
+| global limit only (before) | 15% |
+| global first, then per-source | 77% |
+| per-source first, then global (now) | 100% |
+
+This is not immunity, and the docs say so: many sources together still fill the
+global ceiling, and traffic that saturates the uplink never reaches the firewall.
+
+### Changed (Security, BEHAVIOUR CHANGE) — the shipped private server templates are fail-closed
+
+`deployments/systemd/buddynet-handshake.service` and the `handshake` service in
+`deployments/docker-compose.yml` now pass **`--authorized`**. They are the
+templates for a PRIVATE matchmaker, and a private matchmaker that pairs anyone
+holding a token is not what their users are asking for: the server never marks a
+token spent, so one leaked invite is enough for two strangers to pair on your box
+and draw tickets for your relay. That is your bandwidth, used by people you never
+approved.
+
+**What changes for you:** if you adopt the new templates, no buddy pairs until
+you approve its key. The server logs the exact command at startup:
+
+```
+buddynet --authorized /var/lib/buddynet-handshake/clients.txt approve <CLIENT_KEY>
+```
+
+Nothing changes for a running server until you install the new unit — these are
+templates, not something an upgrade rewrites.
+
+**If you deliberately run an open matchmaker**, do not strip the flag: use
+`deployments/systemd/buddynet-public-handshake.service`, which runs the
+single-purpose `buddynet-handshake` binary — no allowlist, no writable state past
+its identity key. That split is the point: open is a different service, not a
+weakened private one.
+
+### Fixed (Security) — a partly-failed `peers remove` now says what already holds
+
+`peers remove` writes tombstone, then session, then manifest, so an abort leaves
+the SAFE state (revoked, possibly still configured). That was already right. What
+was wrong was the report: a failure in the last step returned the bare I/O error,
+so the command printed
+
+```
+error: rename /peers.tmp.82.3 -> /peers: device or resource busy
+```
+
+while `peers list` right afterwards showed the buddy as REVOKED. An operator
+reading that concludes the revocation did not happen and that the buddy still has
+access — the dangerous direction to be wrong in for a revocation command. The
+error now leads with what is true (the key is already refused at every
+reconnect), names the cleanup as the part that did not finish, and says how to
+finish or undo it.
+
+### Fixed (Docs) — four security claims that had outlived the code
+
+Traced to the commits that left them behind, not just patched where the audit
+pointed:
+
+- **`--authorized` does not gate the TLS handshake.** `a023614` added allowlist
+  pinning there and `761b6fb` documented it; `0081a42` removed it again (a
+  TLS-layer gate makes code-based enrollment unreachable) and updated only
+  `docs/APPROVAL.md`. `docs/OPERATIONS.md`, `docs/WIREGUARD.md` and `--help` kept
+  the old claim for four releases, and OPERATIONS.md quoted a log line the server
+  had stopped printing. TLS authenticates every client by key; the allowlist
+  decides per signed `REGISTER`.
+- **`--allow-cidr` is pre-crypto on the relay only.** The README told operators a
+  private relay/handshake "needs no separate firewall" — advice to drop the one
+  layer that caps pre-TLS cost. `SECURITY.md` §5.5 had said so correctly since
+  v5.2.1; three other places had not caught up.
+- **`--join` is not a fixed-token legacy mode.** `--token` was removed in v5;
+  both `--invite` and `--join` are one-time.
+- **An invite is not short-lived server-side.** "One-time" is a client-side
+  property; the server never marks a token spent.
+
+Plus two ruins from earlier removals: a heading reading `## QUIC control plane,
+the secure default)` and an `### Environment variable` section whose body was the
+empty string `export   # equivalent to`, left over from `--quic-handshake`.
+
+### Changed (Docs) — one source per topic
+
+`docs/` goes from 11 files to 5 (22,100 → 17,434 words) and the README from 3,848
+to 1,220:
+
+```
+TWO-BUDDIES + INVITE + APPROVAL + VPS-HOWTO  ->  docs/SETUP.md
+PEERS + CONNECTIVITY + BUDDYDNS              ->  docs/OPERATIONS.md
+```
+
+Flags are no longer a documentation topic: three files carried their own flag
+tables restating what `buddynet --help` prints. `--help` is the source now, and
+three copy-paste traps in it were fixed (`-forward` with one dash beside
+`--invite`, a misaligned COMMANDS block running past 80 columns, and `gen-token`
+described as "a strong shared token" — the vocabulary of the removed `--token`).
+
+### Added — gates that make the old wording unsayable
+
+- `TestDocsDoNotRestateRefutedClaims` walks the **whole repository**, unlike the
+  docs/-scoped firewall test, which is exactly why the README sentence survived
+  the previous audit round. Each pattern must still match its own historical
+  sentence, so a rotted pattern fails loudly instead of passing vacuously.
+- `TestMarkdownLinksAndAnchorsResolve` checks links **and** `#anchors`.
+  `TestDocReferencesExist` only reads Go source, so prose links were unprotected;
+  this consolidation left one dead anchor that nothing else would have caught.
+  Dead anchors are worse than dead files: GitHub serves the page and silently
+  drops the fragment.
+- `lab/test-firewall-fairness.sh`, and a regression test for the revocation
+  reporting above.
+
+One class is deliberately **not** gated: "before any crypto". Every pattern broad
+enough to catch the wrong claim also matches `SECURITY.md` §5.5, which quotes the
+same words to refute them.
+
+### Fixed — both demo recordings, and what made them rot
+
+The README GIF showed `--role=handshake,relay` **without `--relay-id`**, a
+command that has exited 1 since v5.0.0, when the relay stopped starting without
+an authorization policy. Root cause: `lab/demo-deploy.sh` *types* its command
+lines for legibility while the output beside them comes from a real container, so
+the typed line could drift freely — a second source that is never checked against
+the first, the same shape as the documentation drift above.
+
+`verify_cmd()` now runs each server command against the real binary before the
+recording shows it, and the relay id is read from the running container.
+`media/multipeer-demo.gif` was rebuilt too: it had become unreferenced and
+unbuildable, and now shows the permanent revocation v5.2.0 introduced.
+
+Four lab scripts fetched a key with `init`, which only prints on the first run
+and refuses afterwards — one of them labelled its own check "(identity
+subcommand)" while calling `init`. All four use the `init || identity` fallback
+now, inside the substitution, because under `set -e` a failing command
+substitution in an assignment ends the script before any check runs.
+
 ## [v5.2.1] — 2026-08-24
 
 Documentation-integrity release from an external audit. **No protocol change, no
@@ -607,7 +764,7 @@ than silently dropped.
   has nothing to confirm, and logs its code). The **inviter** is the verifying
   side and needs a terminal — for an unattended inviter, pin the joiner with
   `--peer-key` as before. See *Daemon setup* in
-  [docs/INVITE.md](docs/INVITE.md).
+  `docs/INVITE.md`.
 
 ### Changed
 
@@ -1218,7 +1375,7 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
   the per-buddy scope. This adds `gopkg.in/yaml.v3` as the project's second
   approved application dependency (after `miekg/dns`); the manifest is parsed
   strictly (unknown fields are errors) with bounded size. See
-  [docs/PEERS.md](docs/PEERS.md).
+  `docs/PEERS.md`.
 
 - **The handshake control plane is now QUIC/TLS 1.3 by default (security by
   default).** Previously plain UDP (cleartext token) was the default and opted in; now encryption is on unless you explicitly opt out
@@ -1231,7 +1388,7 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
   for the `<fp8>.buddy` fingerprint alias, so a peer's self-asserted name can no
   longer shadow another peer's fingerprint entry in the resolver. A vanity name
   like `deadbeef` is disallowed for this reason; `deadbeefx` or `web01` are fine.
-  See [docs/BUDDYDNS.md](docs/BUDDYDNS.md).
+  See `docs/BUDDYDNS.md`.
 - **systemd units gain a crash-loop circuit breaker.** `StartLimitIntervalSec=60`
   / `StartLimitBurst=5` on the handshake, relay and buddy units: a deterministic
   start failure now stops after 5 attempts instead of restarting forever under
@@ -1433,6 +1590,7 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
   and SAS verification.
 
 [Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.2.1...HEAD
+[v5.3.0]: https://github.com/TZERO78/buddynet/compare/v5.2.1...v5.3.0
 [v5.2.1]: https://github.com/TZERO78/buddynet/compare/v5.2.0...v5.2.1
 [v5.2.0]: https://github.com/TZERO78/buddynet/compare/v5.1.1...v5.2.0
 [v5.1.1]: https://github.com/TZERO78/buddynet/compare/v5.1.0...v5.1.1

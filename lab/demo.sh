@@ -14,9 +14,14 @@ cd "$(dirname "$0")"
 
 DC="docker compose -f docker-compose.yml -f docker-compose.party.yml -f docker-compose.demo.yml"
 hub() { $DC exec -T party-hub "$@"; }
-BN="buddynet --peers-file /peers --known-peers /var/lib/buddynet/known_peers"
+BN="buddynet --peers-file /party/hub.peers --known-peers /var/lib/buddynet/known_peers"
 
-mapfile -t KEYS < <(grep -v '^#' party/hub.peers | awk '{print $1}')
+# Read the manifest THROUGH the container, not from the host: once the demo's
+# `peers remove` has rewritten it, the file belongs to the container user and is
+# 0600, so the host cannot read it any more. Same source as every other command
+# here, and it cannot go stale.
+mapfile -t KEYS < <(hub cat /party/hub.peers | awk '/^[[:space:]]*-[[:space:]]*key:/{print $3}')
+[ "${#KEYS[@]}" -ge 5 ] || { echo "demo: expected 5 buddies in the manifest, got ${#KEYS[@]} — is the party lab up?" >&2; exit 1; }
 SANDRA_KEY=${KEYS[4]}; SANDRA_SHORT=${SANDRA_KEY:0:6}; SANDRA_TOK="party-token-zeta"
 
 # Pre-flight (silent): make sure all five are present so the demo always starts at 5.

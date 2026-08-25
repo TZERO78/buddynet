@@ -534,7 +534,7 @@ reach your local rsync daemon on :873. At least one is required.
 **name** (e.g. `alice` → your buddy reaches you as `alice.buddy`) and/or enable
 the **resolver** so this host answers `*.buddy` queries on `127.0.0.153:53`. To
 use the names on the Unraid host itself, route the `.buddy` TLD to that resolver
-(see the project [BUDDYDNS.md](https://github.com/TZERO78/buddynet/blob/main/docs/BUDDYDNS.md)).
+(see the project [OPERATIONS.md](https://github.com/TZERO78/buddynet/blob/main/docs/OPERATIONS.md)).
 **Lazy tunnel** keeps the -L listener open but defers the encrypted tunnel until
 the first connection actually arrives (needs -L set) — handy when a backup tool
 connects only occasionally.

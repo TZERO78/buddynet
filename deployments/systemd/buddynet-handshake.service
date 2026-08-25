@@ -24,7 +24,20 @@ Environment=BUDDYNET_LISTEN=[::]:51820
 #   [Service]
 #   Environment=BUDDYNET_RELAY_ARGS=--relay-endpoint vps.example:51821 --relay-id RELAY_ID
 Environment=BUDDYNET_RELAY_ARGS=
-ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} --key ${STATE_DIRECTORY}/id.key $BUDDYNET_RELAY_ARGS
+# Approval mode is ON in this unit, and that is the point of it: this is the
+# PRIVATE matchmaker, for a server that is only ever meant to serve people you
+# invited. Without it the server pairs any two clients presenting the same token
+# and never marks a token spent, so a leaked invite lets two strangers pair on
+# your box and draw tickets for your relay.
+#
+# It is fail-closed: with no approved key yet, NOBODY pairs, and the log names
+# the exact command to approve one:
+#   buddynet --authorized /var/lib/buddynet-handshake/clients.txt approve <KEY>
+#
+# If you deliberately want an open matchmaker that strangers may use, do not
+# strip this flag — run buddynet-public-handshake.service instead. That is the
+# single-purpose public binary, which has no allowlist and no writable state.
+ExecStart=/usr/local/bin/buddynet --role=handshake --listen ${BUDDYNET_LISTEN} --key ${STATE_DIRECTORY}/id.key --authorized ${STATE_DIRECTORY}/clients.txt $BUDDYNET_RELAY_ARGS
 Restart=on-failure
 RestartSec=2
 

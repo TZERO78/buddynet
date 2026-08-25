@@ -273,12 +273,9 @@ The pairing secret is split so the value that actually travels is short-lived:
   - It does **not** get them into your tunnel. Your buddy is pinned by key, so a
     substituted partner fails on your side regardless of what the server said.
 
-  **[Approval mode](docs/APPROVAL.md) closes this**, because an unapproved key is
+  **[Approval mode](docs/SETUP.md) closes this**, because an unapproved key is
   refused when its signed `REGISTER` is handled, whatever token it presents. On a
   server that is only ever meant to serve people you know, run it — see §5.4.
-- **`--join`** is the legacy mode: a single fixed token used for rendezvous on
-  every reconnect (no session secret). Fine for scripted/daemon setups,
-  especially together with `--peer-key`.
 
 This is hygiene, not a new confidentiality guarantee — impersonation is already
 caught by `--peer-key`/SAS. It shrinks the exposure of the one secret you hand to
@@ -472,7 +469,7 @@ Clients enroll with a short code sealed to the server's identity (`--code`); the
 server prints the enrolling key and the operator approves THAT key while the
 client is running. Nothing about a pending enrolment is written to disk, so there
 is no `code → key` record to read or alter in between; see
-[docs/APPROVAL.md](docs/APPROVAL.md).
+[docs/SETUP.md](docs/SETUP.md).
 
 ---
 
@@ -515,7 +512,7 @@ Bounding *that* cost is the firewall's job, which is why the shipped ruleset
 rate-limits the handshake port at `limit rate 100/second burst 50 packets` with
 an explicit drop for the excess — and why the rule's placement before the generic
 `established,related` accept is load-bearing. See
-[docs/VPS-HOWTO.md](docs/VPS-HOWTO.md) and `deployments/nftables.conf`.
+[docs/SETUP.md](docs/SETUP.md) and `deployments/nftables.conf`.
 
 This is a small VPS's realistic exposure, not a theoretical one. It is also the
 kind of load a distributed volumetric attacker can produce against anything, at

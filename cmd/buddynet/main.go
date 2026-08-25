@@ -176,7 +176,7 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 		sasTimeout:        fs.Duration("sas-timeout", 30*time.Second, "buddy: how long to wait for SAS y/N confirmation before treating it as a mismatch (abort)"),
 		inviteTimeout:     fs.Duration("invite-timeout", 15*time.Minute, "buddy: give up the first pairing (--invite/--join) after this long; the invite token is one-time"),
 		status:            fs.Bool("status", false, "buddy: probe whether the buddy is online and reachable, then exit (codes: 0 reachable, 3 unreachable, 4 offline, 5 untrusted, 1 local error)"),
-		invite:            fs.Bool("invite", false, "buddy: mint an invite, print it, and wait. The invite carries this node's public key, so your buddy pins YOUR identity from it — hand it over on a channel you trust. Afterwards reconnects use a stored session secret and this side stops presenting the invite; --invite-timeout bounds how long THIS side waits, it does not make the token unusable on the server. A leaked invite lets two strangers pair on your server (not enter your tunnel) — run the handshake server with --authorized to close that. See docs/INVITE.md"),
+		invite:            fs.Bool("invite", false, "buddy: mint an invite, print it, and wait. The invite carries this node's public key, so your buddy pins YOUR identity from it — hand it over on a channel you trust. Afterwards reconnects use a stored session secret and this side stops presenting the invite; --invite-timeout bounds how long THIS side waits, it does not make the token unusable on the server. A leaked invite lets two strangers pair on your server (not enter your tunnel) — run the handshake server with --authorized to close that. See docs/SETUP.md"),
 		join:              fs.String("join", "", "buddy: join with the one-time invite your buddy gave you. A key-bearing invite pins them automatically (no code to compare on this side); a bare token falls back to first-contact verification. On success a session secret is stored for reconnects"),
 		name:              fs.String("name", "", "buddy: self-asserted .buddy hostname (e.g. --name alice → reachable as alice.buddy); letters/digits/hyphens only, max 63 chars"),
 		dnsFlag:           fs.Bool("dns", false, "buddy: start a .buddy stub resolver on 127.0.0.153:53 (needs CAP_NET_BIND_SERVICE or root; degrades gracefully if unavailable)"),
@@ -978,7 +978,7 @@ QUICK START — connect two machines
 
   2) On machine A, expose a local service (e.g. an rsync daemon on :873):
        %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
-            --invite -forward 127.0.0.1:873
+            --invite --forward 127.0.0.1:873
      It prints a ONE-TIME invite — hand it to B over a channel you trust (phone,
      Signal). The invite carries A's key, so B pins A's identity straight from it.
 
@@ -1002,18 +1002,18 @@ NAMES & ON-DEMAND
 
   --name NAME --dns   Reach buddies by NAME.buddy instead of a virtual IP — a
                       local stub resolver (BuddyDNS) answers *.buddy from the
-                      live peer list. See docs/BUDDYDNS.md.
+                      live peer list. See docs/OPERATIONS.md.
   --lazy              With -L, bind the local listener immediately but defer the
                       tunnel until the first connection actually arrives (the
                       tunnel sleeps until something connects).
 
 COMMANDS
-  %[1]s gen-token                            mint a strong shared token
-  %[1]s --key PATH init                         create this node's identity (once)
-  %[1]s --role=handshake --key PATH identity   print the server's public key
-  %[1]s --role=buddy ... --status            is my buddy online and reachable?
-  %[1]s --peers-file PATH peers list|add|remove|migrate   manage your buddies (MultiPeer)
-  %[1]s --authorized FILE approve|list|revoke    server allowlist (approval mode)
+  %[1]s gen-token                         a random secret (--code, token)
+  %[1]s --key PATH init                   create this node's identity
+  %[1]s --key PATH identity               print this node's public key
+  %[1]s --role=buddy ... --status         is my buddy online?
+  %[1]s --peers-file P peers list|add|remove|migrate    manage buddies
+  %[1]s --authorized F approve|list|revoke             server allowlist
   %[1]s version
 
 SECURITY — please read
@@ -1036,10 +1036,12 @@ SECURITY — please read
 
 TRANSPORT
   The handshake control plane is encrypted with QUIC/TLS 1.3 — ALWAYS, since v8:
-  the pairing token never travels in cleartext, source addresses are validated by
-  the QUIC handshake (the server is never a reflector), and with --authorized the
-  server pins clients to the allowlist at the TLS handshake. There is no plain-UDP
-  control plane left to select, and therefore no flag to select it with.
+  the pairing token never travels in cleartext and source addresses are validated
+  by the QUIC handshake (the server is never a reflector). TLS AUTHENTICATES every
+  client by its Ed25519 key but authorizes none: with --authorized the allowlist
+  decision is made per signed REGISTER, because enrollment needs an unknown key to
+  be able to deliver its sealed code. There is no plain-UDP control plane left to
+  select, and therefore no flag to select it with.
 
 FLAGS
 `, appName, appVersion())

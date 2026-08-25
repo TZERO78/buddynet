@@ -19,7 +19,9 @@ echo "== build images =="
 dc build >/dev/null
 
 echo "== bootstrap server identity =="
-KEY=$(dc run --rm server --key /var/lib/buddynet/id.key init 2>/dev/null | tr -d '\r\n')
+# `init` only prints on the FIRST run; afterwards it refuses and prints nothing.
+KEY=$( (dc run --rm server --key /var/lib/buddynet/id.key init 2>/dev/null \
+  || dc run --rm server --key /var/lib/buddynet/id.key identity 2>/dev/null) | tr -d '\r\n')
 [ -n "$KEY" ] || { echo "FAIL: no server key"; exit 1; }
 echo "BUDDYNET_SERVER_KEY=$KEY" > .env
 echo "server key: $KEY"

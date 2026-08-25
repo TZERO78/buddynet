@@ -19,9 +19,23 @@ services:
     environment:
       NODE_NAME: sandra
 
-  # The demo's `peers remove`/`add` must write the manifest, so mount it
-  # read-write (the party lab mounts it read-only).
+  # The demo's `peers remove`/`add` rewrite the manifest, and they do it
+  # ATOMICALLY: write a temp file next to it, then rename over the original. A
+  # read-write bind mount of the FILE is not enough for that — the rename fails
+  # with "device or resource busy", the tombstone is already written and the demo
+  # shows an error where it means to show a revocation. Mount the DIRECTORY so
+  # the rename has somewhere to land, and point --peers-file inside it.
   party-hub:
+    command:
+      - --role=buddy
+      - --key=/var/lib/buddynet/id.key
+      - --peers-file=/party/hub.peers
+      - --known-peers=/var/lib/buddynet/known_peers
+      - --vip-listen=8080
+      - --no-interactive
+      - --name=hub
+      - --dns
+      - --idle-timeout=10m
     volumes:
       - party-hub-key:/var/lib/buddynet
-      - ./party/hub.peers:/peers
+      - ./party:/party
