@@ -14,9 +14,9 @@ cd "$(dirname "$0")"
 
 DC="docker compose -f docker-compose.yml -f docker-compose.party.yml -f docker-compose.demo.yml"
 hub() { $DC exec -T party-hub "$@"; }
-BN="buddynet --peers-file /peers --known-peers /var/lib/buddynet/known_peers"
+BN="buddynet --peers-file /party/hub.peers --known-peers /var/lib/buddynet/known_peers"
 
-mapfile -t KEYS < <(grep -v '^#' party/hub.peers | awk '{print $1}')
+mapfile -t KEYS < <(awk '/^[[:space:]]*-[[:space:]]*key:/{print $3}' party/hub.peers)
 SANDRA_KEY=${KEYS[4]}; SANDRA_SHORT=${SANDRA_KEY:0:6}; SANDRA_TOK="party-token-zeta"
 
 # Pre-flight (silent): make sure all five are present so the demo always starts at 5.
