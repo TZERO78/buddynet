@@ -24,14 +24,23 @@
 # so once the server answers the first packet, every later packet of that 5-tuple
 # matched the accept and the limit was never reached. The excess must also be
 # dropped explicitly, or it falls through to the established rule.
-# Two limits, in this order: a GLOBAL emergency ceiling that protects the box
-# whatever the sources, then PER-SOURCE fairness so one loud address cannot spend
-# the shared budget. With only the global limit, lab/test-firewall-fairness.sh
-# measured a legitimate buddy keeping 15% of its packets next to one flood.
-# (hashlimit needs xt_hashlimit; it ships with the standard iptables modules.)
--A INPUT -p udp --dport 51820 -m hashlimit --hashlimit-above 50/second \
-    --hashlimit-burst 50 --hashlimit-mode srcip --hashlimit-name bn-hs \
-    --hashlimit-htable-expire 60000 -j DROP
+# Two limits, and the ORDER IS LOAD-BEARING — per-source first, global second.
+# A plain `limit` attaches its bucket to the rule rather than the sender, so one
+# loud address can spend the shared budget; hashlimit gives each source its own.
+# The global ceiling then only ever sees traffic that has already been tamed. The
+# other way round it would be source-blind and drop a share of everybody's
+# packets. Measured with lab/test-firewall-fairness.sh: a legitimate buddy keeps
+# 15% of its throughput with the global limit alone, 77% with global first, and
+# 100% in the order below. (hashlimit needs xt_hashlimit, part of the standard
+# iptables modules.)
+#
+# ⚠ IPv6: change --hashlimit-srcmask to 64 before loading this with
+#   ip6tables-restore (see the IPv6 notes at the bottom). hashlimit keys on the
+#   full address by default, and a /64 is what one subscriber gets — without the
+#   mask an attacker holding a single /64 simply uses a different address per
+#   bucket and the per-source limit buys nothing. iptables (v4) REFUSES a mask
+#   above 32, so this file cannot carry both values at once.
+-A INPUT -p udp --dport 51820 -m hashlimit --hashlimit-above 50/second --hashlimit-burst 50 --hashlimit-mode srcip --hashlimit-srcmask 32 --hashlimit-name bn-hs --hashlimit-htable-expire 60000 -j DROP
 -A INPUT -p udp --dport 51820 -m limit --limit 500/second --limit-burst 200 -j ACCEPT
 -A INPUT -p udp --dport 51820 -j DROP
 
@@ -47,6 +56,24 @@
 
 # ICMP (use -p icmpv6 with ip6tables-restore).
 -A INPUT -p icmp -j ACCEPT
+
+# ── IPv6 ─────────────────────────────────────────────────────────────────────
+# This file loads with ip6tables-restore too, but TWO edits are required first,
+# and the second one is load-bearing rather than cosmetic:
+#
+#   1. -p icmp            ->  -p icmpv6      (above)
+#   2. --hashlimit-srcmask 32  ->  64        (the handshake rate limit)
+#
+# Without (2) the per-source limit is keyed on the full /128. One /64 — what a
+# single subscriber is routinely handed — then yields as many buckets as the
+# attacker cares to use, and the fairness the rule exists for is gone. nftables
+# has no such caveat: deployments/nftables.conf masks IPv6 to /64 in the rule
+# itself and needs no per-family edit.
+#
+# Verify either family with:
+#   sudo ./lab/test-firewall-fairness.sh                      # nftables, IPv4
+#   sudo ./lab/test-firewall-fairness.sh --iptables           # iptables, IPv4
+#   sudo ./lab/test-firewall-fairness.sh --ipv6               # nftables, IPv6 /64
 
 # Management.
 -A INPUT -p tcp --dport 22 -j ACCEPT

@@ -124,6 +124,16 @@ legitimate buddy keep **15%** of its packets next to a single flooding source.
 Per-source first brings that to **100%** while the flood stays throttled, because
 the global ceiling then only ever sees traffic that has already been tamed.
 
+> **On IPv6, check the grouping.** Per-source fairness keyed on a full /128 is
+> worth nothing there: a /64 is what one subscriber routinely gets, so an
+> attacker just uses a different address per packet and collects a bucket for
+> each. The nftables file masks to /64 in the rule and needs no edit. The
+> iptables file **does**: change `--hashlimit-srcmask 32` to `64` before loading
+> it with `ip6tables-restore` (iptables refuses a mask above 32, so one file
+> cannot carry both). Measured with `lab/test-firewall-fairness.sh --iptables
+> --ipv6`: five attacking addresses in one /64 get 249 packets through with /64
+> keying and 1245 without.
+
 Be honest about what this does and does not buy. It stops one source from
 starving the others and caps what any flood costs your CPU. It does **not** make
 you immune: a botnet spread across many addresses still fills the global ceiling,

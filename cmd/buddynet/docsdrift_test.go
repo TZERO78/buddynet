@@ -344,3 +344,125 @@ func TestMarkdownLinksAndAnchorsResolve(t *testing.T) {
 			"pattern is broken, and this test would pass vacuously", files, links)
 	}
 }
+
+// TestShippedFirewallLimitsPerSourceBeforeGlobal pins the rule ORDER on the
+// handshake port in both shipped rulesets.
+//
+// The port is limited twice: a per-source bucket (nftables `meter`, iptables
+// `hashlimit`) and a global ceiling (`limit`). Which comes first is not a matter
+// of taste. A global limit is source-blind, so ahead of the per-source rule it
+// drops a share of every sender's packets — including those of the buddy the
+// fairness rule exists to protect. lab/test-firewall-fairness.sh measures the
+// difference: a legitimate buddy keeps 15% of its unopposed throughput with the
+// global limit alone, 77% with global first, and 100% with per-source first.
+//
+// That lab test needs root, netns and a few minutes. This one is the cheap
+// always-on guard that runs in CI on every change, so the order cannot be
+// swapped back by an edit that never gets a lab run.
+//
+// It deliberately checks the RULES, not the prose around them. The comment above
+// these rules once numbered them in the opposite order to the rules themselves,
+// which is how this test came to exist — but a gate on comment wording would be
+// guessing at English, while the order of two lines is a fact.
+func TestShippedFirewallLimitsPerSourceBeforeGlobal(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("locate module root: %v", err)
+	}
+
+	for _, tc := range []struct {
+		file      string
+		perSource *regexp.Regexp
+		global    *regexp.Regexp
+	}{
+		{
+			file:      "deployments/nftables.conf",
+			perSource: regexp.MustCompile(`(?m)^\s*udp dport \$?port_handshake.*\bmeter\b`),
+			global:    regexp.MustCompile(`(?m)^\s*udp dport \$?port_handshake\s+limit rate`),
+		},
+		{
+			file:      "deployments/iptables.rules",
+			perSource: regexp.MustCompile(`(?m)^-A INPUT -p udp --dport \d+ .*\bhashlimit\b`),
+			global:    regexp.MustCompile(`(?m)^-A INPUT -p udp --dport \d+ -m limit\b`),
+		},
+	} {
+		b, rerr := os.ReadFile(filepath.Join(root, tc.file)) // #nosec G304 -- fixed path in this module
+		if rerr != nil {
+			t.Errorf("read %s: %v", tc.file, rerr)
+			continue
+		}
+		body := string(b)
+
+		ps := tc.perSource.FindStringIndex(body)
+		gl := tc.global.FindStringIndex(body)
+		if ps == nil {
+			t.Errorf("%s has no per-source rate limit on the handshake port — one loud "+
+				"source can spend the whole budget (audit finding M-02)", tc.file)
+		}
+		if gl == nil {
+			t.Errorf("%s has no global rate ceiling on the handshake port — nothing bounds "+
+				"what many sources together cost the box", tc.file)
+		}
+		if ps == nil || gl == nil {
+			continue
+		}
+		if ps[0] > gl[0] {
+			t.Errorf("%s puts the global ceiling BEFORE the per-source limit. A global limit "+
+				"is source-blind: ahead of the per-source rule it drops a share of every "+
+				"sender's packets, so a flood still costs your buddies ~23%% of their "+
+				"throughput (measured by lab/test-firewall-fairness.sh). Per-source first.",
+				tc.file)
+		}
+	}
+}
+
+// TestShippedIptablesRulesAreLoadable guards two things iptables-restore is
+// strict about and a reader's eye is not.
+//
+// `iptables-restore` parses line by line and has NO line-continuation syntax: a
+// rule broken across lines with a trailing backslash makes the whole file fail
+// to load with "Bad argument `\'". Reformatting a long rule for readability —
+// which is exactly what happened when the per-source limit was added — turns the
+// shipped ruleset into one that cannot be applied at all. nftables tolerates the
+// same edit, so a change tested only against nftables looks fine.
+//
+// It also pins the IPv6 note. hashlimit keys on the full address unless told
+// otherwise, and a /64 is what one subscriber gets, so without
+// --hashlimit-srcmask an attacker holding a single /64 gets a fresh bucket per
+// address and the per-source limit buys nothing. Measured in
+// lab/test-firewall-fairness.sh --iptables --ipv6: 249 packets through with /64
+// keying, 1245 with /128. iptables(v4) refuses a mask above 32, so the file
+// cannot carry both values and has to document the per-family edit instead.
+func TestShippedIptablesRulesAreLoadable(t *testing.T) {
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatalf("locate module root: %v", err)
+	}
+	path := filepath.Join(root, "deployments/iptables.rules")
+	b, err := os.ReadFile(path) // #nosec G304 -- fixed path in this module
+	if err != nil {
+		t.Fatalf("read iptables.rules: %v", err)
+	}
+	body := string(b)
+
+	for i, line := range strings.Split(body, "\n") {
+		if strings.HasSuffix(strings.TrimRight(line, " \t"), `\`) && !strings.HasPrefix(strings.TrimSpace(line), "#") {
+			t.Errorf("deployments/iptables.rules:%d ends in a backslash. iptables-restore has "+
+				"no line continuation and rejects the WHOLE file with \"Bad argument\". "+
+				"Keep rules on one line, however long: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+
+	// The per-source rule must state its mask explicitly, so the IPv6 edit is a
+	// visible one-token change rather than a silently missing default.
+	if strings.Contains(body, "hashlimit-mode srcip") && !strings.Contains(body, "hashlimit-srcmask") {
+		t.Error("the hashlimit rule has no --hashlimit-srcmask. On IPv6 it then keys on the " +
+			"full /128, and one attacker /64 yields a bucket per address — the per-source " +
+			"limit buys nothing (measured: 1245 packets through vs 249 with /64 keying)")
+	}
+	if !strings.Contains(body, "ip6tables-restore") {
+		t.Error("iptables.rules no longer documents the ip6tables edits. The file cannot carry " +
+			"both masks (iptables refuses > 32), so the note is the only thing standing " +
+			"between an operator and a v6 ruleset whose fairness rule does nothing")
+	}
+}
