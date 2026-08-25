@@ -978,7 +978,7 @@ QUICK START — connect two machines
 
   2) On machine A, expose a local service (e.g. an rsync daemon on :873):
        %[1]s --role=buddy --server VPS:51820 --server-key SERVER_KEY \
-            --invite -forward 127.0.0.1:873
+            --invite --forward 127.0.0.1:873
      It prints a ONE-TIME invite — hand it to B over a channel you trust (phone,
      Signal). The invite carries A's key, so B pins A's identity straight from it.
 
@@ -1008,12 +1008,12 @@ NAMES & ON-DEMAND
                       tunnel sleeps until something connects).
 
 COMMANDS
-  %[1]s gen-token                            mint a strong shared token
-  %[1]s --key PATH init                         create this node's identity (once)
-  %[1]s --role=handshake --key PATH identity   print the server's public key
-  %[1]s --role=buddy ... --status            is my buddy online and reachable?
-  %[1]s --peers-file PATH peers list|add|remove|migrate   manage your buddies (MultiPeer)
-  %[1]s --authorized FILE approve|list|revoke    server allowlist (approval mode)
+  %[1]s gen-token                         a random secret (--code, token)
+  %[1]s --key PATH init                   create this node's identity
+  %[1]s --key PATH identity               print this node's public key
+  %[1]s --role=buddy ... --status         is my buddy online?
+  %[1]s --peers-file P peers list|add|remove|migrate    manage buddies
+  %[1]s --authorized F approve|list|revoke             server allowlist
   %[1]s version
 
 SECURITY — please read
