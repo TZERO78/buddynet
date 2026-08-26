@@ -73,6 +73,13 @@ name is fine) and pin its key, and that is the whole configuration. No
 matchmaking, no token, no third party. See
 [Direct mode](docs/SETUP.md#direct-mode-no-server-at-all).
 
+![Direct mode: two buddies exchange public keys, one listens on a fixed port, the other dials it by name, and a service is reachable through the tunnel — with no server anywhere](media/direct-demo.gif)
+
+Every key, `CONNECTED` line and response above comes from a real pair of
+processes started by [`lab/demo-direct.sh`](lab/demo-direct.sh); the commands it
+types are checked against the binary before recording, so it cannot show one that
+does not run.
+
 Either way the buddies themselves may sit behind ordinary NAT or CGNAT. Only the
 reachable side has to be reachable — if *neither* of you is (real CGNAT on both
 ends), you need a rented machine.
