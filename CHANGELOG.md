@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.3.3] — 2026-08-26
+
 ### Fixed (Security/DoS) — the buddy's own QUIC listener had no source validation
 
 The **control** plane validates every source address with QUIC Retry
@@ -34,6 +36,10 @@ Verified in `lab/test-cgnat.sh`: cone NAT still comes up `via="direct P2P"` and
 symmetric CGNAT still falls back to the relay, i.e. Retry breaks neither the hole
 punch nor the relay splice. The new tests in
 `internal/tunnel/dataplane_perimeter_test.go` fail against the previous code.
+
+No protocol change and no `protocol.Version` bump — both changes are
+transport-level, and Retry is part of QUIC itself, so a buddy on this version
+pairs with one still on v5.3.2 unchanged.
 
 ### Fixed (Lab) — every lab image build was broken
 
@@ -1711,7 +1717,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.3.2...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.3.3...HEAD
+[v5.3.3]: https://github.com/TZERO78/buddynet/compare/v5.3.2...v5.3.3
 [v5.3.2]: https://github.com/TZERO78/buddynet/compare/v5.3.1...v5.3.2
 [v5.3.1]: https://github.com/TZERO78/buddynet/compare/v5.3.0...v5.3.1
 [v5.3.0]: https://github.com/TZERO78/buddynet/compare/v5.2.1...v5.3.0
