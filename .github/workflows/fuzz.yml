@@ -30,7 +30,12 @@ jobs:
           - { pkg: ./internal/ticket, target: FuzzParse }
           - { pkg: ./internal/ticket, target: FuzzVerify }
     steps:
+      # No job in this repo pushes with git, so the checkout credential has no
+      # reason to stay behind in .git/config, where a later step — or anything that
+      # packages the workspace — could carry it out of the job. (zizmor: artipacked)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod

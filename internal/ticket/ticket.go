@@ -155,15 +155,33 @@ func NewID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
-// ValidID reports whether s is a well-formed id: exactly the base64url spelling
-// of IDLen bytes. Strict on both length and alphabet, so an id is safe as a map
-// key and as a log tag before anything else has looked at it.
+// ValidID reports whether s is THE base64url spelling of IDLen bytes — not merely
+// a spelling that decodes to them. Strict on length, alphabet and canonical form,
+// so an id is safe as a map key and as a log tag before anything else has looked
+// at it.
+//
+// The canonical check is the part that is easy to leave out. 22 base64url
+// characters carry 132 bits for 128 bits of id, so the final character has four
+// unused bits — and encoding/base64 does not care what is in them. Sixteen
+// distinct strings therefore decode to any given id, and a length-plus-decode
+// check accepts all sixteen. Re-encoding and comparing admits exactly one.
+//
+// Nothing in the ticket path can be attacked through this today: every id in a
+// ticket is minted by NewID (canonical by construction) and covered by the
+// server's signature, so an attacker cannot substitute a spelling without
+// breaking the signature first. What it does buy is that the guarantee stated
+// above is true rather than nearly true — and that a mistyped --relay-id with a
+// stray trailing bit is refused HERE, with a message naming the flag, instead of
+// being accepted and then silently rejecting every ticket the relay is sent.
 func ValidID(s string) bool {
 	if len(s) != base64.RawURLEncoding.EncodedLen(IDLen) {
 		return false
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(s)
-	return err == nil && len(raw) == IDLen
+	if err != nil || len(raw) != IDLen {
+		return false
+	}
+	return base64.RawURLEncoding.EncodeToString(raw) == s
 }
 
 // Sign marshals p and signs it with the server's identity key, returning the

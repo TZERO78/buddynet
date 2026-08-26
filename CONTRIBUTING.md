@@ -28,7 +28,7 @@ can be argued about.
 Before opening a PR, please make sure the same checks CI runs pass locally:
 
 ```bash
-gofmt -l ./cmd ./internal ./pkg   # must be empty
+gofmt -l ./cmd ./internal ./pkg ./tools   # must be empty
 go vet ./...
 go test -race ./...
 go build ./...
@@ -38,7 +38,17 @@ go install golang.org/x/vuln/cmd/govulncheck@v1.5.0
 govulncheck ./...
 go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
 gosec -severity medium -exclude=G104,G115,G117,G304,G402 ./...
+
+# the workflows are scanned too (same image, pinned by digest in ci.yml):
+docker run --rm -v "$PWD:/repo:ro" --workdir /repo \
+  ghcr.io/zizmorcore/zizmor:1.29.0 \
+  --no-online-audits --min-severity=low --format plain .github/workflows/
 ```
+
+The zizmor line above is the CI check minus its online audits, which need a
+GitHub token to look the pinned actions up in the advisory database; CI supplies
+its own. Everything else is identical, so a workflow finding can be reproduced
+locally with one command and no credentials.
 
 CI additionally validates the shipped systemd units and checks that no shipped
 artifact passes a flag the binaries do not define. Official builds use the exact

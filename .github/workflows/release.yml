@@ -33,10 +33,26 @@ jobs:
           - { goos: linux, goarch: amd64 }
           - { goos: linux, goarch: arm64 }   # Raspberry Pi, Unraid
     steps:
+      # No job in this repo pushes with git, so the checkout credential has no
+      # reason to stay behind in .git/config, where a later step — or anything that
+      # packages the workspace — could carry it out of the job. (zizmor: artipacked)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The RELEASE build takes no build cache. A cache is restored from the
+      # default-branch scope, which every push to main writes; so a poisoned entry
+      # placed there would be linked into the binaries this job then signs and
+      # attests — and neither control would notice. A cosign signature and a SLSA
+      # provenance attest WHO built and FROM WHICH ref; neither attests that the
+      # build inputs were clean. Without this, "can land a commit on main" becomes
+      # "can put bytes in a signed release" with nothing in the source tree to show
+      # for it. ci.yml may keep its cache: it signs nothing. (zizmor: cache-poisoning)
+      #
+      # The cost is one cold compile of a small tree, twice a month.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       # A-07's gate. The point of the pin is that the stdlib govulncheck scans is
       # the stdlib that ships — and "setup-go honours the toolchain line" did NOT
@@ -112,7 +128,12 @@ jobs:
     permissions:
       contents: write   # create the release and upload assets
     steps:
+      # No job in this repo pushes with git, so the checkout credential has no
+      # reason to stay behind in .git/config, where a later step — or anything that
+      # packages the workspace — could carry it out of the job. (zizmor: artipacked)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: dist

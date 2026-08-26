@@ -12,7 +12,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
+      # No job in this repo pushes with git, so the checkout credential has no
+      # reason to stay behind in .git/config, where a later step — or anything that
+      # packages the workspace — could carry it out of the job. (zizmor: artipacked)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -39,7 +44,7 @@ jobs:
 
       - name: gofmt
         run: |
-          unformatted=$(gofmt -l ./cmd ./internal ./pkg)
+          unformatted=$(gofmt -l ./cmd ./internal ./pkg ./tools)
           if [ -n "$unformatted" ]; then
             echo "These files are not gofmt-clean:"; echo "$unformatted"; exit 1
           fi
@@ -100,7 +105,12 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
+      # No job in this repo pushes with git, so the checkout credential has no
+      # reason to stay behind in .git/config, where a later step — or anything that
+      # packages the workspace — could carry it out of the job. (zizmor: artipacked)
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -153,3 +163,37 @@ jobs:
         run: |
           go install github.com/securego/gosec/v2/cmd/gosec@v2.27.1
           gosec -severity medium -exclude=G104,G115,G117,G304,G402 ./...
+
+      # Static analysis of the WORKFLOWS themselves — the half govulncheck and
+      # gosec cannot see. They read Go; the supply chain that produces a signed
+      # release is written in YAML, and that is where a release-time compromise
+      # would live (a poisoned build cache, a credential left in .git/config, an
+      # action that quietly floats off its pin).
+      #
+      # Run as the pinned CONTAINER, by digest, not via the marketplace action:
+      # it is the same artifact the maintainer runs locally, so a finding here is
+      # reproducible off-CI with one command, and it adds no further action to a
+      # workflow whose whole point is a short, pinned chain. Bump the tag and the
+      # digest together — the tag is a label, only the digest is the pin.
+      #
+      # --min-severity=low blocks on everything zizmor rates low or worse and
+      # leaves `informational` visible in the log without failing the job. One
+      # informational finding stands open today (release.yml publishes via
+      # softprops/action-gh-release, which `gh release create` could replace);
+      # replacing it changes the release path, so it is a deliberate decision,
+      # not a lint fix.
+      #
+      # Online audits stay ON: with the job's own ephemeral GITHUB_TOKEN, zizmor
+      # checks the pinned actions against GitHub's advisories. That is the one
+      # thing no offline pass can do, and it is the actions-side counterpart to
+      # govulncheck. The local pass above runs --no-online-audits and needs no
+      # token; only this extra check differs.
+      - name: zizmor (workflow security)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm \
+            -v "$PWD:/repo:ro" --workdir /repo \
+            -e GH_TOKEN \
+            ghcr.io/zizmorcore/zizmor@sha256:863026d54f91271b10b60b67ad8054cb37120167e162482597db102b3026a284 \
+            --min-severity=low --format plain .github/workflows/
