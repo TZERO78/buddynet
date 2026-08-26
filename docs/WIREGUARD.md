@@ -119,6 +119,34 @@ The WG path walks the **same fallback chain** as QUIC — direct first, then a r
 `via="handshake server as relay (WireGuard)"`. It is logged **after** step 5, so a
 `CONNECTED` line on this path always means a real partner answered.
 
+### With `--direct` (no handshake server)
+
+Step 1 falls away entirely: the partner is not learned, it is configured
+(`--peer-endpoint` for where, `--peer-key` for who — see
+[SETUP.md](SETUP.md#direct-mode-no-server-at-all)). Step 2 changes shape, because
+WireGuard has no "listen" call — a peer either has an endpoint and initiates, or
+has none and can only answer:
+
+- The side that **dials** is configured with the resolved endpoint and initiates,
+  exactly as above.
+- The side that **is dialled** has no endpoint to configure, since nothing ever
+  observed an address for it. It is therefore brought up as a peer with **no
+  endpoint at all** and adopts the address of whatever handshake completes
+  (WireGuard roaming). Its `CONNECTED` line reads `remote=adopted-from-handshake`.
+  It also arms every path in the chain at once (`armWGPaths`) rather than trying
+  them in turn — with no server, nothing synchronises the two ends, and one
+  endpoint-less interface covers the direct path and the relay path together.
+
+This is not a weakening of step 5: only the holder of the pinned key can complete
+a handshake, so an unauthenticated packet cannot cause the adoption, and the
+completed-handshake requirement is unchanged. `lab/test-wg-direct.sh` asserts that
+the no-endpoint path was the one actually exercised, not merely that a tunnel
+appeared.
+
+There is no SAS on this path (step 3): direct mode always has a pinned key, and
+without a rendezvous channel there would be nothing to run a first-contact
+exchange over.
+
 ## Reaching the partner
 
 The interface (`bnet0`, …) is assigned this node's VIP as a `/32`, with an explicit
@@ -260,6 +288,11 @@ Run as root with the `wireguard` module loaded (netns labs):
 
 - `lab/test-wg-buddy.sh` — direct P2P over WireGuard + native VIP ping; confirms the
   QUIC default still works (no regression).
+- `lab/test-wg-direct.sh` — `--direct --wireguard` with no server anywhere:
+  asserts the dialled side really ran the **no-endpoint** path
+  (`remote=adopted-from-handshake`), pings the partner's VIP across the interface,
+  then re-runs the same pair on QUIC so a regression in either plane shows up in
+  one run.
 - `lab/test-wg-relay.sh` — the direct path firewalled off, so the tunnel runs over
   the blind relay.
 - `lab/test-wg-multipeer.sh` — a full mesh of three buddies, each on its own

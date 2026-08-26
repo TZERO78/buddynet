@@ -63,10 +63,17 @@ whichever server that buddy talks to (or to both).
 ```jsonc
 {
   "type": "REGISTER|PEER_LIST|COOKIE|RELAY_OFFER|CONNECT|PING|PONG",
-  "ver":  7,
+  "ver":  8,
   // ...type-specific fields, all omitempty...
 }
 ```
+
+> **`--direct` uses none of this.** Direct mode has no control plane at all: no
+> `REGISTER`, no `PEER_LIST`, no token and no ticket. Each side is configured
+> with the partner's address and pinned key, and the only thing on the wire is
+> the data plane itself (QUIC, or WireGuard with `--wireguard`). That is why it
+> needed no protocol change — `Version` stays **8** — and why nothing in this
+> document applies to it.
 
 ## REGISTER  (peer → handshake)
 
