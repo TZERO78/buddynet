@@ -1,0 +1,87 @@
+# BuddyNet direct-mode lab — NO handshake server anywhere in this file.
+#
+#   bob     : listens on a fixed port (--listen-port), offers a service
+#   sarah   : dials bob by NAME (--peer-endpoint bob.dyn.test:51820)
+#   mallory : a third identity, listening on the same fixed port on another host
+#
+# sarah resolves bob.dyn.test through her own /etc/hosts, which the test rewrites
+# mid-run. That is a faithful stand-in for a dynamic-DNS record changing: the name
+# stays, the address behind it moves, and BuddyNet has to re-resolve on the next
+# attempt. Pointing it at mallory instead is the hijack case — the connection must
+# then fail on the pinned key, which is the whole security argument of this mode.
+#
+# Run: ./test-direct.sh
+
+x-buddy: &buddy
+  build: { context: .., dockerfile: lab/Dockerfile }
+  image: buddynet-lab-buddy
+  restart: unless-stopped
+
+services:
+
+  bob:
+    <<: *buddy
+    entrypoint: ["/bin/sh", "/entrypoint-a.sh"]
+    command:
+      - --role=buddy
+      - --direct
+      - --key=/var/lib/buddynet/id.key
+      - --peer-key=${SARAH_PUB}
+      - --listen-port=51820
+      # Empty unless the relay case sets it; an empty value means "no relay".
+      - --peer-relay=${PEER_RELAY:-}
+      - --forward=127.0.0.1:7777
+      - --no-interactive
+    volumes: [./keys/bob.key:/var/lib/buddynet/id.key]
+    networks: { direct: { ipv4_address: 172.40.0.10 } }
+
+  sarah:
+    <<: *buddy
+    command:
+      - --role=buddy
+      - --direct
+      - --key=/var/lib/buddynet/id.key
+      - --peer-key=${BOB_PUB}
+      # A NAME, not an address: this is what the test re-points mid-run.
+      - --peer-endpoint=bob.dyn.test:51820
+      - --peer-relay=${PEER_RELAY:-}
+      - -L=0.0.0.0:9099
+      - --no-interactive
+    volumes: [./keys/sarah.key:/var/lib/buddynet/id.key]
+    networks: { direct: { ipv4_address: 172.40.0.11 } }
+
+  # A blind relay for the fallback case. Direct mode has no handshake server, so
+  # there is nothing to mint a relay ticket — this relay must therefore authorize
+  # by source CIDR instead, which is the one policy available here.
+  relay:
+    build: { context: .., dockerfile: deployments/Dockerfile }
+    image: buddynet-lab-server
+    command:
+      - --role=relay
+      - --key=/var/lib/buddynet/id.key
+      - --relay-listen=0.0.0.0:51921
+      - --allow-cidr=172.40.0.0/24
+    volumes: [./keys/relay.key:/var/lib/buddynet/id.key]
+    networks: { direct: { ipv4_address: 172.40.0.99 } }
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    restart: unless-stopped
+
+  # The impostor. It runs a perfectly valid BuddyNet on the same port with its
+  # own, different identity — everything about it is right except WHO it is.
+  mallory:
+    <<: *buddy
+    command:
+      - --role=buddy
+      - --direct
+      - --key=/var/lib/buddynet/id.key
+      - --peer-key=${SARAH_PUB}
+      - --listen-port=51820
+      - --forward=127.0.0.1:7777
+      - --no-interactive
+    volumes: [./keys/mallory.key:/var/lib/buddynet/id.key]
+    networks: { direct: { ipv4_address: 172.40.0.66 } }
+
+networks:
+  direct: { ipam: { config: [{ subnet: 172.40.0.0/24 }] } }

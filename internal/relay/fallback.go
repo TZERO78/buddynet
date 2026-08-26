@@ -12,13 +12,27 @@ const (
 	// Relayed binds a session on a relay and runs the same end-to-end QUIC
 	// through it; the relay forwards encrypted packets blindly.
 	Relayed
+	// Configured is direct mode: the partner's endpoint was configured by the
+	// operator (--peer-endpoint), not learned from a handshake server. It is
+	// resolved fresh and dialled straight — deliberately WITHOUT a hole punch,
+	// because there is no server to arrange a simultaneous one and the listening
+	// side would otherwise block waiting for a punch that never comes.
+	//
+	// DNS here is route-finding ONLY. Whatever the name resolves to still has to
+	// prove it holds the pinned key in the QUIC/TLS handshake, so a hijacked
+	// record costs availability, never identity.
+	Configured
 )
 
 func (k Kind) String() string {
-	if k == Relayed {
+	switch k {
+	case Relayed:
 		return "relayed"
+	case Configured:
+		return "configured"
+	default:
+		return "direct"
 	}
-	return "direct"
 }
 
 // Path is one hop to try in the fallback chain. For Direct, Candidates are the
@@ -31,6 +45,36 @@ type Path struct {
 	Desc          string // short label for logs
 	Candidates    []protocol.Candidate
 	RelayEndpoint string
+	// Endpoint is the configured partner address for Configured paths, as the
+	// operator wrote it (host:port, possibly a name). Kept unresolved on purpose:
+	// it is re-resolved at every attempt so a dynamic-DNS record that moved is
+	// picked up on the next reconnect.
+	Endpoint string
+}
+
+// DirectChain is the fallback chain for direct mode (--direct): the configured
+// partner endpoint, then an optional relay. There is no handshake server in this
+// mode, so there are no observed candidates, no server-advertised relay and no
+// cached roster to fall back to — everything here was configured by the operator.
+//
+// endpoint may be empty on the LISTENING side (a buddy that only waits to be
+// dialled); the path is still emitted so the QUIC listener runs, and the empty
+// endpoint is simply never dialled.
+func DirectChain(endpoint, relayEndpoint string) []Path {
+	var chain []Path
+	chain = append(chain, Path{
+		Kind:     Configured,
+		Desc:     "direct (configured endpoint)",
+		Endpoint: endpoint,
+	})
+	if relayEndpoint != "" {
+		chain = append(chain, Path{
+			Kind:          Relayed,
+			Desc:          "configured relay " + relayEndpoint,
+			RelayEndpoint: relayEndpoint,
+		})
+	}
+	return chain
 }
 
 // Chain builds the ordered fallback chain a buddy walks to reach partner. The

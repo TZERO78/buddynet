@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — `--direct`: a tunnel with no handshake server at all
+
+Two buddies can now reach each other from configuration alone. Each side is told
+**where** its buddy is (`--peer-endpoint HOST:PORT`, a dynamic-DNS name is fine)
+and **who** its buddy is (`--peer-key`), and that is the entire setup: no
+matchmaking, no pairing token, no relay ticket, no third party.
+
+`--listen-port PORT` pins the tunnel's UDP socket to a fixed port instead of an
+ephemeral one, so a port forward can be aimed at it. It is what makes a buddy
+dialable, and it is useful in server mode too.
+
+Which side listens is decided locally and identically on both ends: the side that
+can only be dialled listens, the side that can only dial dials, and when both are
+reachable the lower public key listens — the same tie-break server mode already
+used, so the two agree without exchanging anything first.
+
+**Security — what this mode does and does not change.** The pinned key is the
+*entire* authentication here, so the rules around it are fail-closed:
+
+- `--peer-key` is **mandatory**. There is no rendezvous channel to run a SAS
+  over, so an unpinned partner is refused rather than learned.
+- `--direct` **cannot be combined with `--lab`**, which switches partner
+  verification off; nor with `--server`/`--server-key`, `--peers-file`,
+  `--invite`/`--join`, `--code` or `--status`. Each is refused at startup with an
+  actionable message.
+- The configured address is **route-finding only**. It is re-resolved on every
+  attempt, and whatever it resolves to must still prove the pinned key in the TLS
+  handshake — so a hijacked DNS record, a poisoned resolver or a spoofed route
+  costs availability and nothing else. `lab/test-direct.sh` demonstrates this
+  against a live impostor.
+- The virtual IP is **derived** from the pinned key, never configured, so the
+  "identity is address" invariant holds here by construction.
+
+There is deliberately **no DynDNS client and no provider token** in BuddyNet:
+updating the record stays your router's or cron's job.
+
+**The listening side arms every path at once** in this mode instead of walking
+the fallback chain in turn. With a handshake server both buddies start from the
+same roster at the same moment, so a sequential walk stays in step; in direct
+mode they start whenever their processes did, and each attempt takes ~10s — long
+enough for the two to settle permanently out of phase, one listening directly
+exactly while the other is bound to the relay. That was measured, not assumed
+(the relay logged both legs paired while each end had already moved on). Since
+every path arrives on the same UDP socket, the listening side now primes them all
+and listens once. The dialling side and the server-based mode are unchanged.
+
+**Both data planes work with `--direct`.** The default is QUIC; `--wireguard`
+swaps in the kernel WireGuard plane, and then no QUIC is involved at all — the
+partner's identity is proven by the WireGuard handshake against the X25519 key
+derived from its pinned Ed25519 identity, with `wg.ConfirmHandshake` requiring a
+completed handshake before anything counts as connected. This needed real work
+rather than a flag: WireGuard has no "listen" call, so the dialled side is now
+configured as a peer with **no endpoint** and adopts the address the handshake
+arrives from (only the key-holder can complete it, so nothing else can trigger
+that). Covered by `lab/test-wg-direct.sh`, which asserts the no-endpoint path was
+actually the one exercised.
+
+Not supported in this mode: MultiPeer (`--peers-file` — one endpoint and port per
+buddy would be needed). The relay fallback (`--peer-relay`)
+works, but the relay
+must authorize by source network (`--allow-cidr`), since there is no server to
+mint a ticket — and a CIDR list cannot follow a buddy whose address keeps
+changing, which is documented rather than papered over.
+
+New: `lab/test-direct.sh` (offline: the working setup, an impostor refused on the
+pin, and the record moving back), `lab/test-direct-dynv6.sh` (opt-in, against a
+real provider; credentials in the git-ignored `secrets/`), `internal/role/direct.go`
+with unit tests, and CLI tests covering every refusal above.
+
 ### Added — you do not need a rented VPS if one of the two buddies is reachable
 
 `--role=buddy,handshake,relay` has always been accepted, so a pair in which one

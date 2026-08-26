@@ -116,6 +116,10 @@ type cliFlags struct {
 	server            *string
 	serverKey         *string
 	peerKey           *string
+	direct            *bool
+	peerEndpoint      *string
+	peerRelay         *string
+	listenPort        *int
 	knownPeers        *string
 	lab               *bool
 	code              *string
@@ -161,6 +165,10 @@ func registerFlags(fs *flag.FlagSet) *cliFlags {
 		server:            fs.String("server", "", "buddy: handshake server host:port [required]"),
 		serverKey:         fs.String("server-key", "", "buddy: handshake server Ed25519 public key, base64 (pin it) [required]. RELAY: the handshake server whose relay tickets this relay accepts — pass two comma-separated keys during a server key rotation"),
 		peerKey:           fs.String("peer-key", "", "buddy: pin the buddy's Ed25519 public key, base64 (strongest). Must agree with the key stored from a previous pairing: a pin that contradicts it refuses to connect (revoke the old buddy with \"peers remove <key>\", then pair again)"),
+		direct:            fs.Bool("direct", false, "buddy: DIRECT MODE — reach the buddy at a configured address with NO handshake server at all. Requires --peer-key (the pinned key is then the ONLY thing authenticating your buddy) plus --peer-endpoint and/or --listen-port. Mutually exclusive with --server/--server-key, --peers-file, --invite/--join and --lab"),
+		peerEndpoint:      fs.String("peer-endpoint", "", "buddy: direct mode — where your buddy listens, as `HOST:PORT` (a dynamic-DNS name is fine; it is re-resolved on every attempt). DNS is route-finding ONLY: whatever it resolves to still has to prove --peer-key, so a hijacked record costs availability, never identity"),
+		peerRelay:         fs.String("peer-relay", "", "buddy: direct mode — optional relay `HOST:PORT` to fall back to when the direct path fails. There is no handshake server to mint a ticket in this mode, so the relay must accept ticket-free binds (scope it with --allow-cidr)"),
+		listenPort:        fs.Int("listen-port", 0, "buddy: bind the tunnel's UDP socket to this fixed `PORT` instead of an ephemeral one, so a port forward can be aimed at it. Needed to be DIALLED in direct mode. Note this makes the buddy answer on a known port — firewall it; see SECURITY.md"),
 		knownPeers:        fs.String("known-peers", role.DefaultKnownPeersPath(), "buddy: trust-on-first-use store (SSH-style; learns the buddy key on first connect)"),
 		lab:               fs.Bool("lab", false, "buddy: lab/demo mode — disables buddy identity verification (MITM-exposed; never use in production). Requires BUDDYNET_LAB=1."),
 		code:              fs.String("code", "", "buddy: enrollment code for an allowlist handshake server"),
@@ -311,6 +319,8 @@ func main() {
 		reauthInterval: *f.reauthInterval,
 		name:           *f.name, dns: *f.dnsFlag, lazy: *f.lazyFlag, wireguard: *f.wireguard,
 		expose: *f.expose,
+		direct: *f.direct, peerEndpoint: *f.peerEndpoint, peerRelay: *f.peerRelay,
+		listenPort: *f.listenPort,
 	}
 
 	// --status is a one-shot probe that only makes sense for a lone buddy.
@@ -542,6 +552,9 @@ type buddyArgs struct {
 	localListen, forward, vipListen, name, expose                           string
 	lab, status, interactive, ephemeral, dns, lazy, wireguard               bool
 	inviting, sasShow                                                       bool
+	direct                                                                  bool
+	peerEndpoint, peerRelay                                                 string
+	listenPort                                                              int
 	punchDur, idleTimeout, sasTimeout, inviteTimeout, reauthInterval        time.Duration
 }
 
@@ -571,6 +584,8 @@ func (a buddyArgs) config() role.BuddyConfig {
 		ReauthInterval: a.reauthInterval,
 		Name:           a.name, DNS: a.dns, Lazy: a.lazy,
 		WireGuard: a.wireguard, Expose: a.exposeScope(),
+		Direct: a.direct, PeerEndpoint: a.peerEndpoint, PeerRelay: a.peerRelay,
+		ListenPort: a.listenPort,
 	}
 }
 
@@ -578,8 +593,46 @@ func (a buddyArgs) config() role.BuddyConfig {
 // role starts so the error is immediate, whether buddy runs alone or alongside
 // another role.
 func (a buddyArgs) validate() {
-	if a.server == "" || a.serverKey == "" {
-		fmt.Fprintln(os.Stderr, "error: --role=buddy needs --server and --server-key")
+	bad := func(msg string) {
+		fmt.Fprintln(os.Stderr, "error: "+msg)
+		os.Exit(2)
+	}
+	// --listen-port pins ONE udp port for ONE tunnel socket. MultiPeer opens one
+	// socket per buddy, so a single fixed port would have the second tunnel fail
+	// to bind — refuse it rather than let N-1 buddies break at random.
+	if a.listenPort != 0 {
+		if a.listenPort < 1 || a.listenPort > 65535 {
+			bad(fmt.Sprintf("--listen-port %d is not a valid udp port (1-65535)", a.listenPort))
+		}
+		if a.peersFile != "" {
+			bad("--listen-port cannot be combined with --peers-file: MultiPeer opens one socket per buddy, and they cannot share a single fixed port")
+		}
+	}
+	// Direct mode replaces the handshake server, and with it every mode that
+	// needs a rendezvous. Each rejection below is fail-closed on purpose: in this
+	// mode the pinned key is the whole of the authentication, so anything that
+	// weakens or bypasses pinning has no safe interpretation here.
+	if a.direct {
+		switch {
+		case a.peerKey == "":
+			bad("--direct requires --peer-key: with no handshake server there is no rendezvous channel to run a SAS over, so the pinned key is the ONLY thing authenticating your buddy")
+		case a.peerEndpoint == "" && a.listenPort == 0:
+			bad("--direct needs either --peer-endpoint (to dial your buddy) or --listen-port (to be dialled by them); with neither there is no way for the two to meet")
+		case a.server != "" || a.serverKey != "":
+			bad("--direct and --server/--server-key are mutually exclusive: direct mode contacts no handshake server at all. Drop --server to go direct, or drop --direct to use the server")
+		case a.peersFile != "":
+			bad("--direct does not support --peers-file (MultiPeer): each buddy would need its own endpoint and port. Use the handshake-server mode for more than one buddy")
+		case a.token != "":
+			bad("--direct does not use --invite/--join: those tokens are redeemed at a handshake server. Exchange public keys directly instead (buddynet identity) and pin with --peer-key")
+		case a.code != "":
+			bad("--direct does not use --code: enrollment codes are presented to a handshake server")
+		case a.lab:
+			bad("--direct cannot be combined with --lab: --lab turns off partner verification, and in direct mode the pinned key is the only authentication there is")
+		case a.status:
+			bad("--status probes a handshake server for your buddy's registration; direct mode has no server to ask")
+		}
+	} else if a.server == "" || a.serverKey == "" {
+		fmt.Fprintln(os.Stderr, "error: --role=buddy needs --server and --server-key (or --direct for a setup with no server at all)")
 		os.Exit(2)
 	}
 	// --lab turns off ALL buddy verification (no pin, no SAS) — a full MITM

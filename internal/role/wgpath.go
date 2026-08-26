@@ -168,6 +168,37 @@ func applyScope(ifName string, scope nft.Scope) (func(), error) {
 // relay forwards the encrypted WG packets to the partner's leg, exactly as it does
 // QUIC — it is never a WG peer and holds no key). conn keeps the NAT mapping the
 // bind/punch opened, so the socket handoff to kernel WG reuses it.
+// armWGPaths is the WireGuard twin of listenAllPaths: the listening side of
+// DIRECT MODE, which has no endpoint to aim at and nothing to synchronise it
+// with the other end.
+//
+// WireGuard makes this easier than QUIC does. A peer configured WITHOUT an
+// endpoint cannot initiate, but it answers any handshake that proves the pinned
+// key and adopts the source address it came from (roaming) — so one interface
+// covers the direct path and the relay path at once. All this has to do is bind
+// the relay legs so the relay will forward for us, and hand back which path is
+// the headline one for logging.
+//
+// It deliberately does NOT return an endpoint: doing so would pin the peer to
+// one path and give up exactly the property being used here.
+func armWGPaths(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration, cred *relayCred) (relay.Path, error) {
+	var armed int
+	var lastErr error
+	for _, p := range chain {
+		if _, err := primeOne(conn, myID, p, session, punchDur, cred); err != nil {
+			log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, err.Error())
+			lastErr = err
+			continue
+		}
+		armed++
+		log.Printf("CONNECT: action=path-armed path=%q role=server detail=%q", p.Desc, "WireGuard peer has no endpoint; it adopts whichever path the partner uses")
+	}
+	if armed == 0 && lastErr != nil {
+		return relay.Path{}, lastErr
+	}
+	return chain[0], nil
+}
+
 func primeWGPath(conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration, cred *relayCred) (*net.UDPAddr, relay.Path, error) {
 	var lastErr error
 	for _, p := range chain {
@@ -197,7 +228,16 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 	if !wg.Available() {
 		return errors.New("--wireguard set but kernel WireGuard is unavailable here (need Linux + NET_ADMIN + the wireguard module)")
 	}
-	remote, used, err := primeWGPath(conn, nd.id, chain, session, cfg.PunchDur, cred)
+	// Direct mode, listening side: no endpoint to aim at. Arm every path and let
+	// the WireGuard peer adopt whichever one the partner actually uses.
+	var remote *net.UDPAddr
+	var used relay.Path
+	var err error
+	if cfg.Direct && directListening(cfg, nd.pub, partner.PubKey) {
+		used, err = armWGPaths(conn, nd.id, chain, session, cfg.PunchDur, cred)
+	} else {
+		remote, used, err = primeWGPath(conn, nd.id, chain, session, cfg.PunchDur, cred)
+	}
 	if err != nil {
 		return fmt.Errorf("--wireguard: %w", err)
 	}
@@ -212,6 +252,13 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 	if needSAS || showOnly {
 		if needSAS && !cfg.Interactive {
 			return fmt.Errorf("first contact with an unknown buddy key (%s) but running non-interactively — pin it with --peer-key", partner.PubKey)
+		}
+		// Unreachable in direct mode (the key is always pinned there, so needSAS
+		// is false and there is no invite to display for), but the binding
+		// exchange needs somewhere to send to — say so rather than dereference a
+		// nil address if a future change ever routes here.
+		if remote == nil {
+			return errors.New("--wireguard: cannot run a first-contact binding exchange without a partner endpoint; pin the buddy with --peer-key")
 		}
 		committer := nd.pub < partner.PubKey // deterministic, opposite on the two ends
 		sid, berr := runBindingOverConn(conn, remote, committer, 15*time.Second)
@@ -243,9 +290,14 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 		secret = base64.RawURLEncoding.EncodeToString(s)
 	}
 
-	remoteAP := remote.AddrPort()
-	if remoteAP.Addr().Is4In6() {
-		remoteAP = netip.AddrPortFrom(remoteAP.Addr().Unmap(), remoteAP.Port())
+	// A zero AddrPort means "no endpoint": wg.Up then omits the attribute
+	// entirely and the peer waits to be reached (direct mode, listening side).
+	var remoteAP netip.AddrPort
+	if remote != nil {
+		remoteAP = remote.AddrPort()
+		if remoteAP.Addr().Is4In6() {
+			remoteAP = netip.AddrPortFrom(remoteAP.Addr().Unmap(), remoteAP.Port())
+		}
 	}
 	// Scoped exposure: enforce what this buddy may reach on our host BEFORE the
 	// interface exists, so there is never a window of whole-host access.
@@ -274,8 +326,15 @@ func runWG(ctx context.Context, cfg BuddyConfig, nd *node, conn *net.UDPConn, at
 		return fmt.Errorf("--wireguard: %w", err)
 	}
 
+	// With no configured endpoint the address is whatever the completed handshake
+	// came from, which the kernel now holds — say that rather than print an
+	// invalid AddrPort.
+	remoteDesc := "adopted-from-handshake"
+	if remoteAP.IsValid() {
+		remoteDesc = remoteAP.String()
+	}
 	log.Printf("CONNECTED: role=buddy partner=%s key=%s vip=%s via=%q remote=%s handshake=%s",
-		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, used.Desc+" (WireGuard)", remoteAP, hsAt.UTC().Format(time.RFC3339))
+		partner.ID, keyTag(partner.PubKey), partner.VirtualIP, used.Desc+" (WireGuard)", remoteDesc, hsAt.UTC().Format(time.RFC3339))
 
 	// Identity confirmed (the partner completed a WireGuard handshake with the
 	// pinned key as the interface's sole peer, and on first contact the SAS was

@@ -38,9 +38,20 @@ Two ports do all the work:
 
 ## 0. Do you need a VPS at all?
 
-Not if **one** of your two machines is reachable from the internet. That machine
-then runs all three roles in a single process — coordinator *and* buddy at the
-same time — and nobody rents anything:
+Only if **neither** of you is reachable from the internet. There are three
+topologies, and the rented server is the last of them:
+
+| Your situation | What to run | Where |
+|---|---|---|
+| One of you has an always-on box behind a router you control | that machine runs `--role=buddy,handshake,relay` — coordinator *and* buddy in one process | below |
+| Same, and you want no server role at all | `--direct` — the two buddies talk to each other and nothing else | [Direct mode](#direct-mode-no-server-at-all) |
+| Neither of you is reachable (real CGNAT both ends) | a rented VPS | steps 1–8 |
+
+The rest of this section covers the first row; the other two are linked.
+
+If one of your two machines is reachable from the internet, it can run all three
+roles in a single process — coordinator *and* buddy at the same time — and nobody
+rents anything:
 
 ```
 --role=buddy,handshake,relay
@@ -142,6 +153,148 @@ reachable — the rented VPS this guide is otherwise about.
 All four cases above (working setup, no hairpin, `127.0.0.1` as a workaround, and
 the relay role left out) are covered by our own lab, `lab/test-coordinator.sh`,
 which brings the whole thing up behind two simulated NAT routers.
+
+---
+
+## Direct mode (no server at all)
+
+With `--direct` the two buddies talk to each other and to nothing else. There is
+no handshake server, no matchmaking, no relay ticket and no pairing token — each
+side is told **where** its buddy is and **who** its buddy is, and that is the
+whole configuration.
+
+Use it when one of you has a reachable address and you would rather not run a
+server role at all. It is the smallest possible BuddyNet.
+
+### What each side needs
+
+| | Flag | Meaning |
+|---|---|---|
+| Who your buddy is | `--peer-key` | **mandatory.** The pinned Ed25519 key |
+| Where your buddy is | `--peer-endpoint HOST:PORT` | needed on the side that dials |
+| Where you listen | `--listen-port PORT` | needed on the side that is dialled |
+
+At least one of the two address flags must be set. If only one side is reachable,
+that side sets `--listen-port` and the other sets `--peer-endpoint`; if both are
+reachable you can set both on both, and the roles are then settled by comparing
+the two keys, so the ends always agree without talking first.
+
+### Exchange keys first, out of band
+
+There is no server to introduce you, so you introduce yourselves. Each side runs:
+
+```bash
+buddynet --key /var/lib/buddynet/id.key identity
+```
+
+and sends the printed public key to the other over a channel you already trust —
+the same phone call or messenger you would use for a SAS. **Everything rests on
+these keys being right.** Compare them character by character; that is the one
+manual step direct mode has, and it replaces the SAS entirely.
+
+### Starting it
+
+The side that is reachable (say, a NAS at `nas.example.org`):
+
+```bash
+buddynet --role=buddy --direct \
+  --key /var/lib/buddynet/id.key \
+  --peer-key "$BUDDY_PUBLIC_KEY" \
+  --listen-port 51820 \
+  --forward 127.0.0.1:445
+```
+
+The side that dials it:
+
+```bash
+buddynet --role=buddy --direct \
+  --key /var/lib/buddynet/id.key \
+  --peer-key "$NAS_PUBLIC_KEY" \
+  --peer-endpoint nas.example.org:51820 \
+  -L 0.0.0.0:9000
+```
+
+The reachable side needs UDP `51820` open to it — a port forward behind IPv4 NAT,
+or a firewall rule with IPv6, where there is no NAT to forward through.
+
+### A dynamic address is fine — and BuddyNet stays out of it
+
+`--peer-endpoint` takes a name, and that name is **re-resolved on every
+connection attempt**. So a dynamic-DNS record is enough: when your address
+changes, the next reconnect follows it. Nothing needs restarting or editing.
+
+BuddyNet deliberately contains **no DynDNS client and no provider tokens**.
+Updating the record is your router's job, or a cron job, or your NAS's built-in
+updater — for example [DuckDNS](https://www.duckdns.org/install.jsp) or dynv6,
+both of which are a single HTTP request. Keeping that credential out of BuddyNet
+is the point: a tunnel does not need the ability to repoint your DNS.
+
+### Which data plane carries it
+
+Two things are easy to conflate, so to be explicit: the **control plane** (the
+matchmaking with a handshake server) is always QUIC/TLS — and in direct mode it
+does not exist at all, because your configuration replaces it. The **data plane**
+— the tunnel itself — is separately either of:
+
+| | Flag | What the tunnel is |
+|---|---|---|
+| default | *(none)* | QUIC streams; reach the partner through `-L` / `--forward` |
+| opt-in | `--wireguard` | a kernel WireGuard interface; the partner is reachable natively at its VIP `10.66.X.Y` |
+
+Both work with `--direct`. On the WireGuard plane there is no QUIC anywhere in
+the picture, and the partner's identity is proven by the WireGuard handshake
+against the X25519 key derived from its pinned Ed25519 identity — the same
+guarantee by a different mechanism. Set `--wireguard` on **both** sides; see
+[WIREGUARD.md](WIREGUARD.md).
+
+One detail worth knowing: on the WireGuard plane the side that is dialled runs
+with no configured endpoint and adopts the address the handshake came from. Only
+the holder of the pinned key can complete that handshake, so nothing else can
+cause the adoption.
+
+### What the name can and cannot do
+
+**DNS is route-finding only.** The address a name resolves to still has to prove
+it holds `--peer-key` in the TLS handshake, so a hijacked record, a poisoned
+resolver or a spoofed route reaches something that cannot answer, and the
+connection fails. It costs you availability, never identity, and never secrecy.
+
+That property is not an argument on this page — `lab/test-direct.sh` points the
+name at a fully working impostor and shows the handshake being refused.
+
+### What you give up
+
+- **No SAS, no trust-on-first-use.** With no rendezvous channel there is nothing
+  to run a first-contact confirmation over, so an unpinned buddy is refused
+  outright. `--direct` without `--peer-key` will not start.
+- **One buddy.** `--peers-file` (MultiPeer) is not supported here: each buddy
+  would need its own endpoint and its own port.
+- **The relay fallback is limited.** `--peer-relay` works — both ends arrive at
+  the relay on their own and the tunnel comes up over it — but with no handshake
+  server there is no ticket to present, so the relay must authorize by source
+  network (`--allow-cidr`) instead. Note the tension the relay itself warns
+  about: a CIDR list cannot follow a buddy whose address keeps changing, and that
+  is exactly the buddy most likely to need a relay. If you need a dependable
+  relay for a moving address, that is the point at which a coordinator with
+  tickets ([step 0](#0-do-you-need-a-vps-at-all)) earns its keep.
+- **Both behind CGNAT does not work.** Somebody has to be reachable. That is the
+  case the [rented VPS](#1-prepare-the-vps) is for.
+
+### Security notes
+
+`--listen-port` makes this machine answer on a **known, fixed UDP port**, so it
+will be scanned like any server. Two things follow, and neither is optional:
+
+1. Firewall it (see [step 3](#3-firewall)) so only that port is exposed.
+2. Understand that the pinned key is now the *entire* authentication. `--direct`
+   therefore refuses to run together with `--lab`, which switches partner
+   verification off — in server mode that is merely reckless, here it would leave
+   nothing at all.
+
+An unvalidated source cannot get far: since v5.3.3 the data plane answers a new
+source with a QUIC Retry before building any state, so a spoofed address cannot
+make this buddy do work on its behalf. Details in
+[SECURITY.md](../SECURITY.md).
 
 ---
 

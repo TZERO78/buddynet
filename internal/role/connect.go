@@ -37,8 +37,16 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 
 	// One dual-stack UDP socket does everything (register, punch, relay-bind,
 	// QUIC); reusing it preserves the NAT mapping the server observed.
-	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: 0})
+	//
+	// Port 0 (the default) takes an ephemeral port, which is what a buddy behind
+	// NAT wants. --listen-port pins it instead, so a port forward can be aimed at
+	// this socket and the buddy becomes dialable at a stable address — the
+	// prerequisite for direct mode's listening side.
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{Port: cfg.ListenPort})
 	if err != nil {
+		if cfg.ListenPort != 0 {
+			return fmt.Errorf("open udp socket on --listen-port %d: %w", cfg.ListenPort, err)
+		}
 		return fmt.Errorf("open udp socket: %w", err)
 	}
 	defer conn.Close()
@@ -55,83 +63,104 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		return err
 	}
 
-	serverAddrs, serr := resolveAll(cfg.Server)
+	// Where does the partner come from? Direct mode configures it locally;
+	// otherwise the handshake server introduces it. Everything below this point
+	// — pinning, QUIC, forwarding — is identical for both.
 	var partner protocol.Peer
-	if serr == nil {
-		var rt *protocol.RelayTicket
-		partner, rt, err = buddyRegister(conn, serverAddrs, cfg, nd, att.rendezvous, 30*time.Second, cred)
-		if err != nil {
-			return err
-		}
-		// A missing or unusable ticket costs the relay fallback, never the pairing:
-		// the server may simply have no relay configured, which is a supported and
-		// fully functional deployment.
-		if aerr := cred.adopt(rt); aerr != nil && rt != nil {
-			log.Printf("NOTE: the server issued a relay ticket this buddy cannot use (%v) — the relay fallback is unavailable for this attempt", aerr)
-		}
-	} else {
-		log.Printf("CONNECT: action=server-unreachable server=%q detail=%q", cfg.Server, serr.Error())
-	}
-
-	// Identity checks on the partner the server vouched for.
-	if partner.PubKey != "" {
-		partnerPub, derr := bcrypto.DecodePubKey(partner.PubKey)
-		if derr != nil {
-			return fmt.Errorf("partner key: %w", derr)
-		}
-		if partner.PubKey == myPub {
-			return errors.New("partner has the SAME identity as us — both peers use the same --key; give each its own identity")
-		}
-		if att.pin != nil {
-			if perr := enforcePins(att, partnerPub, "partner key"); perr != nil {
-				return perr
-			}
-		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
-			return err
-		}
-		if err := checkPartnerVIP(partner, partnerPub); err != nil {
-			return err
-		}
-		// NOTE: deliberately NOT persisted here. The roster has been checked for
-		// consistency, but nothing has yet PROVEN that the key on it belongs to the
-		// buddy we mean — that happens when the tunnel comes up (the partner has to
-		// hold the private key to complete the QUIC/WG handshake) and, on first
-		// contact, when the human confirms the SAS. Writing peers.json here would
-		// cache an unverified key and TOFU-pin an unverified .buddy name, both
-		// straight from a server-supplied roster. See rememberPeer below.
-		// Partner found and identity-verified — NOT "online" yet (the tunnel is not
-		// up until dialChain succeeds below; that emits CONNECTED).
-		log.Printf("CONNECT: action=partner-verified id=%s key=%s vip=%s cands=%d", partner.ID, keyTag(partner.PubKey), partner.VirtualIP, len(partner.Candidates))
-	}
-
-	// Assemble the fallback chain. A cached entry is only used when the server
-	// gave us nothing live (it was unreachable).
 	var cached *protocol.Peer
-	if partner.PubKey == "" {
-		// Server down: try every fresh-enough cached peer in turn.
-		for _, c := range reg.List() {
-			if peer.Fresh(c, 24*time.Hour) {
-				cp := c
-				cached = &cp
-				partner = c // adopt identity/vip from cache for the QUIC pin
-				break
-			}
-		}
-		if cached == nil {
-			return errors.New("handshake server unreachable and no fresh cached peer to try")
-		}
-		partnerPub, derr := bcrypto.DecodePubKey(partner.PubKey)
-		if derr != nil {
+	if cfg.Direct {
+		// No REGISTER, no roster, no ticket: the partner is exactly what the
+		// operator pinned, and its virtual IP is derived from that key rather
+		// than claimed by anyone. See internal/role/direct.go.
+		var derr error
+		if partner, derr = directPartner(cfg); derr != nil {
 			return derr
 		}
-		if att.pin != nil {
-			if perr := enforcePins(att, partnerPub, "cached partner key"); perr != nil {
-				return perr
-			}
-		} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
-			return err
+		// Same guard the server path applies to a roster entry: pinning our own
+		// key would otherwise have this node dial itself and fail obscurely.
+		if partner.PubKey == myPub {
+			return errors.New("--peer-key is this node's OWN identity — pass your BUDDY's public key (see: buddynet identity)")
 		}
-		log.Printf("CONNECT: action=cached id=%s vip=%s detail=\"server offline\"", partner.ID, partner.VirtualIP)
+		log.Printf("CONNECT: action=direct key=%s vip=%s endpoint=%q detail=%q",
+			keyTag(partner.PubKey), partner.VirtualIP, cfg.PeerEndpoint,
+			"direct mode: no handshake server; partner pinned by key")
+	} else {
+		serverAddrs, serr := resolveAll(cfg.Server)
+		if serr == nil {
+			var rt *protocol.RelayTicket
+			partner, rt, err = buddyRegister(conn, serverAddrs, cfg, nd, att.rendezvous, 30*time.Second, cred)
+			if err != nil {
+				return err
+			}
+			// A missing or unusable ticket costs the relay fallback, never the pairing:
+			// the server may simply have no relay configured, which is a supported and
+			// fully functional deployment.
+			if aerr := cred.adopt(rt); aerr != nil && rt != nil {
+				log.Printf("NOTE: the server issued a relay ticket this buddy cannot use (%v) — the relay fallback is unavailable for this attempt", aerr)
+			}
+		} else {
+			log.Printf("CONNECT: action=server-unreachable server=%q detail=%q", cfg.Server, serr.Error())
+		}
+
+		// Identity checks on the partner the server vouched for.
+		if partner.PubKey != "" {
+			partnerPub, derr := bcrypto.DecodePubKey(partner.PubKey)
+			if derr != nil {
+				return fmt.Errorf("partner key: %w", derr)
+			}
+			if partner.PubKey == myPub {
+				return errors.New("partner has the SAME identity as us — both peers use the same --key; give each its own identity")
+			}
+			if att.pin != nil {
+				if perr := enforcePins(att, partnerPub, "partner key"); perr != nil {
+					return perr
+				}
+			} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
+				return err
+			}
+			if err := checkPartnerVIP(partner, partnerPub); err != nil {
+				return err
+			}
+			// NOTE: deliberately NOT persisted here. The roster has been checked for
+			// consistency, but nothing has yet PROVEN that the key on it belongs to the
+			// buddy we mean — that happens when the tunnel comes up (the partner has to
+			// hold the private key to complete the QUIC/WG handshake) and, on first
+			// contact, when the human confirms the SAS. Writing peers.json here would
+			// cache an unverified key and TOFU-pin an unverified .buddy name, both
+			// straight from a server-supplied roster. See rememberPeer below.
+			// Partner found and identity-verified — NOT "online" yet (the tunnel is not
+			// up until dialChain succeeds below; that emits CONNECTED).
+			log.Printf("CONNECT: action=partner-verified id=%s key=%s vip=%s cands=%d", partner.ID, keyTag(partner.PubKey), partner.VirtualIP, len(partner.Candidates))
+		}
+
+		// Assemble the fallback chain. A cached entry is only used when the server
+		// gave us nothing live (it was unreachable).
+		if partner.PubKey == "" {
+			// Server down: try every fresh-enough cached peer in turn.
+			for _, c := range reg.List() {
+				if peer.Fresh(c, 24*time.Hour) {
+					cp := c
+					cached = &cp
+					partner = c // adopt identity/vip from cache for the QUIC pin
+					break
+				}
+			}
+			if cached == nil {
+				return errors.New("handshake server unreachable and no fresh cached peer to try")
+			}
+			partnerPub, derr := bcrypto.DecodePubKey(partner.PubKey)
+			if derr != nil {
+				return derr
+			}
+			if att.pin != nil {
+				if perr := enforcePins(att, partnerPub, "cached partner key"); perr != nil {
+					return perr
+				}
+			} else if needSAS, err = trust.decide(att.inviteToken, partnerPub); err != nil {
+				return err
+			}
+			log.Printf("CONNECT: action=cached id=%s vip=%s detail=\"server offline\"", partner.ID, partner.VirtualIP)
+		}
 	}
 
 	partnerPub, err := bcrypto.DecodePubKey(partner.PubKey)
@@ -139,6 +168,9 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		return err
 	}
 	chain := relay.Chain(partner, nil, partner.Relay, cached)
+	if cfg.Direct {
+		chain = relay.DirectChain(cfg.PeerEndpoint, cfg.PeerRelay)
+	}
 	if len(chain) == 0 {
 		return errors.New("no path to the partner (no candidates, no relay)")
 	}
@@ -159,8 +191,22 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 	tr := tunnel.NewQUIC(conn, priv, partnerPub, cfg.IdleTimeout)
 	defer tr.Close()
 	listening := myPub < partner.PubKey
+	if cfg.Direct {
+		// In direct mode reachability is not symmetric — one side may only be
+		// able to dial — so the role follows the configuration first and falls
+		// back to the same key comparison when both ends could do either.
+		listening = directListening(cfg, myPub, partner.PubKey)
+	}
 
-	sess, used, err := dialChain(ctx, tr, conn, myID, chain, listening, session, cfg.PunchDur, cred)
+	var sess tunnel.Session
+	var used relay.Path
+	if cfg.Direct && listening {
+		// No server means no shared starting gun, so the listening side arms every
+		// path at once instead of walking them in turn. See listenAllPaths.
+		sess, used, err = listenAllPaths(ctx, tr, conn, myID, chain, session, cfg.PunchDur, cred)
+	} else {
+		sess, used, err = dialChain(ctx, tr, conn, myID, chain, listening, session, cfg.PunchDur, cred)
+	}
 	if err != nil {
 		return err
 	}
@@ -318,6 +364,57 @@ func checkPartnerVIP(partner protocol.Peer, partnerPub ed25519.PublicKey) error 
 // establish, plus which path worked. For each path it primes the path on the
 // socket (punch for Direct, relay-bind for Relayed), then takes its
 // deterministic QUIC role (listen or dial).
+// listenAllPaths is the listening side of DIRECT MODE, where nothing
+// synchronises the two ends.
+//
+// Walking the chain in step is fine when a handshake server introduced the pair:
+// both sides start from the same PEER_LIST at the same moment. In direct mode
+// they start whenever their processes happened to start, and each path attempt
+// takes ~10s — so the two can settle permanently out of phase, one listening on
+// the direct path exactly while the other is bound to the relay, and back again.
+// Measured, not theorised: the relay logged `session-paired` for both legs while
+// each end was already off trying the other path.
+//
+// The fix uses a property the sequential walk throws away: every path arrives on
+// the SAME UDP socket. So prime them all — punch, bind the relay legs — and then
+// listen ONCE. Whoever dials gets through, on whichever path they picked, and the
+// phase problem cannot exist. The path is reported afterwards from the address
+// the session actually came in on.
+func listenAllPaths(ctx context.Context, tr *tunnel.QUICTransport, conn *net.UDPConn, myID string, chain []relay.Path, session string, punchDur time.Duration, cred *relayCred) (tunnel.Session, relay.Path, error) {
+	primed := make(map[string]relay.Path, len(chain))
+	var lastErr error
+	for _, p := range chain {
+		endpoint, err := primeOne(conn, myID, p, session, punchDur, cred)
+		if err != nil {
+			log.Printf("CONNECT: action=path-failed path=%q detail=%q", p.Desc, err.Error())
+			lastErr = err
+			continue
+		}
+		if endpoint != nil {
+			primed[endpoint.String()] = p
+		}
+		log.Printf("CONNECT: action=path-armed path=%q role=server", p.Desc)
+	}
+	// The direct path has no endpoint to prime on this side (nothing to punch
+	// towards), so an empty primed map is normal and still worth listening on.
+	if len(primed) == 0 && lastErr != nil && len(chain) > 1 {
+		return nil, relay.Path{}, lastErr
+	}
+	attemptCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	sess, err := tr.Listen(attemptCtx)
+	if err != nil {
+		return nil, relay.Path{}, fmt.Errorf("%s: %w", noPathAdvice(chain), err)
+	}
+	// Attribute the session to the path it arrived on: a relayed session comes
+	// from the relay's address, anything else came in directly.
+	used := chain[0]
+	if p, ok := primed[sess.RemoteAddr().String()]; ok {
+		used = p
+	}
+	return sess, used, nil
+}
+
 func dialChain(ctx context.Context, tr *tunnel.QUICTransport, conn *net.UDPConn, myID string, chain []relay.Path, listening bool, session string, punchDur time.Duration, cred *relayCred) (tunnel.Session, relay.Path, error) {
 	var lastErr error
 	for _, p := range chain {
@@ -382,6 +479,21 @@ func primeOne(conn *net.UDPConn, myID string, p relay.Path, session string, punc
 			return nil, fmt.Errorf("direct punch: %w", err)
 		}
 		return remote, nil
+	case relay.Configured:
+		// Direct mode. The listening side has no endpoint to prepare — it just
+		// waits — so an empty endpoint is a valid no-op, not a failure.
+		if p.Endpoint == "" {
+			return nil, nil
+		}
+		// Resolved fresh on EVERY attempt: this is how a dynamic-DNS record that
+		// moved gets picked up, and it is the only thing DNS does here. The name
+		// carries no authority — the endpoint it yields still has to prove the
+		// pinned key in the TLS handshake.
+		addr, err := net.ResolveUDPAddr("udp", p.Endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("resolve peer endpoint %q: %w", p.Endpoint, err)
+		}
+		return addr, nil
 	case relay.Relayed:
 		relayAddr, err := net.ResolveUDPAddr("udp", p.RelayEndpoint)
 		if err != nil {
@@ -402,6 +514,9 @@ func primePath(conn *net.UDPConn, myID string, p relay.Path, session string, pun
 	addr, err := primeOne(conn, myID, p, session, punchDur, cred)
 	if err != nil {
 		return "", err
+	}
+	if addr == nil {
+		return "", nil // nothing to dial (direct mode, listening side)
 	}
 	return addr.String(), nil
 }

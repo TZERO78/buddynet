@@ -212,6 +212,56 @@ to another plane.
 **4. `--lab` — no verification at all.** Must be set explicitly, is logged
 loudly, **testing only.** Never use it on a daemon or a server-side host.
 
+#### Direct mode (`--direct`): level 2 only, and mandatory
+
+With `--direct` there is no handshake server, and therefore no rendezvous channel
+at all. Levels 1 and 3 above both need one — an invite is *redeemed* at a server,
+and the SAS is confirmed *over a session a server introduced*. Neither exists
+here, so direct mode collapses the hierarchy to a single rung:
+
+- **`--peer-key` is mandatory.** `--direct` without it does not start. An
+  unpinned partner is not a weaker mode here, it is no authentication at all.
+- **`--lab` is refused outright** in combination with `--direct`. Elsewhere it is
+  reckless; here it would remove the only check there is, so the two flags cannot
+  be combined at all.
+- **There is no first-contact step**, because there is nothing to confirm: the
+  key was fixed before the process started. The out-of-band channel that carries
+  a SAS elsewhere carries the *key itself* here (`buddynet identity`), which is
+  the same trust anchor moved one step earlier.
+
+The address a buddy is configured with (`--peer-endpoint`, commonly a dynamic-DNS
+name) is **route-finding only and carries no authority**. It is re-resolved on
+every attempt, and whatever it resolves to must still prove the pinned key before
+anything counts as connected. Which mechanism does that proving depends on the
+data plane, and both are equally binding:
+
+- **QUIC (default):** the TLS handshake, checked by
+  [`tunnel.pinnedPeerVerify`](internal/tunnel/quic.go).
+- **WireGuard (`--wireguard`):** the WireGuard handshake itself, against the
+  X25519 key derived from the pinned Ed25519 identity. `wg.ConfirmHandshake`
+  requires a *completed* handshake before the peer is treated as connected —
+  netlink configuration alone succeeds against a partner that does not exist, so
+  it is deliberately not taken as evidence.
+
+So an attacker who controls the record, the resolver or the route can stop the
+tunnel forming — a denial of service — but cannot become the peer, and cannot
+read anything: he holds no private key and the session is end-to-end between the
+two pinned identities. `lab/test-direct.sh` demonstrates exactly this by pointing
+the name at a working impostor.
+
+On the WireGuard plane the listening side is configured with **no endpoint at
+all** and adopts the address the completed handshake arrived from. That is not a
+weakening: an unauthenticated packet cannot cause the adoption, because only the
+holder of the pinned key can complete the handshake in the first place.
+`lab/test-wg-direct.sh` covers this path.
+
+What direct mode *removes* on the exposure side is real and stated in §5.5: to be
+dialled, a buddy binds a **known, fixed UDP port** (`--listen-port`) instead of an
+ephemeral one, so it is scanned like any internet-facing service. QUIC Retry
+(§5.5) still validates the source before any per-connection state is built, and
+the pinned key still refuses every stranger — but the port is visible, and it
+should be firewalled to that one port.
+
 For daemons/Unraid there is no human to compare a SAS: run with `--no-interactive`
 and **pin with `--peer-key`**. An unknown key is then refused rather than learned
 blind.
