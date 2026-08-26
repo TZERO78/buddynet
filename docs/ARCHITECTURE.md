@@ -56,6 +56,26 @@ relay defaults to `:51821`, or set `--relay-listen`). This is the usual VPS
 setup — one box, bootstrap + relay. Roles are still always explicit; combining
 them is opt-in, never auto-detected.
 
+Nothing restricts that to server roles: `--role=buddy,handshake,relay` makes one
+of the two **buddies** the coordinator, so a pair needs no third machine. What
+that costs is covered in [Setup, step 0](SETUP.md#0-do-you-need-a-vps-at-all) —
+notably that a direct P2P tunnel is then impossible by construction, because a
+buddy's candidates are the addresses its handshake server observed, and a server
+running on the buddy itself never observes anything but a private address.
+
+### No server at all: direct mode
+
+`--direct` removes the control plane entirely. There is no `REGISTER`, no
+`PEER_LIST`, no token and no ticket — each side is configured with **where** its
+buddy is (`--peer-endpoint`, re-resolved every attempt) and **who** it is
+(`--peer-key`, mandatory). See [`internal/role/direct.go`](../internal/role/direct.go).
+
+The security consequence is worth stating plainly: with no rendezvous channel
+there is no SAS and no trust-on-first-use, so the pinned key is the *entire*
+authentication, and everything that could weaken it is refused rather than
+interpreted. The configured address carries no authority — whatever it resolves
+to must still prove that key before anything counts as connected.
+
 ## Identity & the virtual IP
 
 Each node holds one long-term **Ed25519** key. That single key is:
@@ -93,7 +113,25 @@ A buddy tries paths in order, cheapest and most private first
    tried when the handshake server was unreachable, so a pair that has met
    before can reconnect with **no server in the loop**.
 
+In **direct mode** the chain is shorter and entirely operator-configured, because
+nothing was ever learned from a server: the configured endpoint, then an optional
+`--peer-relay`. The configured path is deliberately dialled *without* a hole
+punch — there is no server to arrange a simultaneous one, and the listening side
+would otherwise block waiting for a punch that never comes.
+
+That mode also changes who walks the chain. With a server both buddies start from
+the same roster at the same instant, so walking it in step works. Without one they
+start whenever their processes did, and each attempt takes ~10s — long enough to
+settle *permanently* out of phase, one listening directly exactly while the other
+is bound to the relay. Since every path arrives on the **same UDP socket**, the
+listening side therefore primes them all and listens once (`listenAllPaths`, and
+`armWGPaths` for the WireGuard plane) rather than trying them in turn.
+
 ## Many buddies at once (MultiPeer)
+
+> Not available in direct mode: each buddy would need its own endpoint and its
+> own listening port, and `--listen-port` pins exactly one. `--direct` and
+> `--peers-file` are refused together rather than half-working.
 
 The fallback chain above brings up **one** tunnel to **one** partner. A buddy can
 hold **many at the same time**: list each buddy's pinned key in a manifest
@@ -133,6 +171,16 @@ type Transport interface {
   it forwards QUIC). Built over raw netlink in [`internal/wg`](../internal/wg) +
   [`internal/role/wgpath.go`](../internal/role/wgpath.go). See
   **[WIREGUARD.md](WIREGUARD.md)**.
+
+Both planes work with `--direct`. Note what that means on the WireGuard side:
+WireGuard has no `Listen()` — a peer either has an endpoint and initiates, or has
+none and can only answer. Direct mode's dialled side has none (nothing ever
+observed an address for it), so it is configured as an **endpoint-less peer** and
+adopts the address of whatever handshake completes. Only the holder of the pinned
+key can complete one, so nothing else can cause that adoption, and
+`wg.ConfirmHandshake` requires a *completed* handshake before the peer counts as
+connected — netlink configuration alone succeeds against a partner that does not
+exist, and is deliberately not treated as evidence.
 
 ## Why a relay is authorized but still blind
 

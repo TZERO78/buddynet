@@ -389,6 +389,33 @@ successful run ends with the path that won. **If the chain only ever contained
 `direct P2P`, there was no relay to fall back to** — that is the message above,
 not a mystery failure.
 
+### In direct mode (`--direct`)
+
+The chain is different, because nothing was learned from a server — everything in
+it was configured by you:
+
+| # | Path | Log label | When it exists |
+|---|------|-----------|----------------|
+| 1 | Configured endpoint | `direct (configured endpoint)` | always (it is the mode) |
+| 2 | Configured relay | `configured relay <host:port>` | you set `--peer-relay` |
+
+Two symptoms are worth knowing by name:
+
+- **`QUIC control dial failed`** — you are *not* in direct mode. That message
+  comes from trying to reach a handshake server, so `--direct` is not set and the
+  buddy is looking for a server it cannot reach. (It is also what a coordinator
+  running on a buddy logs when its own router cannot hairpin; see
+  [Setup, step 0](SETUP.md#0-do-you-need-a-vps-at-all).)
+- **`path-armed`** instead of `path-try` — normal on the side that is *dialled*.
+  With no server to arrange a simultaneous connect, that side arms every path at
+  once and waits, rather than trying them in turn.
+
+If nothing connects, check the three things the mode depends on, in this order:
+the name resolves (`getent hosts <name>`), the UDP port is actually open to the
+dialled side, and the two keys are each other's — a pin that does not match the
+partner produces a *rejected handshake*, not a timeout, and is logged as
+`path-failed ... QUIC failed`.
+
 ### Why a direct connection sometimes cannot work
 
 BuddyNet hole-punches: both sides send outward simultaneously so each NAT opens a
@@ -452,6 +479,10 @@ For a daemon with no human at the keyboard:
   instead, which is what you want unattended.
 - **Keep secrets out of argv**: `--join`, `--code` and friends read from the
   environment (`BUDDYNET_JOIN`, …) or a file.
+- **`--direct` fits this case particularly well**: it has no first-contact step
+  at all (the key is pinned before the process starts, and is mandatory), and no
+  token to rotate or keep out of argv. There is nothing for a human to confirm,
+  by construction rather than by configuration.
 - **`--reauth-interval`** periodically rebuilds tunnels so a revocation takes
   effect within that interval on a live direct tunnel. Off by default, because it
   trades a brief reconnect for that bound.
@@ -469,6 +500,10 @@ partner is reachable natively at its VIP. Full design and security notes in
   create the interface. Set `--wireguard` on **both** buddies.
 - **Fails closed.** If `--wireguard` is set but kernel WireGuard is unavailable, the
   buddy errors out — it does **not** silently fall back to QUIC.
+- **Works with `--direct`.** The side that is dialled runs as a peer with **no
+  endpoint** and adopts the address the completed handshake came from; its
+  `CONNECTED` line reads `remote=adopted-from-handshake`. Only the holder of the
+  pinned key can complete that handshake. Verified by `lab/test-wg-direct.sh`.
 - **Interfaces.** One WireGuard interface per buddy: `bnet0` for a single partner,
   `bnet0`, `bnet1`, … in MultiPeer (`--peers-file`). Each carries this node's VIP and
   a `/32` route to that partner's VIP. They are torn down when the tunnel drops.
@@ -781,3 +816,10 @@ reports, and exits. This section is the reference for it.
 buddynet --role=buddy --server … --server-key … --join=TOKEN --status
 # exit 0: reachable | 3: unreachable | 4: offline | 5: untrusted | 1: error
 ```
+
+> **Not available with `--direct`**, and refused rather than silently useless: the
+> probe asks a handshake server whether your buddy is registered, and direct mode
+> has no server to ask. Note also that a server which cannot be reached is
+> reported as exit **4 ("offline")** — the probe cannot tell "your buddy is not
+> there" from "I could not reach the server", so do not read a 4 as proof about
+> the buddy.

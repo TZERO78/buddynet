@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.4.0] — 2026-08-26
+
+Two ways to run BuddyNet without renting anything, both measured in new labs
+rather than asserted: the coordinator may be one of the two buddies, and with
+`--direct` there need be no coordinator at all.
+
 ### Added — `--direct`: a tunnel with no handshake server at all
 
 Two buddies can now reach each other from configuration alone. Each side is told
@@ -1814,7 +1820,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.3.3...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.4.0...HEAD
+[v5.4.0]: https://github.com/TZERO78/buddynet/compare/v5.3.3...v5.4.0
 [v5.3.3]: https://github.com/TZERO78/buddynet/compare/v5.3.2...v5.3.3
 [v5.3.2]: https://github.com/TZERO78/buddynet/compare/v5.3.1...v5.3.2
 [v5.3.1]: https://github.com/TZERO78/buddynet/compare/v5.3.0...v5.3.1
