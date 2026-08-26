@@ -67,9 +67,15 @@ nobody rents anything. A dynamic address is fine (DynDNS); the router has to
 forward both UDP ports **and** allow NAT loopback. What that setup does and does
 not cover is [step 0 of the setup guide](docs/SETUP.md#0-do-you-need-a-vps-at-all).
 
+Or skip the server entirely: with **`--direct`** the two buddies talk to each
+other and nothing else — you tell each side where its buddy is (a dynamic-DNS
+name is fine) and pin its key, and that is the whole configuration. No
+matchmaking, no token, no third party. See
+[Direct mode](docs/SETUP.md#direct-mode-no-server-at-all).
+
 Either way the buddies themselves may sit behind ordinary NAT or CGNAT. Only the
-coordinator has to be reachable — if *neither* side is (real CGNAT on both ends),
-you need a rented machine.
+reachable side has to be reachable — if *neither* of you is (real CGNAT on both
+ends), you need a rented machine.
 
 ## Install
 

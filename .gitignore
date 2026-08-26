@@ -11,6 +11,14 @@
 /lab/pentest/probe/probe
 /lab/pentest/relayflood/relayflood
 
+# Credentials for the opt-in labs (dynamic-DNS update tokens and the like).
+# NEVER commit these: an update token can repoint the DNS record your buddies
+# resolve. The tracked *.example files are the templates; the real files live
+# beside them and are ignored.
+/secrets/*
+!/secrets/*.example
+!/secrets/README.md
+
 # Local runtime state
 *.key
 peers.json

@@ -35,6 +35,30 @@ type BuddyConfig struct {
 	PeerKey    string // pin the partner's key (strongest)
 	KnownPeers string // TOFU trust store path
 
+	// Direct mode (--direct): no handshake server at all. The partner is reached
+	// at a configured address and authenticated ONLY by its pinned key, so
+	// PeerKey is mandatory here and there is no TOFU/SAS path — there is no
+	// rendezvous channel over which a first contact could be arranged.
+	//
+	// PeerEndpoint is where the partner listens ("host:port", commonly a dynamic
+	// DNS name). It is optional: a buddy that only ever waits to be dialled sets
+	// ListenPort instead. At least one of the two is required, which
+	// directListening turns into the client/server role for the QUIC handshake.
+	//
+	// PeerRelay is an optional relay to fall back to. It has no ticket in this
+	// mode (tickets are minted by a handshake server, and there is none), so it
+	// only works against a relay that accepts ticket-free binds.
+	Direct       bool
+	PeerEndpoint string
+	PeerRelay    string
+
+	// ListenPort pins the UDP source port of the tunnel socket (--listen-port),
+	// so a port forward can be aimed at it. 0 keeps the ephemeral port that has
+	// always been the default. It is what makes a buddy dialable at a stable
+	// address — and, unavoidably, what makes it answer on a known port; see
+	// SECURITY.md.
+	ListenPort int
+
 	// PeersFile is a multi-buddy manifest (--peers-file): one line per buddy,
 	// "<peer-pubkey-b64> [bootstrap-token]". When set, the supervisor maintains a
 	// tunnel to every listed buddy at once (plus any previously paired peers from
@@ -202,9 +226,19 @@ func Buddy(ctx context.Context, cfg BuddyConfig) error {
 		cfg.InviteTimeout = 15 * time.Minute
 	}
 
-	serverPub, err := bcrypto.DecodePubKey(cfg.ServerKey)
-	if err != nil {
-		return fmt.Errorf("bad --server-key: %w", err)
+	// Direct mode is checked before anything is opened, so a configuration that
+	// cannot work is a startup error and not a reconnect loop that never lands.
+	if derr := validateDirect(cfg); derr != nil {
+		return derr
+	}
+
+	// There is no server key to pin in direct mode, because there is no server.
+	var serverPub ed25519.PublicKey
+	if !cfg.Direct {
+		var serr error
+		if serverPub, serr = bcrypto.DecodePubKey(cfg.ServerKey); serr != nil {
+			return fmt.Errorf("bad --server-key: %w", serr)
+		}
 	}
 	priv, created, err := bcrypto.LoadOrCreateKey(cfg.KeyPath)
 	if err != nil {
@@ -438,6 +472,16 @@ func nextAttempt(cfg BuddyConfig) (attempt, error) {
 		} else if revoked {
 			return attempt{}, fmt.Errorf("buddy %s: %w (lift it with: peers allow %s)", keyTag(keyB64), errPeerRevoked, keyB64)
 		}
+	}
+	// Direct mode has no rendezvous at all: no server to register with, no token
+	// to present, and therefore no stored session secret to reconnect with — the
+	// pin IS the attempt, every time. Deliberately placed AFTER the revocation
+	// check above, so revoking a buddy stops direct reconnects too.
+	if cfg.Direct {
+		if cfgPin == nil {
+			return attempt{}, errDirectNoKey
+		}
+		return attempt{pin: cfgPin, cfgPin: cfgPin}, nil
 	}
 	if pin, secret, ok, err := loadSession(cfg.KnownPeers); err != nil {
 		return attempt{}, fmt.Errorf("session store %s: %w", cfg.KnownPeers, err)

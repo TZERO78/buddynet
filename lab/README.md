@@ -57,6 +57,45 @@ curl http://localhost:7070
 docker compose exec buddy-b curl http://localhost:7070
 ```
 
+## Direct-mode test (no server at all)
+
+`test-direct.sh` validates [direct mode](../docs/SETUP.md#direct-mode-no-server-at-all)
+— `--direct`, where the two buddies reach each other at configured addresses and
+there is no handshake server anywhere in the compose file.
+
+```bash
+./test-direct.sh
+```
+
+Three cases, and the third is the one that matters:
+
+1. a tunnel comes up from configuration alone and carries real traffic;
+2. the name is re-pointed at an **impostor** — a real BuddyNet, up and listening
+   on the same port with a different identity — and the connection is refused at
+   the QUIC handshake, because the pinned key does not match;
+3. the name is pointed back, and the tunnel returns **without a restart**.
+
+Cases 2 and 3 together are the argument that DNS is route-finding only: the same
+name resolved to three different hosts during the run, and what decided the
+outcome each time was the key, not the address. sarah's `/etc/hosts` stands in
+for the dynamic-DNS record — rewriting it is what a DynDNS update looks like from
+the resolver's side.
+
+### With a real provider
+
+`test-direct-dynv6.sh` closes the loop against an actual dynamic-DNS service: it
+updates a real record, waits for it to resolve, and brings the tunnel up over
+whatever address comes back. It is **opt-in** and skips itself unless credentials
+are present in `secrets/dynv6.env` (git-ignored; copy `secrets/dynv6.env.example`).
+
+It proves the name is resolved fresh and the pin still decides. It does **not**
+prove reachability from a foreign host — both buddies run locally, so the
+connection reaches this machine's own global address.
+
+Note what is *not* in BuddyNet: the record update is a plain HTTP request made by
+the script, exactly as a router or cron job would. There is no DynDNS client and
+no provider token anywhere in the binary.
+
 ## Coordinator test (no VPS: a buddy is the coordinator)
 
 `test-coordinator.sh` validates [step 0 of the setup guide](../docs/SETUP.md#0-do-you-need-a-vps-at-all)
