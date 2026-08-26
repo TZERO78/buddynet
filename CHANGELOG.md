@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (Lab) — every lab image build was broken
+
+v5.3.2's `.dockerignore` (`1fc21b5`) excluded `lab` wholesale, but the lab images
+are built from the repo root and `COPY lab/entrypoint-*.sh` / `lab/pentest/` out of
+it, so `docker compose build` failed with `"/lab/entrypoint-nat.sh": not found` —
+and a run that skips the build silently uses a stale image instead. Two narrow
+exceptions restore the builds while keeping the lab's runtime state (which is what
+the exclusion is for) out of the build context.
+
 ## [v5.3.2] — 2026-08-25
 
 ### Fixed (Docs) — the IPv6 `srcmask` guidance stated the wrong mechanism

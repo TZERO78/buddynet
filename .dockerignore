@@ -10,6 +10,15 @@
 
 # Lab, demos and their runtime state (some of it not readable by this user).
 lab
+# ...with two exceptions. The lab images are built from the REPO ROOT as context
+# and copy these paths out of lab/ (lab/Dockerfile:18, Dockerfile.nat:7,
+# Dockerfile.firewalls:18, pentest/Dockerfile.attacker:19). Excluding lab
+# wholesale made every one of those builds fail with "not found", which is how a
+# lab run can quietly stop testing anything — or silently reuse a stale image.
+# Named narrowly on purpose: the runtime state this exclusion exists for
+# (lab/party/*.peers and friends) stays out of the context.
+!lab/entrypoint-*.sh
+!lab/pentest
 media
 
 # Documentation and deployment templates — none of it is copied into the image.
