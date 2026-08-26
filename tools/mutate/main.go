@@ -173,6 +173,8 @@ func runPilot(pkg, src, runFilter string, timeout time.Duration, verbose bool) e
 // file moving.
 func writeOverlay(dir string, n int, absSrc string, mutSrc []byte) (string, error) {
 	mutPath := filepath.Join(dir, fmt.Sprintf("mutant%d.go", n))
+	// #nosec G703 -- dir comes from os.MkdirTemp and the name from an int
+	// counter; no part of this path is derived from input.
 	if err := os.WriteFile(mutPath, mutSrc, 0o600); err != nil {
 		return "", err
 	}
@@ -250,6 +252,9 @@ func goTest(pkg, overlay, runFilter string, timeout time.Duration) (bool, string
 	}
 	args = append(args, pkg)
 
+	// #nosec G204 -- the command is the literal "go"; the arguments are this
+	// tool's own flags, supplied by the developer running it. There is no trust
+	// boundary here to cross: anyone who can pass -pkg can already run go.
 	out, err := exec.CommandContext(ctx, "go", args...).CombinedOutput()
 	return err == nil, string(out)
 }
