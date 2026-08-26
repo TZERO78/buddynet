@@ -22,6 +22,10 @@ known_peers
 # Generated BuddyParty manifests — contain node keys + bootstrap tokens (re-created
 # by setup-party.sh from the persistent key volumes), not for commit
 /lab/party/
+# Identities minted by test-coordinator.sh (it mints them on the host because the
+# coordinator has to pin its OWN key). Covered by *.key too; named here so the
+# directory itself never shows up as an untracked leftover.
+/lab/keys/
 
 # Editor / OS
 .DS_Store

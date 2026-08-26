@@ -1,0 +1,111 @@
+# BuddyNet coordinator lab — nobody rents a VPS: one of the two BUDDIES is the
+# coordinator, running handshake + relay + buddy in ONE process.
+#
+#   sarah ─[lan_s]─ nat-sarah (cone) ─┐
+#                                     ├─[wan]
+#   bob   ─[lan_b]─ nat-bob   (fwd)  ─┘   port forward 51820,51821 -> bob
+#
+# bob's "public address" is nat-bob's WAN address, 172.30.0.2 — that is what a
+# DynDNS name would resolve to in the real setup.
+#
+# The point of the NAT routers is that bob's OWN registration never leaves his
+# LAN, so his own handshake server cannot observe a public address for him. Two
+# knobs decide what happens then:
+#
+#   NAT_HAIRPIN=on|off   whether bob's router lets him reach his own WAN address
+#                        (NAT loopback) — most consumer routers do, some do not
+#   COORD_SERVER         the address bob points --server at
+#
+# Run: ./test-coordinator.sh
+
+x-buddy: &buddy
+  build: { context: .., dockerfile: lab/Dockerfile }
+  image: buddynet-lab-buddy
+  entrypoint: ["/bin/sh", "/entrypoint-natclient.sh"]
+  cap_add: [NET_ADMIN]
+  depends_on: [nat-bob, nat-sarah]
+  restart: unless-stopped
+
+services:
+
+  nat-bob:
+    build: { context: .., dockerfile: lab/Dockerfile.nat }
+    image: buddynet-lab-nat
+    cap_add: [NET_ADMIN]
+    sysctls: [net.ipv4.ip_forward=1]
+    environment:
+      NAT_WAN_PREFIX: "172.30."
+      NAT_MODE: "fwd"
+      NAT_FWD_PORTS: "51820,51821"
+      NAT_FWD_HOST: "172.31.0.10"
+      NAT_HAIRPIN: "${NAT_HAIRPIN:-on}"
+    networks:
+      wan: { ipv4_address: 172.30.0.2 }
+      lan_b: { ipv4_address: 172.31.0.2 }
+    restart: unless-stopped
+
+  nat-sarah:
+    build: { context: .., dockerfile: lab/Dockerfile.nat }
+    image: buddynet-lab-nat
+    cap_add: [NET_ADMIN]
+    sysctls: [net.ipv4.ip_forward=1]
+    environment: { NAT_WAN_PREFIX: "172.30.", NAT_MODE: "cone" }
+    networks:
+      wan: { ipv4_address: 172.30.0.3 }
+      lan_s: { ipv4_address: 172.32.0.2 }
+    restart: unless-stopped
+
+  # Bob: handshake + relay + buddy in ONE process, behind his own router.
+  # --relay-endpoint is his PUBLIC address (the forward), because that is the
+  # address the partner has to reach. It is a flag, not an observed value.
+  bob:
+    <<: *buddy
+    command:
+      # COORD_ROLES=buddy,handshake (i.e. without relay) reproduces the realistic
+      # operator mistake: the ports are forwarded, but the relay role was never
+      # started, so the server advertises a relay that is not there.
+      - --role=${COORD_ROLES:-buddy,handshake,relay}
+      - --key=/var/lib/buddynet/id.key
+      - --listen=0.0.0.0:51820
+      - --relay-listen=0.0.0.0:51821
+      - --relay-id=YnVkZHluZXQtbGFiLXJpZA
+      - --relay-endpoint=172.30.0.2:51821
+      - --peer-key=${SARAH_PUB}
+      - --forward=127.0.0.1:7777
+      - --invite
+      - --no-interactive
+    environment:
+      BUDDYNET_SERVER: "${COORD_SERVER:-172.30.0.2:51820}"
+      BUDDYNET_SERVER_KEY: "${BOB_PUB}"
+      NAT_GW: "172.31.0.2"
+      NODE_NAME: "bob"
+      SERVE_HTTP: "1"
+    volumes:
+      - ./keys/bob.key:/var/lib/buddynet/id.key
+      - ./entrypoint-natclient.sh:/entrypoint-natclient.sh:ro
+    networks: { lan_b: { ipv4_address: 172.31.0.10 } }
+
+  # Sarah: a plain buddy. She only ever knows bob's public address.
+  sarah:
+    <<: *buddy
+    command:
+      - --role=buddy
+      - --key=/var/lib/buddynet/id.key
+      - --peer-key=${BOB_PUB}
+      - --join=${INVITE_TOKEN:-unset}
+      - -L=0.0.0.0:9099
+      - --no-interactive
+    environment:
+      BUDDYNET_SERVER: "172.30.0.2:51820"
+      BUDDYNET_SERVER_KEY: "${BOB_PUB}"
+      NAT_GW: "172.32.0.2"
+      NODE_NAME: "sarah"
+    volumes:
+      - ./keys/sarah.key:/var/lib/buddynet/id.key
+      - ./entrypoint-natclient.sh:/entrypoint-natclient.sh:ro
+    networks: { lan_s: { ipv4_address: 172.32.0.10 } }
+
+networks:
+  wan: { ipam: { config: [{ subnet: 172.30.0.0/24 }] } }
+  lan_b: { internal: true, ipam: { config: [{ subnet: 172.31.0.0/24 }] } }
+  lan_s: { internal: true, ipam: { config: [{ subnet: 172.32.0.0/24 }] } }

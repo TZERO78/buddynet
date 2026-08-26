@@ -6,15 +6,17 @@ buddies to each other: the **coordinator** (`--role=handshake`, optionally also
 (see [SECURITY.md](../SECURITY.md)). This page takes you from a blank VPS to two
 paired machines, in order, with commands you can paste.
 
-**You don't always need a VPS.** If one of your two machines has a public IP or an
-open port, that machine can be the coordinator. This guide covers the common case:
-both machines behind NAT/CGNAT.
+**You don't always need a VPS.** If one of your two machines is reachable from the
+internet, that machine can be the coordinator *and* a buddy at the same time —
+[step 0](#0-do-you-need-a-vps-at-all) tells you whether yours qualifies. The rest
+of this guide covers the common case: both machines behind NAT/CGNAT.
 
 **What you need:** a VPS (the smallest tier is plenty — this is a control plane,
 not a data path), its IP or a DNS name, and SSH access.
 
 | # | Step | Why |
 |---|------|-----|
+| 0 | [Do you need a VPS at all?](#0-do-you-need-a-vps-at-all) | one of your buddies may be able to do the job |
 | 1 | [Prepare the VPS](#1-prepare-the-vps) | a tiny always-on public IP |
 | 2 | [Install the binary](#2-install-the-binary-verified) | signed release, provenance checked |
 | 3 | [Firewall](#3-firewall) | default-drop; only SSH + BuddyNet ports |
@@ -31,6 +33,115 @@ Two ports do all the work:
 | **51820/udp** | handshake (matchmaking) | `--listen [::]:51820` |
 | **51821/udp** | relay (fallback forwarder) | `--relay-listen [::]:51821` |
 | 22/tcp | your SSH — keep it! | — |
+
+---
+
+## 0. Do you need a VPS at all?
+
+Not if **one** of your two machines is reachable from the internet. That machine
+then runs all three roles in a single process — coordinator *and* buddy at the
+same time — and nobody rents anything:
+
+```
+--role=buddy,handshake,relay
+```
+
+An always-on box behind a router you control (an Unraid server, say) is the usual
+candidate. A dynamic address is fine: put a DynDNS name on it. Only the role flag
+and the router work below are specific to this setup — the rest of this page still
+applies, and two parts of it matter *more* here than on a rented box: that machine
+is now answering on two ports from the open internet and will be scanned like any
+server, so do not skip the [firewall](#3-firewall) or
+[approval mode](#8-harden). It is your home server, not a disposable VPS.
+
+### What the router in front of it must do
+
+Two things, and the second one is the one people get caught by:
+
+1. **Forward both UDP ports** to that machine — `51820` (handshake) *and* `51821`
+   (relay). Forwarding only the handshake port is not enough; see below.
+2. **Allow NAT loopback**, usually called **hairpinning**: the machine must be able
+   to reach *its own* public address. Most consumer routers do this; some do not,
+   and a few call it "NAT loopback" in the UI.
+
+If the router cannot hairpin, this setup does not work at all — not partially. The
+coordinator cannot reach its own handshake server, and the error it logs is
+`QUIC control dial failed`, which reads like a wrong key or a wrong port. Rule the
+router out first. Pointing `--server` at `127.0.0.1` does **not** work around it:
+the relay is advertised to your buddy under its *public* address, so the
+coordinator has to reach that address too.
+
+### Why both ports, and why a direct P2P tunnel is not what you get here
+
+A buddy offers its partner the addresses its handshake server **observed** it
+coming from. When the buddy *is* that server, its own registration never leaves
+its LAN, so the only address it can ever offer is a private one — which its
+partner cannot punch a hole to. This is structural, not a NAT quirk: it happens in
+every NAT mode.
+
+So the tunnel is carried by the coordinator's **own relay leg**, and you will see
+
+```
+CONNECTED: ... via="handshake server as relay"
+```
+
+That is the expected, healthy result in this topology, not a fallback that went
+wrong — and it is why the relay role has to run and its port has to be forwarded.
+Your traffic is still end-to-end encrypted between the two pinned identities and
+still crosses the internet once; the relay only ever forwards ciphertext, even
+though here it happens to be your own machine. Your **router**, however, carries
+each packet twice, because the coordinator reaches its own relay leg by
+hairpinning through it. On a weak consumer router that, not your uplink, is what
+will limit throughput.
+
+### Starting it
+
+On the coordinator side, `--server-key` is **its own public key** — it pins itself,
+because it is the server. `--relay-endpoint` must be the **public** name or address,
+because that is what your buddy has to reach:
+
+```bash
+# identity + relay id, once — same as step 5 of this guide
+buddynet --role=handshake --key /var/lib/buddynet/id.key init
+buddynet gen-relay-id
+
+buddynet --role=buddy,handshake,relay \
+  --key /var/lib/buddynet/id.key \
+  --listen [::]:51820 \
+  --relay-listen [::]:51821 \
+  --relay-id "$RELAY_ID" \
+  --relay-endpoint home.example.org:51821 \
+  --server home.example.org:51820 \
+  --server-key "$MY_OWN_PUBLIC_KEY" \
+  --peer-key "$BUDDY_PUBLIC_KEY" \
+  --forward 127.0.0.1:445 \
+  --invite
+```
+
+The other side is an ordinary buddy that happens to point at your machine:
+
+```bash
+buddynet --role=buddy \
+  --key /var/lib/buddynet/id.key \
+  --server home.example.org:51820 \
+  --server-key "$COORDINATOR_PUBLIC_KEY" \
+  --join "$INVITE" \
+  -L 0.0.0.0:9000
+```
+
+Pairing works exactly as in [step 6](#6-pair-your-buddies) — the invite pins the
+coordinator's key for the joining side, and the coordinator pins its buddy with
+`--peer-key`.
+
+### What this does not solve
+
+**Real CGNAT.** If your provider hands you a shared address, there is no router of
+yours to forward on, and no port to open. Then one of you needs a machine that is
+reachable — the rented VPS this guide is otherwise about.
+
+All four cases above (working setup, no hairpin, `127.0.0.1` as a workaround, and
+the relay role left out) are covered by our own lab, `lab/test-coordinator.sh`,
+which brings the whole thing up behind two simulated NAT routers.
 
 ---
 

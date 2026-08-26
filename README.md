@@ -56,13 +56,20 @@ platform.
 ## What you need
 
 - Linux on the participating machines;
-- one machine with a stable public address for the `handshake` role;
+- one machine reachable from the internet for the `handshake` role;
 - optionally the `relay` role on the same or a separate machine;
 - ownership of server updates, firewalling, keys and backups.
 
-A small VPS is the usual choice. A machine on your own internet connection also
-works when it is reliably reachable through a public IP or current DNS name.
-The buddies themselves may sit behind ordinary NAT or CGNAT.
+A small VPS is the usual choice — but **that machine may be one of the two
+buddies**. If one of you has an always-on box behind a router you control, it can
+run `--role=buddy,handshake,relay` and be coordinator and buddy in one process, so
+nobody rents anything. A dynamic address is fine (DynDNS); the router has to
+forward both UDP ports **and** allow NAT loopback. What that setup does and does
+not cover is [step 0 of the setup guide](docs/SETUP.md#0-do-you-need-a-vps-at-all).
+
+Either way the buddies themselves may sit behind ordinary NAT or CGNAT. Only the
+coordinator has to be reachable — if *neither* side is (real CGNAT on both ends),
+you need a rented machine.
 
 ## Install
 
