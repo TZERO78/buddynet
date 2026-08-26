@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — direct mode is available in the Unraid plugin
+
+A **Mode** selector on the plugin's settings page chooses between *Coordinator*
+(unchanged, and the default) and *Direct*. Until now direct mode was unreachable
+from the plugin by any route, not merely unexposed: `rc.buddynet` built the
+argument list with `--server`/`--server-key` hardcoded and had no field for
+anything else.
+
+A config written before this field exists has no `MODE` line and falls back to
+coordinator, so existing installs keep behaving exactly as they did.
+
+Three cases the daemon would exit 2 on are handled in the script instead, because
+a message naming the *field* beats one naming the flag: the buddy key is required
+in direct mode (without a server the pinned key is the only authentication, so
+the service refuses to start rather than come up unauthenticated); a leftover
+`--server` is dropped; and a leftover invite is dropped and logged — easy to miss,
+since `BUDDYNET_JOIN` is the environment form of `--join`, which `--direct`
+refuses.
+
+New `lab/test-plugin-args.sh` closes a gap nothing covered before: the `.plg` was
+validated as XML and its shell blocks parsed, but neither said *which flags come
+out*. It extracts `rc.buddynet`, drives `start` with real configs against a
+recording stub, and hands the resulting argv to the real binary, requiring that it
+is not rejected as a usage error. Needs no Unraid, no root and no network.
+
+No new binary — the plugin stays pinned to v5.4.0 (ENTITY version 2026.08.26.2).
+
 ## [v5.4.0] — 2026-08-26
 
 Two ways to run BuddyNet without renting anything, both measured in new labs
