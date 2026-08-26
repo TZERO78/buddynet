@@ -57,6 +57,26 @@ curl http://localhost:7070
 docker compose exec buddy-b curl http://localhost:7070
 ```
 
+## Coordinator test (no VPS: a buddy is the coordinator)
+
+`test-coordinator.sh` validates [step 0 of the setup guide](../docs/SETUP.md#0-do-you-need-a-vps-at-all)
+— the setup in which nobody rents a server because one of the two buddies runs
+`--role=buddy,handshake,relay` itself. `docker-compose.coordinator.yml` puts it
+behind a real NAT topology: bob behind his own home router with a port forward
+(`NAT_MODE=fwd`, with a `NAT_HAIRPIN` switch), sarah behind an ordinary cone NAT.
+
+```bash
+./test-coordinator.sh
+```
+
+It checks the working configuration *and* the three ways it breaks: no NAT
+loopback on the router, `--server=127.0.0.1` used as a workaround for that, and
+the relay role left unstarted. The finding it pins down: in this topology a
+**direct P2P tunnel is impossible**, because a buddy's candidates are the
+addresses its handshake server observed — and when the buddy *is* the server, its
+own registration never leaves the LAN. The coordinator's own relay leg carries the
+tunnel, which is why both ports must be forwarded.
+
 ## VIP-routing test (Phase 1.3: Loopback-VIP-Bind)
 
 The overlay `docker-compose.vip.yml` validates `--vip-listen`: a buddy binds its

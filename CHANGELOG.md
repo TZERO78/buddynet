@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added — you do not need a rented VPS if one of the two buddies is reachable
+
+`--role=buddy,handshake,relay` has always been accepted, so a pair in which one
+side has a reachable address never needed a third machine. Nothing said so: the
+README listed "one machine with a stable public address" as a requirement without
+mentioning it may be one of the two buddies, and `docs/SETUP.md` carried a single
+sentence with no instructions behind it. Documented now as
+[step 0 of the setup guide](docs/SETUP.md#0-do-you-need-a-vps-at-all), with the
+conditions measured rather than assumed:
+
+- **Both UDP ports must be forwarded**, and the router must allow **NAT loopback**
+  (hairpinning). Without it the setup does not work at all, and the coordinator
+  logs `QUIC control dial failed`, which reads like a wrong key. Pointing
+  `--server` at `127.0.0.1` does not work around it, because the relay is
+  advertised to the partner under its public address.
+- **A direct P2P tunnel is impossible in this topology, by construction.** A buddy
+  offers the addresses its handshake server *observed*; when the buddy is that
+  server, its registration never leaves the LAN, so the only candidate it can
+  offer is private. The coordinator's own relay leg carries the tunnel
+  (`via="handshake server as relay"`), which is why the relay role is not optional
+  here.
+
+New `lab/test-coordinator.sh` brings the whole thing up behind two simulated NAT
+routers and covers the working setup plus those three failure modes;
+`lab/entrypoint-nat.sh` gained a `fwd` mode (port forward + `NAT_HAIRPIN` switch)
+for it. `TestAllInOneCoordinatorRoles` guards the role combination in CI, which
+the Docker lab cannot do.
+
 ## [v5.3.3] — 2026-08-26
 
 ### Fixed (Security/DoS) — the buddy's own QUIC listener had no source validation

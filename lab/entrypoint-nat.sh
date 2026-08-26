@@ -4,6 +4,13 @@
 #   NAT_MODE=cone       (default) MASQUERADE — preserves source port -> punch works
 #   NAT_MODE=symmetric  MASQUERADE --random-fully — random port per destination ->
 #                       server-observed port is useless to the peer -> punch fails
+#   NAT_MODE=fwd        a HOME router in front of the all-in-one coordinator: plain
+#                       MASQUERADE out, plus a port forward for the control ports
+#                       (NAT_FWD_PORTS -> NAT_FWD_HOST). NAT_HAIRPIN=on additionally
+#                       makes the router's own WAN address reachable FROM the LAN
+#                       (NAT loopback / hairpin), which is what decides whether the
+#                       coordinator can reach its own public address. See
+#                       test-coordinator.sh.
 set -e
 
 # net.ipv4.ip_forward is set via the compose `sysctls:` key (/proc/sys is read-only
@@ -24,6 +31,34 @@ if [ "$MODE" = "symmetric" ]; then
 	# because it allocates a new port when the original is already in use by another
 	# flow, which is why a fixed-port SNAT is needed below to get a real cone NAT.)
 	iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE --random-fully
+elif [ "$MODE" = "fwd" ]; then
+	# A home router in front of the machine that runs handshake+relay+buddy in one
+	# process. Ordinary MASQUERADE outbound (no fixed-port SNAT: the coordinator has
+	# SEVERAL udp sockets behind this router — control, relay, tunnel — and one fixed
+	# external port would make them collide), plus a port forward inbound.
+	LAN_IF=$(ip -o -4 addr show | awk -v w="$WAN_IF" '$2 != "lo" && $2 != w { print $2; exit }')
+	LAN_IP=$(ip -o -4 addr show dev "$LAN_IF" | awk '{print $4}' | cut -d/ -f1)
+	iptables -t nat -A POSTROUTING -o "$WAN_IF" -j MASQUERADE
+
+	for PORT in $(echo "${NAT_FWD_PORTS:-}" | tr ',' ' '); do
+		# From the WAN: an ordinary port forward, the thing the operator clicks in
+		# their router UI.
+		iptables -t nat -A PREROUTING -i "$WAN_IF" -p udp --dport "$PORT" \
+			-j DNAT --to-destination "${NAT_FWD_HOST}:${PORT}"
+
+		if [ "${NAT_HAIRPIN:-off}" = "on" ]; then
+			# NAT loopback: the same forward also applies to packets that come FROM
+			# the LAN addressed to our own WAN IP, and the reply has to travel back
+			# through us — hence the SNAT to the router's LAN address. Without that
+			# SNAT the reply would go host-to-host directly and the client would drop
+			# it as coming from the wrong address.
+			iptables -t nat -A PREROUTING -i "$LAN_IF" -d "$WAN_IP" -p udp --dport "$PORT" \
+				-j DNAT --to-destination "${NAT_FWD_HOST}:${PORT}"
+			iptables -t nat -A POSTROUTING -o "$LAN_IF" -d "$NAT_FWD_HOST" -p udp --dport "$PORT" \
+				-j SNAT --to-source "$LAN_IP"
+		fi
+	done
+	echo "[nat] fwd: ports='${NAT_FWD_PORTS:-}' -> ${NAT_FWD_HOST} hairpin=${NAT_HAIRPIN:-off} LAN_IF=$LAN_IF LAN_IP=$LAN_IP"
 else
 	# Full cone (endpoint-independent mapping): SNAT all UDP to ONE fixed external
 	# port, so the same internal socket appears under the same ip:port to BOTH the
