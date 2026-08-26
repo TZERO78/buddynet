@@ -2,7 +2,7 @@
 <!DOCTYPE PLUGIN [
 <!ENTITY name      "buddynet">
 <!ENTITY author    "TZERO78">
-<!ENTITY version   "2026.08.26">
+<!ENTITY version   "2026.08.26.1">
 <!ENTITY launch    "Tools/buddynet">
 <!ENTITY gitURL    "https://github.com/TZERO78/buddynet">
 <!ENTITY pluginURL "https://raw.githubusercontent.com/TZERO78/buddynet/main/unraid/BuddyNet/buddynet.plg">
@@ -25,6 +25,22 @@ falls back to a blind relay only if a direct path is impossible. Point
 rsync/borg/kopia at the local socket and back up directly between two sites — in
 either direction over one tunnel. Two buddies is the simplest case; with a
 manifest, one node can hold many at once (MultiPeer).
+
+###2026.08.26.1
+- Pinned to buddynet **v5.4.0** — two ways to run BuddyNet without renting a
+  server, neither of which changes anything about how the plugin works today.
+- **The coordinator may be one of the two buddies.** `--role=buddy,handshake,relay`
+  always worked; nothing said so. It is now documented with the conditions it
+  really needs: the router in front of it must allow NAT loopback (hairpinning)
+  and forward both UDP ports, or it does not work at all.
+- **`--direct` needs no coordinator whatsoever.** Each side is told where its
+  buddy is (a DynDNS name is fine — it is re-resolved on every attempt) and pins
+  its key, and that is the whole configuration. Command line only for now: the
+  plugin's own page has no direct-mode control, so nothing here changes.
+- Nothing about pairing or the protocol changes (protocol version stays 8), and a
+  v5.4.0 buddy works with one still on v5.3.3.
+- Checksum gate set to the v5.4.0 `buddynet-linux-amd64` sha256, verified against
+  the published artifact (sha256 + cosign + SLSA provenance) before pinning.
 
 ###2026.08.26
 - Pinned to buddynet **v5.3.3** — a hardening fix on the buddy's own tunnel
@@ -971,12 +987,12 @@ mkdir -p "$PLG"
 # NOTE: entities are NOT expanded inside <FILE> CDATA on Unraid, so the binary
 # version and URL are hard-coded here on purpose.
 # MAINTAINER: bump both together on each new release (tag -> release.yml build).
-BINVER="v5.3.3"
+BINVER="v5.4.0"
 BINURL="https://github.com/TZERO78/buddynet/releases/download/${BINVER}/buddynet-linux-amd64"
 # SHA256 of the release binary; verified on every install so a corrupted or
 # tampered download is never installed. Matches buddynet-linux-amd64.sha256 of
 # the BINVER release — bump both together on each new release.
-BINSHA="ffbe62b394877659fc60860fd756955622a5877a989d988eeaa128ace6a59828"
+BINSHA="224ed7946204baf097f8d6fc37e538b2f8ce8e07a62692474c4248f59f6d4cc3"
 verify() { echo "$BINSHA  $1" | sha256sum -c --status 2>/dev/null; }
 
 # Download the buddynet binary to flash (only if missing or its checksum is wrong).
