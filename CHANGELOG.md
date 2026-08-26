@@ -34,6 +34,74 @@ is not rejected as a usage error. Needs no Unraid, no root and no network.
 
 No new binary — the plugin stays pinned to v5.4.0 (ENTITY version 2026.08.26.2).
 
+### Changed (Hardening) — a relay id now has exactly one valid spelling
+
+`ticket.ValidID` accepted **sixteen** different strings for every relay/session
+id. 22 base64url characters carry 132 bits for a 128-bit id, so the final
+character has four unused bits, and `encoding/base64` does not care what is in
+them; a length-plus-decode check therefore admits every spelling that decodes to
+the same bytes. The function's own comment promised the opposite — that a ticket
+could not carry an "oddly-encoded" value into a map key or a log line.
+
+**This was not exploitable.** Every id inside a ticket is minted by `NewID`
+(canonical by construction) and covered by the server's signature, so no spelling
+can be substituted without breaking the signature first; both callers validate
+*operator configuration*, not attacker input. It is fixed so the guarantee is
+true rather than nearly true, and because there is a real operational case: a
+mistyped or badly copied `--relay-id` with a stray trailing bit used to pass
+validation and only show up afterwards as *every ticket rejected* — the exact
+failure the message at that site exists to prevent.
+
+**Possible impact:** a hand-typed, non-canonical `--relay-id` is now refused at
+startup, with a message naming the flag. Values produced by `buddynet
+gen-relay-id` are always canonical and are unaffected. No signed bytes change;
+neither `protocol.Version` (8) nor `ticket.FormatVersion` (1) moves.
+
+### Added (CI) — the workflows are scanned as part of the security pass
+
+`govulncheck` and `gosec` read Go. The supply chain that produces a signed
+release is written in YAML, and nothing looked at it. zizmor now does, pinned by
+container digest and blocking on anything it rates `low` or worse. It found two
+real things, both fixed here:
+
+- **The release build no longer uses a Go build cache.** A cache is restored from
+  the default-branch scope, which every push to main writes, so a poisoned entry
+  would be linked into the binaries the release job then signs and attests — and
+  neither control would notice, because a cosign signature and a SLSA provenance
+  attest *who* built and *from which ref*, never that the inputs were clean.
+- **`persist-credentials: false` on every checkout.** No job here pushes with
+  git, so the checkout credential had no reason to stay in `.git/config`.
+
+The same scan runs locally with one command and no credentials; see
+CONTRIBUTING.md. `gofmt` now also covers `./tools`.
+
+### Added (Testing) — a mutation-testing pilot, and what it found
+
+`tools/mutate` (stdlib only, no new dependency) breaks one thing at a time in a
+package and reports which changes its tests fail to notice. Mutants compile
+through `go test -overlay`, so the working tree is never written to.
+
+Run against `internal/ticket`, it killed 63 of 103 mutants — **40 survived**. The
+pattern behind them: the existing tests are written *relative* to the package's
+own constants and helpers, so the whole suite moves together. There was no
+known-answer test for the bytes a signature covers (any symmetric change stayed
+green while making this build's tickets unverifiable to every other build); the
+wire constants — `FormatVersion`, `MaxTTL`, `Skew`, `IDLen`, `MaxPayloadLen` —
+were pinned nowhere; the exact boundaries were untested; `VerifyBind` was never
+called with a wrong-sized key, though `ed25519.Verify` *panics* on one; and
+`ShortSID`, whose only job is that a full session id never reaches a log line,
+had no test at all.
+
+`internal/ticket/invariants_test.go` closes those, deliberately written against
+literal values rather than the constants under test. The score is now **95.2 %
+(100 of 105)**, and the five remaining survivors are each shown to be equivalent
+mutants — the reasoning for each is recorded in the header of that test file, so
+a later run does not have to re-derive it.
+
+The pilot runs on demand, not in CI. A score gate would reward killing equivalent
+mutants, which means tests that pin implementation details instead of behaviour;
+and every survivor needs a decision, not a number.
+
 ## [v5.4.0] — 2026-08-26
 
 Two ways to run BuddyNet without renting anything, both measured in new labs
