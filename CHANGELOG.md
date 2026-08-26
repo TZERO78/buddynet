@@ -53,8 +53,20 @@ exactly while the other is bound to the relay. That was measured, not assumed
 every path arrives on the same UDP socket, the listening side now primes them all
 and listens once. The dialling side and the server-based mode are unchanged.
 
+**Both data planes work with `--direct`.** The default is QUIC; `--wireguard`
+swaps in the kernel WireGuard plane, and then no QUIC is involved at all — the
+partner's identity is proven by the WireGuard handshake against the X25519 key
+derived from its pinned Ed25519 identity, with `wg.ConfirmHandshake` requiring a
+completed handshake before anything counts as connected. This needed real work
+rather than a flag: WireGuard has no "listen" call, so the dialled side is now
+configured as a peer with **no endpoint** and adopts the address the handshake
+arrives from (only the key-holder can complete it, so nothing else can trigger
+that). Covered by `lab/test-wg-direct.sh`, which asserts the no-endpoint path was
+actually the one exercised.
+
 Not supported in this mode: MultiPeer (`--peers-file` — one endpoint and port per
-buddy would be needed). The relay fallback (`--peer-relay`) works, but the relay
+buddy would be needed). The relay fallback (`--peer-relay`)
+works, but the relay
 must authorize by source network (`--allow-cidr`), since there is no server to
 mint a ticket — and a CIDR list cannot follow a buddy whose address keeps
 changing, which is documented rather than papered over.

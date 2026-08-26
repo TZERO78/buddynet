@@ -229,6 +229,29 @@ updater — for example [DuckDNS](https://www.duckdns.org/install.jsp) or dynv6,
 both of which are a single HTTP request. Keeping that credential out of BuddyNet
 is the point: a tunnel does not need the ability to repoint your DNS.
 
+### Which data plane carries it
+
+Two things are easy to conflate, so to be explicit: the **control plane** (the
+matchmaking with a handshake server) is always QUIC/TLS — and in direct mode it
+does not exist at all, because your configuration replaces it. The **data plane**
+— the tunnel itself — is separately either of:
+
+| | Flag | What the tunnel is |
+|---|---|---|
+| default | *(none)* | QUIC streams; reach the partner through `-L` / `--forward` |
+| opt-in | `--wireguard` | a kernel WireGuard interface; the partner is reachable natively at its VIP `10.66.X.Y` |
+
+Both work with `--direct`. On the WireGuard plane there is no QUIC anywhere in
+the picture, and the partner's identity is proven by the WireGuard handshake
+against the X25519 key derived from its pinned Ed25519 identity — the same
+guarantee by a different mechanism. Set `--wireguard` on **both** sides; see
+[WIREGUARD.md](WIREGUARD.md).
+
+One detail worth knowing: on the WireGuard plane the side that is dialled runs
+with no configured endpoint and adopts the address the handshake came from. Only
+the holder of the pinned key can complete that handshake, so nothing else can
+cause the adoption.
+
 ### What the name can and cannot do
 
 **DNS is route-finding only.** The address a name resolves to still has to prove

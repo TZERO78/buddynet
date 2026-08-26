@@ -81,6 +81,23 @@ outcome each time was the key, not the address. sarah's `/etc/hosts` stands in
 for the dynamic-DNS record — rewriting it is what a DynDNS update looks like from
 the resolver's side.
 
+### On the WireGuard data plane
+
+`test-wg-direct.sh` runs the same mode with `--wireguard` instead of the default
+QUIC plane, in two netns on a bridge (needs root and the wireguard module):
+
+```bash
+sudo -v && ./test-wg-direct.sh
+```
+
+WireGuard has no "listen" call — a peer either has an endpoint and initiates, or
+has none and can only answer. Direct mode's dialled side has none (nothing ever
+observed an address for it), so it is configured as an endpoint-less peer that
+adopts whatever address the completed handshake came from. The test asserts that
+this is what happened (`remote=adopted-from-handshake`), not merely that a tunnel
+appeared — and phase 2 re-runs the pair on the QUIC plane so a regression in
+either shows up in one run.
+
 ### With a real provider
 
 `test-direct-dynv6.sh` closes the loop against an actual dynamic-DNS service: it
