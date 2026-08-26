@@ -25,6 +25,19 @@ tampered download is refused. The pinned version and its checksum are in
 
 - **Settings page** (Tools → BuddyNet) + a service that runs on array start and
   stops on array stop.
+- **Two modes**, chosen on the page:
+  - **Coordinator** (default, and what every existing install keeps doing): a
+    handshake server introduces the two of you, and your router needs nothing —
+    the tunnel hole-punches out through NAT.
+  - **Direct**: no server at all. You fill in your buddy's address and pin their
+    key, and that is the whole configuration. The price is a router handful:
+    **one of you must be reachable from the internet** — a forwarded UDP port
+    and, if your address changes, a DynDNS name (the name is re-resolved on every
+    attempt, so a changed address needs no edit here). BuddyNet contains no
+    DynDNS client; your router or a cron job updates that record.
+    In this mode the **Buddy key is required** — with no server there is nothing
+    else that authenticates your buddy, so the service refuses to start without
+    it rather than come up unauthenticated.
 - **Both directions over one tunnel:** `-L` exposes a local port that reaches a
   service on your buddy's side, `-forward` lets your buddy reach a service here
   (an rsync daemon on `:873`, for example). Set at least one — a tunnel with

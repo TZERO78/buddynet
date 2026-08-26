@@ -57,6 +57,24 @@ curl http://localhost:7070
 docker compose exec buddy-b curl http://localhost:7070
 ```
 
+## Unraid plugin: what command line does it actually start?
+
+`test-plugin-args.sh` extracts `rc.buddynet` from `unraid/BuddyNet/buddynet.plg`,
+points its paths at a scratch dir, puts a recording stub where the binary goes,
+and drives `start` with real configs — then hands the recorded arguments to the
+**real** binary and requires that it does not reject them as a usage error.
+
+```bash
+./test-plugin-args.sh      # no Unraid, no root, no network
+```
+
+Nothing checked this before: the `.plg` was validated as XML and its shell blocks
+parse, but neither says anything about *which flags come out*. It covers
+coordinator mode (including a config with no `MODE` line, as upgrades have),
+both direct-mode shapes, that a leftover `--server` or invite is dropped rather
+than passed into a combination the daemon refuses, and that a misconfiguration
+refuses to start instead of launching a daemon that cannot work.
+
 ## Direct-mode test (no server at all)
 
 `test-direct.sh` validates [direct mode](../docs/SETUP.md#direct-mode-no-server-at-all)
