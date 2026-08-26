@@ -45,9 +45,20 @@ func NewQUIC(conn *net.UDPConn, priv ed25519.PrivateKey, partnerPub ed25519.Publ
 	if keepAlive < 5*time.Second {
 		keepAlive = 5 * time.Second
 	}
+	tr := &quic.Transport{Conn: conn}
+	// QUIC Retry for every unvalidated source (RFC 9000 §8.1.2), exactly as on the
+	// control plane (see ListenControl). Without it quic-go builds a connection —
+	// and runs the whole TLS handshake, key exchange and signature included — for
+	// any well-formed Initial, INCLUDING a spoofed one, and answers a forged
+	// source address while doing it. The pinned partner key means none of that can
+	// ever reach the tunnel, so this is purely about what a stranger can make this
+	// process spend: with Retry an unvalidated source gets a small stateless token
+	// and nothing else. It costs one extra round trip on bring-up, which for a
+	// tunnel dialled once per reconnect is nothing.
+	tr.VerifySourceAddress = func(net.Addr) bool { return true }
 	return &QUICTransport{
 		conn:    conn,
-		tr:      &quic.Transport{Conn: conn},
+		tr:      tr,
 		tlsConf: tlsConfig(priv, partnerPub),
 		qconf: &quic.Config{
 			MaxIdleTimeout:       idleTimeout,
@@ -59,9 +70,15 @@ func NewQUIC(conn *net.UDPConn, priv ed25519.PrivateKey, partnerPub ed25519.Publ
 }
 
 // Listen takes the QUIC server role: it accepts the next session a peer dials.
-// The listener is created once and reused, so a buddy can Accept across several
+// The listener survives a FAILED attempt, so a buddy can Accept across several
 // fallback attempts on the same socket (direct, then via a relay) without
-// re-binding it.
+// re-binding it — and is torn down as soon as one attempt succeeds.
+//
+// Closing it on success matters: a buddy has exactly ONE partner, so once the
+// session is up the listener has no work left, and leaving it open would keep a
+// port answering strangers' Initials for the whole lifetime of the tunnel (which
+// on a long transfer is hours, not the seconds of bring-up). Retry above bounds
+// what each such Initial costs; this removes the window instead of pricing it.
 func (t *QUICTransport) Listen(ctx context.Context) (Session, error) {
 	if t.ln == nil {
 		ln, err := t.tr.Listen(t.tlsConf, t.qconf)
@@ -72,8 +89,20 @@ func (t *QUICTransport) Listen(ctx context.Context) (Session, error) {
 	}
 	qc, err := t.ln.Accept(ctx)
 	if err != nil {
-		return nil, err
+		return nil, err // keep the listener for the next path in the fallback chain
 	}
+	// quic-go documents that Listener.Close leaves already-accepted connections
+	// untouched (it only stops accepting and refuses handshakes still in flight),
+	// so this cannot disturb the session we are about to return. It runs in the
+	// background because Close waits for those in-flight handshakes to terminate —
+	// under a flood that wait is bounded by HandshakeIdleTimeout, and blocking a
+	// successful bring-up for up to 10s is exactly the delay an attacker would be
+	// aiming for. Clearing t.ln lets a later attempt build a fresh listener: the
+	// transport allows that, since closing a listener releases it (Transport.
+	// closeServer), and an open connection keeps the socket's read loop alive.
+	ln := t.ln
+	t.ln = nil
+	go func() { _ = ln.Close() }()
 	return &quicSession{conn: qc}, nil
 }
 
