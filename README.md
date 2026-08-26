@@ -211,6 +211,16 @@ revocation, BuddyDNS, lazy tunnels and optional WireGuard exposure. Identity
 keys and trust data are kept in the Unraid appdata directory with restrictive
 permissions rather than on the FAT-formatted flash drive.
 
+A **Mode** selector picks how the two of you find each other:
+
+- **Coordinator** (default) — a handshake server introduces you, and the plugin
+  needs nothing from your router.
+- **Direct** — [direct mode](docs/SETUP.md#direct-mode-no-server-at-all) with no
+  server at all: fill in your buddy's address and pin their key. One of you must
+  be reachable, so this is the one path that does need a forwarded UDP port. The
+  buddy key is **required** here — without a server there is nothing else that
+  authenticates your buddy, and the service refuses to start without it.
+
 The plugin keeps the same small model as the command-line tool: it manages the
 encrypted tunnel but does not become a backup or file-sharing service. You
 choose and secure the software that runs through it. Installation, first
