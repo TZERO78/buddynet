@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (Security/DoS) — the buddy's own QUIC listener had no source validation
+
+The **control** plane validates every source address with QUIC Retry
+(`VerifySourceAddress`, added in v4.1.1) and pins that in a test. A buddy's
+**data** plane — the tunnel socket itself — did neither, so the same weakness sat
+one layer over: quic-go built a connection and ran a full TLS handshake (key
+exchange plus signature, ~10s of state) for any well-formed Initial, **including a
+spoofed one**, and answered forged source addresses while doing it. The pinned
+partner key means none of that could ever reach the tunnel — this is a
+CPU/memory cost an outsider could impose, not a way in.
+
+Two changes, both in `internal/tunnel/quic.go`:
+
+- **QUIC Retry for every unvalidated source**, verbatim the control plane's rule
+  (no threshold to tune wrong). An unvalidated source now gets a small stateless
+  token and nothing else. Costs one extra round trip on bring-up.
+- **The listener is closed once a session is accepted.** A buddy has exactly one
+  partner, so after bring-up the listener has no work left — and leaving it open
+  kept a port answering strangers for the *whole life of the tunnel*, hours on a
+  long transfer, not the seconds of connection setup. It survives a *failed*
+  attempt, because the fallback chain (direct, then relay) listens again on the
+  same socket and re-binding would lose the punched NAT mapping.
+
+Verified in `lab/test-cgnat.sh`: cone NAT still comes up `via="direct P2P"` and
+symmetric CGNAT still falls back to the relay, i.e. Retry breaks neither the hole
+punch nor the relay splice. The new tests in
+`internal/tunnel/dataplane_perimeter_test.go` fail against the previous code.
+
 ### Fixed (Lab) — every lab image build was broken
 
 v5.3.2's `.dockerignore` (`1fc21b5`) excluded `lab` wholesale, but the lab images
