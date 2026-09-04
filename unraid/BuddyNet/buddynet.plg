@@ -461,8 +461,8 @@ socket.
 </div>
 
 <div style="margin-bottom:1em">
-<b>Service:</b> <?=$running==='running'?'🟢 running':'⚪ '.($running?:'unknown')?>
-&nbsp;|&nbsp; <b>Buddy:</b> <?=$online?>
+<b>Service:</b> <?=$running==='running'?'🟢 running':'⚪ '.htmlspecialchars($running?:'unknown')?>
+&nbsp;|&nbsp; <b>Buddy:</b> <?=htmlspecialchars($online)?>
 &nbsp; <a href="<?=htmlspecialchars($_SERVER['REQUEST_URI'])?>" title="reload status">↻</a>
 <?php if($ident): ?>
 <br><span style="color:#777">Your identity (give your buddy to pin):</span> <code style="font-size:.85em"><?=htmlspecialchars($ident)?></code>

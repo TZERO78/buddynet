@@ -7,32 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added — direct mode is available in the Unraid plugin
+### Security — audit 2026-09-04: fewer answers for strangers, stricter roster on the buddy
 
-A **Mode** selector on the plugin's settings page chooses between *Coordinator*
-(unchanged, and the default) and *Direct*. Until now direct mode was unreachable
-from the plugin by any route, not merely unexposed: `rc.buddynet` built the
-argument list with `--server`/`--server-key` hardcoded and had no field for
-anything else.
+Findings of a defensive audit of the public-facing roles, each with an A/B test
+that fails on the previous code. Nothing on the wire changes for a real buddy;
+protocol version stays 8. Only findings inside BuddyNet's threat model are
+listed here as security: a stranger on the public ports, or a party that holds
+a key (the handshake server a buddy pins). Whoever already has root on a host —
+or the Unraid webGUI, which is root — is a problem BuddyNet does not claim to
+solve; changes in that area are filed under hygiene below.
 
-A config written before this field exists has no `MODE` line and falls back to
-coordinator, so existing installs keep behaving exactly as they did.
+- **Uniform close on the control plane.** Every refusal the handshake server
+  issues (source not allowed, table full, malformed REGISTER, forged key,
+  version mismatch, unopenable token) used to close the QUIC connection with a
+  distinct reason phrase — readable by anyone who completed the TLS handshake,
+  and "server at capacity" told a flooder it was winning. All closes, the
+  ordinary goodbye included, now carry application error 0 and an empty reason.
+  The operator keeps the detail: each refusal is still counted and logged
+  locally. The one diagnostic a client acts on, the version reply, is a signed
+  body and is unchanged. `TestControlCloseReasonIsUniform`.
+- **No product name in the certificate.** The self-signed identity certificate
+  carried `CN=buddynet`; it is handed to whoever completes a handshake with the
+  right ALPN, so it was a free banner. The Subject is now empty. Pinning
+  compares public-key bytes only, so existing pins are unaffected.
+  `TestCertificateCarriesNoBanner`.
+- **Buddy-side roster checks.** The buddy verified the PEER_LIST's signature and
+  its partner's key and virtual IP, but took every other field on trust: the
+  partner `id` (logged verbatim in CONNECTED/DISCONNECTED lines — a newline in it
+  forged audit lines in the buddy's own log, the hole the server closed on its
+  side in v5.2), the `.buddy` name (TOFU-pinned into `peers.json`, served by
+  BuddyDNS and printed by `peers list` with no `ValidName` check), and the
+  candidate list (unbounded, and any string — each entry is hole-punched
+  ~5×/second, so a hostile server could aim a buddy at addresses of its
+  choosing, hostnames included). A roster entry now has to pass the same field
+  rules the server applies before signing, plus a candidate ceiling equal to the
+  server's own and a literal-unicast-IP:port rule; a failure refuses the
+  registration with a `SECURITY: event=roster-invalid` line. Cached entries get
+  the same check before they drive a punch. Only a hostile or buggy server ever
+  trips this. `TestCheckRosterPeer`, `TestBuddyRegisterRefusesInvalidSignedRoster`.
 
-Three cases the daemon would exit 2 on are handled in the script instead, because
-a message naming the *field* beats one naming the flag: the buddy key is required
-in direct mode (without a server the pinned key is the only authentication, so
-the service refuses to start rather than come up unauthenticated); a leftover
-`--server` is dropped; and a leftover invite is dropped and logged — easy to miss,
-since `BUDDYNET_JOIN` is the environment form of `--join`, which `--direct`
-refuses.
+### Changed — hygiene from the same audit (no security claim)
 
-New `lab/test-plugin-args.sh` closes a gap nothing covered before: the `.plg` was
-validated as XML and its shell blocks parsed, but neither said *which flags come
-out*. It extracts `rc.buddynet`, drives `start` with real configs against a
-recording stub, and hands the resulting argv to the real binary, requiring that it
-is not rejected as a usage error. Needs no Unraid, no root and no network.
+Consistency fixes that need a foothold on the host to matter at all, kept
+because each is a few lines and removes an inconsistency with the rest of the
+code or the docs.
 
-No new binary — the plugin stays pinned to v5.4.0 (ENTITY version 2026.08.26.2).
+- `peers migrate` writes its `.bak` through `atomicfile` like every other state
+  file, instead of `os.WriteFile` (which follows an existing symlink and keeps an
+  existing mode). `TestPeersMigrateBackupIsNotWrittenThroughAPlantedFile`.
+- Unraid plugin: the two status values on the settings page are HTML-escaped
+  like every other value on the page; the dashboard already was. No binary
+  change.
+- Compose: both services carry the resource ceilings the systemd units had all
+  along (`mem_limit`, `pids_limit`, `nofile`, `core: 0`) — the nftables header
+  claimed the container had them. `.env.example` names the two variables the
+  file refuses to start without.
 
 ### Changed (Hardening) — a relay id now has exactly one valid spelling
 

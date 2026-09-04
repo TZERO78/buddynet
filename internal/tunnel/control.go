@@ -194,7 +194,7 @@ func (c *ControlClient) Roundtrip(ctx context.Context, req []byte) ([]byte, erro
 // UDP socket open, so the caller can reuse it for hole punching and the peer
 // tunnel.
 func (c *ControlClient) Close() error {
-	c.conn.CloseWithError(0, "bye")
+	closeSilently(c.conn)
 	return c.tr.Close()
 }
 
@@ -229,11 +229,30 @@ func (r *ControlRequest) Reply(b []byte) error {
 // merely unauthorized but structurally abusive — e.g. a REGISTER claiming a
 // public key other than the one the TLS handshake authenticated — so the peer
 // does not get to retry on the same connection.
+//
+// reason is for the CALLER's own bookkeeping (it reads well at the call site and
+// in a debug log); it is deliberately NOT put on the wire. Every refusal closes
+// with the same code and an empty reason phrase — see closeSilently.
 func (r *ControlRequest) Drop(reason string) {
+	_ = reason
 	r.st.CancelRead(0)
 	r.st.Close()
-	r.qc.CloseWithError(0, reason)
+	closeSilently(r.qc)
 }
+
+// closeSilently closes a control connection with application error 0 and an
+// EMPTY reason phrase. This is the ONE way any control connection is closed,
+// whatever the cause: refused source, table full, malformed request, forged key,
+// version mismatch, or an ordinary goodbye.
+//
+// Why uniform: the reason phrase travels to the peer in CONNECTION_CLOSE. With a
+// distinct phrase per refusal, a client that completed the TLS handshake could
+// read off WHICH check it failed ("server at capacity" also tells a flooder it is
+// winning) and, from the wording, which software it is talking to. None of it is
+// needed by a real buddy — the only diagnostic a client acts on is the version
+// reply (replyIncompatible), which is a signed body, not a close reason. The
+// operator keeps the detail: the server logs and counts each refusal locally.
+func closeSilently(qc *quic.Conn) { qc.CloseWithError(0, "") }
 
 // ControlServer is the handshake server's QUIC control listener.
 type ControlServer struct {
@@ -428,13 +447,13 @@ func (s *ControlServer) acceptConns() {
 		// rather than left to idle out.
 		if !s.sourceAllowed(qc.RemoteAddr()) {
 			s.noteRejection()
-			qc.CloseWithError(0, "source not allowed")
+			closeSilently(qc) // refused; the reason stays local (noteRejection)
 			continue
 		}
 		release, ok := s.admit(qc.RemoteAddr())
 		if !ok {
 			s.noteRejection()
-			qc.CloseWithError(0, "server at capacity") // shed load instead of queuing unboundedly
+			closeSilently(qc) // shed load instead of queuing unboundedly; reason stays local
 			continue
 		}
 		go func() {
@@ -452,7 +471,7 @@ func (s *ControlServer) acceptStreams(qc *quic.Conn) {
 	// Closing here is what makes the slot accounting honest: the release closure
 	// runs when this returns, so the connection must actually be gone by then —
 	// including on the first-stream timeout below.
-	defer qc.CloseWithError(0, "")
+	defer closeSilently(qc)
 
 	// The authenticated client identity is a property of the CONNECTION, so it is
 	// extracted once here and carried on every request from it. ClientAuth is
@@ -461,7 +480,7 @@ func (s *ControlServer) acceptStreams(qc *quic.Conn) {
 	// rather than serving requests with an unknown identity.
 	clientKey, err := clientKeyOf(qc)
 	if err != nil {
-		qc.CloseWithError(0, "client identity unavailable")
+		closeSilently(qc) // no identity: refused like every other refusal
 		return
 	}
 	// A real buddy registers immediately after connecting. Bound the wait for the
