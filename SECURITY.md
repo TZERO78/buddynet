@@ -571,6 +571,36 @@ kind of load a distributed volumetric attacker can produce against anything, at
 which point it is an infrastructure problem rather than a BuddyNet one.
 
 
+### 5.6 What a stranger can tell — the residual, on purpose
+
+A public UDP/QUIC service can be recognised **as such**. Any well-formed QUIC
+Initial sent at the handshake port draws a Retry token (that is the
+anti-spoofing boundary of §5.5 doing its job); a bind datagram in the relay's
+own format draws a 23-byte challenge. Someone who has read this code can go
+further on the handshake port — offer the right ALPN, present any Ed25519
+client certificate, and receive the server's identity certificate and the
+version reply. Since the 2026-09-04 audit the certificate names no product and
+every refusal closes the connection identically, but the shape of the exchange
+still says "a BuddyNet handshake server", and a passive on-path observer sees
+the ALPN in every real buddy's Initial regardless.
+
+That is deliberately where it stops. **Recognising the service is not access
+to it and bypasses no authentication:** the stranger holds no approved key, so
+in approval mode no `REGISTER` of theirs is ever answered with a partner; in
+open mode they still need a pairing token, and even a token buys only what §5.4
+describes — never entry into a tunnel, whose partner key each buddy pins itself.
+The properties BuddyNet actually claims — authentic peers, end-to-end-encrypted
+tunnels, no open relay, no reflection, bounded resources — hold with or without
+that recognisability, and every one of them is enforced by a key check or a cap
+that a scanner cannot influence.
+
+Hiding the service from an unauthorised scanner entirely ("no reply byte at
+all") was designed and **deliberately not built** (2026-09-04): it would add a
+pre-QUIC proof, a mode switch and a migration for a gain that is fingerprint
+reduction only — and it would still not hide the service from anyone on the
+path. If that ever changes, it is a new feature with its own plan, not a fix to
+a weakness.
+
 ## 6. The data planes
 
 ### 6.1 QUIC transport (default)
