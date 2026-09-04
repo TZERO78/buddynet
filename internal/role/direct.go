@@ -83,6 +83,13 @@ var errDirectNoPath = errors.New("--direct needs either --peer-endpoint (to dial
 // so a misconfiguration is a startup error rather than a reconnect loop that
 // never succeeds.
 func validateDirect(cfg BuddyConfig) error {
+	// --peer-relay is checked in BOTH modes: since the relay endpoint comes from
+	// local trust (relaytrust.go), the flag is the one way to name a relay on a
+	// host other than the server's, and a malformed value should fail at startup
+	// rather than on the first fallback.
+	if err := validateHostPort("--peer-relay", cfg.PeerRelay); err != nil {
+		return err
+	}
 	if !cfg.Direct {
 		return nil
 	}
@@ -92,13 +99,15 @@ func validateDirect(cfg BuddyConfig) error {
 	if cfg.PeerEndpoint == "" && cfg.ListenPort == 0 {
 		return errDirectNoPath
 	}
-	// Fail on a malformed address here rather than at every reconnect. The name
-	// is NOT resolved yet — a dynamic-DNS record may legitimately not exist at
-	// startup, and resolution happens per attempt.
-	for _, a := range []struct{ what, addr string }{
-		{"--peer-endpoint", cfg.PeerEndpoint},
-		{"--peer-relay", cfg.PeerRelay},
-	} {
+	return validateHostPort("--peer-endpoint", cfg.PeerEndpoint)
+}
+
+// validateHostPort fails on a malformed address at startup rather than at every
+// reconnect. The name is NOT resolved — a dynamic-DNS record may legitimately
+// not exist at startup, and resolution happens per attempt. Empty is fine (the
+// flag is optional).
+func validateHostPort(what, addr string) error {
+	for _, a := range []struct{ what, addr string }{{what, addr}} {
 		if a.addr == "" {
 			continue
 		}

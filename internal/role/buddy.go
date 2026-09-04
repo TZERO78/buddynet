@@ -190,6 +190,9 @@ type node struct {
 	serverPub ed25519.PublicKey  // pinned handshake-server key
 	trust     *trustPolicy       // partner trust decisions (pin / TOFU / insecure)
 	reg       *peer.Registry     // offline peer cache (peers.json)
+	// relayLatch throttles the SECURITY line for an untrusted relay offer to
+	// once per distinct value for the life of the process (see relaytrust.go).
+	relayLatch relayOfferLatch
 }
 
 // PunchDurMax caps --punch. A relay ticket is issued for at most ticket.MaxTTL

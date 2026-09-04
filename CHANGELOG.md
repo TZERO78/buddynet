@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — the relay endpoint comes from local trust, not from the roster
+
+Follow-up to the 2026-09-04 audit (PR #191), for the same attacker: a
+compromised handshake server that still signs correctly. The `PEER_LIST` names
+a relay endpoint, and until now the buddy resolved that host and sent relay
+binds to it — small packets, bounded window, but a target the server chose.
+`checkRosterPeer` only bounded its length; a syntax check cannot fix this.
+
+Now a buddy binds only to a relay it trusts locally: `--peer-relay HOST:PORT`
+(valid in both modes from here on, it used to be direct-mode only), or else the
+server's offer **if and only if its host is literally the host in `--server`** —
+the standard one-VPS layout, and the deliberate boundary: the server may pick a
+port on a host the operator already chose, never a new host. What is trusted is
+the host, not the full `HOST:PORT`. Hosts are compared as strings (case-folded,
+IPv6 literals normalised) and never resolved. Any other offer is skipped, the
+direct path is unaffected, and the buddy logs it once per value as
+`SECURITY: event=relay-offer-untrusted` naming the flag that would allow it.
+The relay ticket is unchanged (it binds to a relay id, not an endpoint). No
+protocol change, no plugin change.
+
+**Operators with the relay on a different host than the handshake server** must
+add `--peer-relay` on each buddy, or the relay fallback silently stops being
+used (the log line says so). `deployments/`, the Unraid plugin and every lab
+co-locate the two, so nothing there changes.
+
+Tests, each failing on the previous code: `TestTrustedRelay`,
+`TestRelayOfferLatchLogsOncePerValue`, `TestRelayOfferOnForeignHostGetsNoPackets`
+(an attacker-addressed offer receives 0 bytes; it received 722 before),
+`TestPeerRelayFlagIsUsedInsteadOfOffer`, `TestRelayOfferOnServerHostIsUsed`.
+`lab/test-wg-mitm.sh` gained a phase 0 proving the foreign offer is refused and
+now opts in with `--peer-relay` for its MITM phase (the hostile relay lives on
+another host) — the scenario becomes "a configured relay is hostile, and nothing
+rests on it".
+
 ### Security — audit 2026-09-04: fewer answers for strangers, stricter roster on the buddy
 
 Findings of a defensive audit of the public-facing roles, each with an A/B test

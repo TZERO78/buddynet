@@ -151,6 +151,14 @@ When `--relay-endpoint` is set, every `PEER_LIST` sent to buddies includes the
 relay address. Buddies try direct hole-punch first; if that fails within
 `--punch` (default 2 s, max 60 s), they fall back to the relay automatically.
 
+**The advertised relay is used only if it is on the same host as `--server`**
+(the host string the buddy was started with, compared literally — no DNS). That
+is the layout above, so nothing to do. A relay on a *different* host is skipped
+and the buddy logs `SECURITY: event=relay-offer-untrusted`; to use one, name it
+on the buddy with `--peer-relay HOST:PORT`, which always wins over the offer.
+The reason is in SECURITY.md §6.4: the server may suggest a port on a host you
+already chose, never a new host.
+
 ### Standalone relay (separated — recommended when the relay is exposed)
 
 ```bash
@@ -399,6 +407,10 @@ it was configured by you:
 | 1 | Configured endpoint | `direct (configured endpoint)` | always (it is the mode) |
 | 2 | Configured relay | `configured relay <host:port>` | you set `--peer-relay` |
 
+`--peer-relay` is not direct-mode only: with a handshake server it also names the
+relay to use, and then the server's advertised one is ignored (see the coordinator
+section above).
+
 Two symptoms are worth knowing by name:
 
 - **`QUIC control dial failed`** — you are *not* in direct mode. That message
@@ -442,6 +454,10 @@ produce exactly the error at the top of this section:
 - **Without `--relay-endpoint`, buddies are never told the relay exists.** A
   running relay that is not advertised is invisible — `PEER_LIST` carries its
   address only when that flag is set, so the chain stays one entry long.
+- **The relay is on another host than `--server`.** The buddy log shows
+  `SECURITY: event=relay-offer-untrusted relay="..."` and the chain stays one
+  entry long. Either co-locate the relay with the handshake server, or pass the
+  relay to every buddy as `--peer-relay HOST:PORT`.
 - **A relay refuses to start without an authorization policy** (since v5.0.0). If
   it isn't running at all, its log says why.
 

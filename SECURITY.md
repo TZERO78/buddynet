@@ -722,6 +722,30 @@ never leaves the buddy. A ticket authorises
 but nothing new can be bound with an expired one, including a re-bind after an
 address change.
 
+**Which relay a buddy binds to is decided locally, not by the server.** The
+`PEER_LIST` carries the relay endpoint the server advertises (`--relay-endpoint`),
+and it is signed — but a signature proves who chose the value, not that the
+value may be a target. A compromised server that still signs correctly is inside
+this model, and it must not be able to aim a buddy at an address of its choosing,
+however small and short-lived the relay binds are. So the buddy takes the relay
+endpoint from **local trust only**:
+
+- `--peer-relay HOST:PORT`, set by the operator, in either mode — the only way
+  to use a relay on a host other than the server's; or
+- the server's offer, **only if its host is literally the host in `--server`**
+  (compared as a string, case-folded, never resolved — resolving would let DNS
+  decide what is trusted). That is the standard deployment, one VPS running both
+  roles. Be precise about what is trusted here: the **host**, not the full
+  `HOST:PORT`. The operator chose that host and pinned its key; the port is the
+  server's to pick, on its own machine.
+
+An offer on any other host is skipped — the direct path and the cache are
+unaffected, only the relayed path is absent — and logged once per distinct value
+as `SECURITY: event=relay-offer-untrusted`, naming the flag that would allow it.
+The relay ticket is untouched: it binds a session to a relay **id**, not to an
+endpoint. (Before this rule, added 2026-09-04, the buddy resolved and bound to
+whatever the roster named.)
+
 **Combined roles cost blast radius.** `--role=handshake,relay` runs both in ONE
 process, so the server's signing key sits in the memory that also parses relay
 packets: code execution reached through the relay could then **sign tickets**,
