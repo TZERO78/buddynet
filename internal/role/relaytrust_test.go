@@ -142,10 +142,17 @@ type byteSink struct {
 	first chan []byte
 }
 
-func newByteSink(t *testing.T) *byteSink {
+// newByteSink listens on ip. The tests use ::1 for the attacker and 127.0.0.1
+// for the server: two loopback hosts with different literal spellings, which is
+// what the same-host rule compares — no DNS involved (on CI "localhost" resolves
+// to ::1 first and the buddy's dial timeout there outlasts the test).
+func newByteSink(t *testing.T, ip net.IP) *byteSink {
 	t.Helper()
-	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: ip})
 	if err != nil {
+		if ip.To4() == nil {
+			t.Skipf("no IPv6 loopback on this host: %v", err)
+		}
 		t.Fatal(err)
 	}
 	s := &byteSink{conn: c, bytes: make(chan int, 1024), first: make(chan []byte, 1)}
@@ -216,11 +223,11 @@ func TestRelayOfferOnForeignHostGetsNoPackets(t *testing.T) {
 	log.SetOutput(&buf)
 	defer log.SetOutput(old)
 
-	attacker := newByteSink(t)
-	srv, priv := relayTestServer(t, attacker.addr()) // "127.0.0.1:P"
-	// --server is written as "localhost:P": a different host STRING for the same
-	// loopback, which is exactly the comparison the rule makes (no resolution).
-	runBuddyAgainstGhost(t, "localhost:"+portOf(t, srv.String()), srv, priv, "")
+	attacker := newByteSink(t, net.IPv6loopback) // "[::1]:P"
+	srv, priv := relayTestServer(t, attacker.addr())
+	// --server is "127.0.0.1:P": another host string than the offer, which is
+	// exactly the comparison the rule makes.
+	runBuddyAgainstGhost(t, srv.String(), srv, priv, "")
 
 	if n := attacker.received(4 * time.Second); n != 0 {
 		t.Fatalf("attacker-controlled relay received %d bytes; a roster offer must never be a target", n)
@@ -236,10 +243,10 @@ func TestPeerRelayFlagIsUsedInsteadOfOffer(t *testing.T) {
 	if testing.Short() {
 		t.Skip("network integration test")
 	}
-	attacker := newByteSink(t)
-	mine := newByteSink(t)
+	attacker := newByteSink(t, net.IPv6loopback)
+	mine := newByteSink(t, net.IPv4(127, 0, 0, 1))
 	srv, priv := relayTestServer(t, attacker.addr())
-	runBuddyAgainstGhost(t, "localhost:"+portOf(t, srv.String()), srv, priv, mine.addr())
+	runBuddyAgainstGhost(t, srv.String(), srv, priv, mine.addr())
 
 	select {
 	case pkt := <-mine.first:
@@ -260,7 +267,7 @@ func TestRelayOfferOnServerHostIsUsed(t *testing.T) {
 	if testing.Short() {
 		t.Skip("network integration test")
 	}
-	rly := newByteSink(t) // 127.0.0.1:P2, same host as the server's 127.0.0.1:P1
+	rly := newByteSink(t, net.IPv4(127, 0, 0, 1)) // 127.0.0.1:P2, same host as the server's 127.0.0.1:P1
 	srv, priv := relayTestServer(t, rly.addr())
 	runBuddyAgainstGhost(t, srv.String(), srv, priv, "")
 
@@ -272,15 +279,6 @@ func TestRelayOfferOnServerHostIsUsed(t *testing.T) {
 	case <-time.After(6 * time.Second):
 		t.Fatal("same-host relay offer was not used")
 	}
-}
-
-func portOf(t *testing.T, hostport string) string {
-	t.Helper()
-	_, port, err := net.SplitHostPort(hostport)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return port
 }
 
 // syncBuf is a log sink safe to read while the buddy goroutine writes to it.
