@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.5.0] — 2026-09-04
+
+A hardening release from the 2026-09-04 audit, sorted by who the attacker is: a
+stranger on the public ports gets uniform refusals and no product name; a
+compromised-but-signing handshake server can no longer steer a buddy — neither
+through unchecked roster fields nor by naming the relay it should bind to. What
+a stranger can still learn (that a QUIC service answers) is written down as the
+deliberate residual in SECURITY.md §5.6 rather than engineered away. No
+protocol change; buddies and servers of v5.4.0 interoperate.
+
+**Read before upgrading if your relay runs on a different host than your
+handshake server:** buddies now use such a relay only when it is named on the
+buddy with `--peer-relay HOST:PORT` — see the first entry below.
+
 ### Security — the relay endpoint comes from local trust, not from the roster
 
 Follow-up to the 2026-09-04 audit (PR #191), for the same attacker: a
@@ -1978,7 +1992,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.4.0...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.5.0...HEAD
+[v5.5.0]: https://github.com/TZERO78/buddynet/compare/v5.4.0...v5.5.0
 [v5.4.0]: https://github.com/TZERO78/buddynet/compare/v5.3.3...v5.4.0
 [v5.3.3]: https://github.com/TZERO78/buddynet/compare/v5.3.2...v5.3.3
 [v5.3.2]: https://github.com/TZERO78/buddynet/compare/v5.3.1...v5.3.2
