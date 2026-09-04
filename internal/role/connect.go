@@ -170,7 +170,13 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 	if err != nil {
 		return err
 	}
-	chain := relay.Chain(partner, nil, partner.Relay, cached)
+	// The relay endpoint comes from local trust, never from the roster as such:
+	// --peer-relay, or the server's offer only if it sits on the --server host.
+	// See relaytrust.go. partner.Relay may also be a cached value (peers.json),
+	// which was filled from rosters and gets the same treatment.
+	offer := trustedRelay(cfg.PeerRelay, cfg.Server, partner.Relay)
+	nd.relayLatch.noteSkipped(offer)
+	chain := relay.Chain(partner, nil, offer.endpoint, cached)
 	if cfg.Direct {
 		chain = relay.DirectChain(cfg.PeerEndpoint, cfg.PeerRelay)
 	}

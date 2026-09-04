@@ -15,9 +15,13 @@
 #   ns-b    10.50.0.30  buddy B (--wireguard, TOFU: no --peer-key) — DROPs A<->B
 # The direct A<->B path is firewalled, so both fall back to the advertised relay.
 #
-# Two phases:
-#   MITM   — relay endpoint = wg-mitm  → assert the two SAS DIFFER (attack caught).
-#   HONEST — relay endpoint = real relay → assert the two SAS MATCH  (clean path).
+# Three phases:
+#   OFFER  — server advertises wg-mitm (a FOREIGN host) and the buddies carry no
+#            --peer-relay → assert both log relay-offer-untrusted and the attacker
+#            sees no bind (the relay endpoint comes from local trust only).
+#   MITM   — same, but the buddies opt in with --peer-relay → assert the two SAS
+#            DIFFER (a hostile relay, even a configured one, is caught).
+#   HONEST — relay endpoint = real relay on the server host → SAS MATCH (clean).
 #
 # Buddies must be "interactive" for the first-contact SAS (secret.Interactive()
 # needs a TTY), so each runs under `script` which allocates a pty; the SAS the
@@ -87,11 +91,29 @@ sudo ip netns exec ns-b iptables -A INPUT  -s 10.50.0.20 -j DROP
 
 # run_buddy_tofu: TOFU (no --peer-key), interactive via a pty (script) so the
 # first-contact SAS is computed and printed; we scrape it, then kill the buddy.
-run_buddy_tofu() { # $1 ns, $2 keyfile, $3 logfile, $4 store-suffix
+run_buddy_tofu() { # $1 ns, $2 keyfile, $3 logfile, $4 store-suffix, [$5 extra flags]
 	sudo ip netns exec "ns-$1" script -qec \
 		"$BN --role=buddy --join $TOKEN --server 10.50.0.10:51820 \
 		 --server-key $SRVPUB --key $2 --known-peers $D/$4.kp --peers $D/$4.pj \
-		 --sas-timeout 25s --wireguard" "$3" </dev/null >/dev/null 2>&1 &
+		 --sas-timeout 25s --wireguard ${5:-}" "$3" </dev/null >/dev/null 2>&1 &
+	PIDS="$PIDS $!"
+}
+
+# The relay endpoint a buddy binds to comes from LOCAL trust only (relaytrust.go):
+# --peer-relay, or a server offer on the --server host. The attacker's relay in
+# phase 1 lives on ANOTHER host (10.50.0.40 vs 10.50.0.10), so phase 0 first
+# proves the buddies refuse the bare offer, and phase 1 then opts in with
+# --peer-relay — the scenario becomes "a relay the operator configured is
+# hostile, and nothing rests on it", which is the claim the SAS binding makes.
+MITM_RELAY="--peer-relay 10.50.0.40:51821"
+
+# run_buddy_pinned: phase 0 needs no SAS (nothing comes up), so no pty — the
+# buddies pin each other with --peer-key and log straight to a file. (`script`
+# buffers its typescript until exit, which a kill can lose.)
+run_buddy_pinned() { # $1 ns, $2 keyfile, $3 logfile, $4 store-suffix, $5 peer key
+	sudo ip netns exec "ns-$1" "$BN" --role=buddy --join "$TOKEN" --server 10.50.0.10:51820 \
+		--server-key "$SRVPUB" --key "$2" --known-peers "$D/$4.kp" --peers "$D/$4.pj" \
+		--peer-key "$5" --no-interactive --wireguard >"$3" 2>&1 &
 	PIDS="$PIDS $!"
 }
 
@@ -122,13 +144,39 @@ start_server() { # $1 roles, $2 relay-endpoint, [relay-listen]
 FAIL=0
 
 echo
-echo "########## PHASE 1: MITM (relay endpoint = wg-mitm attacker) ##########"
+echo "########## PHASE 0: server offers a relay on a FOREIGN host, no --peer-relay ##########"
+sudo ip netns exec ns-mitm "$MITM" -listen 0.0.0.0:51821 >"$D/mitm0.log" 2>&1 &
+PIDS="$PIDS $!"
+sleep 1
+start_server handshake 10.50.0.40:51821
+run_buddy_pinned a "$D/a.key" "$D/a.offer.log" a.offer "$BPUB"
+run_buddy_pinned b "$D/b.key" "$D/b.offer.log" b.offer "$APUB"
+for _ in $(seq 1 20); do
+	grep -aq 'event=relay-offer-untrusted' "$D/a.offer.log" 2>/dev/null && \
+	grep -aq 'event=relay-offer-untrusted' "$D/b.offer.log" 2>/dev/null && break; sleep 1
+done
+sleep 3 # give a bind every chance to reach the attacker if the offer were trusted
+if grep -aq 'event=relay-offer-untrusted' "$D/a.offer.log" && grep -aq 'event=relay-offer-untrusted' "$D/b.offer.log"; then
+	echo "  [PASS] both buddies logged SECURITY: relay-offer-untrusted for 10.50.0.40:51821"
+else
+	echo "  [FAIL] expected relay-offer-untrusted in both buddy logs"; FAIL=1
+fi
+if grep -aq 'leg bound' "$D/mitm0.log"; then
+	echo "  [FAIL] the attacker's relay saw a bind although the offer was on a foreign host"; FAIL=1
+else
+	echo "  [PASS] attacker's relay saw NO bind (offer skipped, direct path exhausted, no relayed path)"
+fi
+kill_actors
+sleep 2
+
+echo
+echo "########## PHASE 1: MITM (relay endpoint = wg-mitm attacker, opted in via --peer-relay) ##########"
 sudo ip netns exec ns-mitm "$MITM" -listen 0.0.0.0:51821 >"$D/mitm.log" 2>&1 &
 PIDS="$PIDS $!"
 sleep 1
 start_server handshake 10.50.0.40:51821
-run_buddy_tofu a "$D/a.key" "$D/a.mitm.log" a.mitm
-run_buddy_tofu b "$D/b.key" "$D/b.mitm.log" b.mitm
+run_buddy_tofu a "$D/a.key" "$D/a.mitm.log" a.mitm "$MITM_RELAY"
+run_buddy_tofu b "$D/b.key" "$D/b.mitm.log" b.mitm "$MITM_RELAY"
 SAS_A_M=$(scrape_sas "$D/a.mitm.log")
 SAS_B_M=$(scrape_sas "$D/b.mitm.log")
 echo "  buddy-a SAS = ${SAS_A_M:-<none>}"
