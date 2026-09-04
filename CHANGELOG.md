@@ -11,7 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Findings of a defensive audit of the public-facing roles, each with an A/B test
 that fails on the previous code. Nothing on the wire changes for a real buddy;
-protocol version stays 8.
+protocol version stays 8. Only findings inside BuddyNet's threat model are
+listed here as security: a stranger on the public ports, or a party that holds
+a key (the handshake server a buddy pins). Whoever already has root on a host —
+or the Unraid webGUI, which is root — is a problem BuddyNet does not claim to
+solve; changes in that area are filed under hygiene below.
 
 - **Uniform close on the control plane.** Every refusal the handshake server
   issues (source not allowed, table full, malformed REGISTER, forged key,
@@ -41,44 +45,23 @@ protocol version stays 8.
   registration with a `SECURITY: event=roster-invalid` line. Cached entries get
   the same check before they drive a punch. Only a hostile or buggy server ever
   trips this. `TestCheckRosterPeer`, `TestBuddyRegisterRefusesInvalidSignedRoster`.
-- **`peers migrate` backup written atomically.** The `.bak` was the one state
-  write that bypassed `atomicfile`: `os.WriteFile` followed a pre-planted symlink
-  and left an existing file's mode alone, and the backup carries the legacy
-  manifest's bootstrap tokens. `TestPeersMigrateBackupIsNotWrittenThroughAPlantedFile`.
-- **Unraid plugin:** the two status values on the settings page (service state,
-  last log line) are now HTML-escaped like every other value on the page; the
-  dashboard already was. No binary change.
-- **Compose:** both services now carry the resource ceilings the systemd units
-  had all along (`mem_limit`, `pids_limit`, `nofile`, `core: 0`) — the nftables
-  header claimed the container had them. `.env.example` names the two variables
-  the file refuses to start without.
 
-### Added — direct mode is available in the Unraid plugin
+### Changed — hygiene from the same audit (no security claim)
 
-A **Mode** selector on the plugin's settings page chooses between *Coordinator*
-(unchanged, and the default) and *Direct*. Until now direct mode was unreachable
-from the plugin by any route, not merely unexposed: `rc.buddynet` built the
-argument list with `--server`/`--server-key` hardcoded and had no field for
-anything else.
+Consistency fixes that need a foothold on the host to matter at all, kept
+because each is a few lines and removes an inconsistency with the rest of the
+code or the docs.
 
-A config written before this field exists has no `MODE` line and falls back to
-coordinator, so existing installs keep behaving exactly as they did.
-
-Three cases the daemon would exit 2 on are handled in the script instead, because
-a message naming the *field* beats one naming the flag: the buddy key is required
-in direct mode (without a server the pinned key is the only authentication, so
-the service refuses to start rather than come up unauthenticated); a leftover
-`--server` is dropped; and a leftover invite is dropped and logged — easy to miss,
-since `BUDDYNET_JOIN` is the environment form of `--join`, which `--direct`
-refuses.
-
-New `lab/test-plugin-args.sh` closes a gap nothing covered before: the `.plg` was
-validated as XML and its shell blocks parsed, but neither said *which flags come
-out*. It extracts `rc.buddynet`, drives `start` with real configs against a
-recording stub, and hands the resulting argv to the real binary, requiring that it
-is not rejected as a usage error. Needs no Unraid, no root and no network.
-
-No new binary — the plugin stays pinned to v5.4.0 (ENTITY version 2026.08.26.2).
+- `peers migrate` writes its `.bak` through `atomicfile` like every other state
+  file, instead of `os.WriteFile` (which follows an existing symlink and keeps an
+  existing mode). `TestPeersMigrateBackupIsNotWrittenThroughAPlantedFile`.
+- Unraid plugin: the two status values on the settings page are HTML-escaped
+  like every other value on the page; the dashboard already was. No binary
+  change.
+- Compose: both services carry the resource ceilings the systemd units had all
+  along (`mem_limit`, `pids_limit`, `nofile`, `core: 0`) — the nftables header
+  claimed the container had them. `.env.example` names the two variables the
+  file refuses to start without.
 
 ### Changed (Hardening) — a relay id now has exactly one valid spelling
 
