@@ -76,6 +76,16 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # Resource ceilings, the same numbers the systemd units set (MemoryMax=128M,
+    # TasksMax=32, LimitNOFILE=1024, LimitCORE=0). The in-process caps bound what
+    # a flood can make the server allocate; these bound what the container can
+    # take from the host if something slips past them — and LimitCORE=0 keeps the
+    # identity key, which lives in process memory, out of any core dump.
+    mem_limit: 128m
+    pids_limit: 32
+    ulimits:
+      nofile: 1024
+      core: 0
 
   relay:
     # The relay builds from the SAME source as the handshake service (the build is
@@ -112,6 +122,15 @@ services:
     cap_drop: [ALL]
     security_opt:
       - no-new-privileges:true
+    # Resource ceilings, the same numbers buddynet-relay.service sets (MemoryMax=
+    # 128M, TasksMax=64, LimitNOFILE=4096, LimitCORE=0). The relay holds no
+    # identity key, but it verifies tickets off the read loop, hence the larger
+    # task budget. See the handshake service above for why these exist.
+    mem_limit: 128m
+    pids_limit: 64
+    ulimits:
+      nofile: 4096
+      core: 0
 
 volumes:
   buddynet:

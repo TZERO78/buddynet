@@ -8,6 +8,7 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/tzero78/buddynet/internal/atomicfile"
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
 	"github.com/tzero78/buddynet/internal/nft"
 	"github.com/tzero78/buddynet/internal/peer"
@@ -365,7 +366,12 @@ func PeersMigrate(peersFile, knownPeers string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(backup, data, 0o600); err != nil { // #nosec G703 -- backup lands next to the operator's own --peers-file (same trust as every path flag; G304 sibling)
+	// atomicfile, like every other state write: the backup carries the bootstrap
+	// tokens of the legacy manifest, and os.WriteFile would have followed a
+	// pre-planted symlink at <file>.bak and left an existing file's mode alone —
+	// so a world-readable .bak stayed world-readable. Write-to-temp-then-rename
+	// neither follows nor inherits.
+	if err := atomicfile.Write(backup, data, 0o600); err != nil {
 		return fmt.Errorf("write backup %s: %w", backup, err)
 	}
 	if err := saveManifest(knownPeers, peersFile, specs); err != nil {

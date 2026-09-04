@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	bcrypto "github.com/tzero78/buddynet/internal/crypto"
@@ -217,5 +218,59 @@ func TestAssemblePeersUnion(t *testing.T) {
 	}
 	if got[cB64] != "" {
 		t.Fatalf("c should be token-less, got %q", got[cB64])
+	}
+}
+
+// The migrate backup carries the legacy manifest's bootstrap tokens. A .bak
+// planted beforehand — as a symlink elsewhere, or as a world-readable file —
+// must neither be written through nor keep its mode: the backup is written like
+// every other state file, to a temp name and renamed into place at 0600.
+func TestPeersMigrateBackupIsNotWrittenThroughAPlantedFile(t *testing.T) {
+	a, _, _ := ed25519.GenerateKey(rand.Reader)
+	aB64 := bcrypto.PubKeyB64(a)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "peers")
+	known := filepath.Join(dir, "known_peers")
+	writeFile(t, path, aB64+" boot-a\n")
+
+	// A planted symlink: the backup must replace it, not follow it.
+	target := filepath.Join(dir, "elsewhere")
+	writeFile(t, target, "untouched\n")
+	if err := os.Symlink(target, path+".bak"); err != nil {
+		t.Fatal(err)
+	}
+	if err := PeersMigrate(path, known); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	if got, _ := os.ReadFile(target); string(got) != "untouched\n" {
+		t.Fatalf("backup was written THROUGH the planted symlink: target now %q", got)
+	}
+	fi, err := os.Lstat(path + ".bak")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("backup is still the planted symlink")
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode = %o, want 0600", fi.Mode().Perm())
+	}
+	if got, _ := os.ReadFile(path + ".bak"); !strings.Contains(string(got), "boot-a") {
+		t.Fatalf("backup does not hold the legacy manifest: %q", got)
+	}
+
+	// A planted world-readable file: the mode must end up 0600, not inherited.
+	path2 := filepath.Join(dir, "peers2")
+	writeFile(t, path2, aB64+" boot-a\n")
+	if err := os.WriteFile(path2+".bak", []byte("old\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := PeersMigrate(path2, known); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+	fi, _ = os.Stat(path2 + ".bak")
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("backup over a 0644 file kept mode %o, want 0600", fi.Mode().Perm())
 	}
 }

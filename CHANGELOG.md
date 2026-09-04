@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security — audit 2026-09-04: fewer answers for strangers, stricter roster on the buddy
+
+Findings of a defensive audit of the public-facing roles, each with an A/B test
+that fails on the previous code. Nothing on the wire changes for a real buddy;
+protocol version stays 8.
+
+- **Uniform close on the control plane.** Every refusal the handshake server
+  issues (source not allowed, table full, malformed REGISTER, forged key,
+  version mismatch, unopenable token) used to close the QUIC connection with a
+  distinct reason phrase — readable by anyone who completed the TLS handshake,
+  and "server at capacity" told a flooder it was winning. All closes, the
+  ordinary goodbye included, now carry application error 0 and an empty reason.
+  The operator keeps the detail: each refusal is still counted and logged
+  locally. The one diagnostic a client acts on, the version reply, is a signed
+  body and is unchanged. `TestControlCloseReasonIsUniform`.
+- **No product name in the certificate.** The self-signed identity certificate
+  carried `CN=buddynet`; it is handed to whoever completes a handshake with the
+  right ALPN, so it was a free banner. The Subject is now empty. Pinning
+  compares public-key bytes only, so existing pins are unaffected.
+  `TestCertificateCarriesNoBanner`.
+- **Buddy-side roster checks.** The buddy verified the PEER_LIST's signature and
+  its partner's key and virtual IP, but took every other field on trust: the
+  partner `id` (logged verbatim in CONNECTED/DISCONNECTED lines — a newline in it
+  forged audit lines in the buddy's own log, the hole the server closed on its
+  side in v5.2), the `.buddy` name (TOFU-pinned into `peers.json`, served by
+  BuddyDNS and printed by `peers list` with no `ValidName` check), and the
+  candidate list (unbounded, and any string — each entry is hole-punched
+  ~5×/second, so a hostile server could aim a buddy at addresses of its
+  choosing, hostnames included). A roster entry now has to pass the same field
+  rules the server applies before signing, plus a candidate ceiling equal to the
+  server's own and a literal-unicast-IP:port rule; a failure refuses the
+  registration with a `SECURITY: event=roster-invalid` line. Cached entries get
+  the same check before they drive a punch. Only a hostile or buggy server ever
+  trips this. `TestCheckRosterPeer`, `TestBuddyRegisterRefusesInvalidSignedRoster`.
+- **`peers migrate` backup written atomically.** The `.bak` was the one state
+  write that bypassed `atomicfile`: `os.WriteFile` followed a pre-planted symlink
+  and left an existing file's mode alone, and the backup carries the legacy
+  manifest's bootstrap tokens. `TestPeersMigrateBackupIsNotWrittenThroughAPlantedFile`.
+- **Unraid plugin:** the two status values on the settings page (service state,
+  last log line) are now HTML-escaped like every other value on the page; the
+  dashboard already was. No binary change.
+- **Compose:** both services now carry the resource ceilings the systemd units
+  had all along (`mem_limit`, `pids_limit`, `nofile`, `core: 0`) — the nftables
+  header claimed the container had them. `.env.example` names the two variables
+  the file refuses to start without.
+
 ### Added — direct mode is available in the Unraid plugin
 
 A **Mode** selector on the plugin's settings page chooses between *Coordinator*

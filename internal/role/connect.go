@@ -138,7 +138,10 @@ func buddyRun(ctx context.Context, cfg BuddyConfig, att attempt, nd *node, lt *l
 		if partner.PubKey == "" {
 			// Server down: try every fresh-enough cached peer in turn.
 			for _, c := range reg.List() {
-				if peer.Fresh(c, 24*time.Hour) {
+				// The cache was filled from rosters that passed checkRosterPeer, but
+				// the file is on disk and older versions wrote it unchecked; apply the
+				// same field checks before an entry drives a punch or a log line.
+				if peer.Fresh(c, 24*time.Hour) && checkRosterPeer(c) == nil {
 					cp := c
 					cached = &cp
 					partner = c // adopt identity/vip from cache for the QUIC pin

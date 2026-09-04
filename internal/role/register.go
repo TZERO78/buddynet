@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"sort"
 	"time"
 
@@ -71,6 +72,15 @@ func buddyRegister(conn *net.UDPConn, serverAddrs []*net.UDPAddr, cfg BuddyConfi
 					return protocol.Peer{}, nil, errors.New("server signature did not verify (wrong --server-key, or MITM)")
 				}
 				if d := time.Since(time.Unix(r.Ts, 0)); d <= 60*time.Second && d >= -60*time.Second && len(peers) > 0 {
+					// The roster is authentic (the signature verified) but that only says
+					// WHO sent it, not that its fields are sane: a hostile or buggy server
+					// is exactly the case the buddy-side checks exist for. Refuse the whole
+					// registration rather than sanitise — nothing a real server produces
+					// ever fails this.
+					if verr := checkRosterPeer(peers[0]); verr != nil {
+						log.Printf("SECURITY: event=roster-invalid key=%s detail=%q", keyTag(peers[0].PubKey), verr.Error())
+						return protocol.Peer{}, nil, fmt.Errorf("server sent an invalid roster: %w", verr)
+					}
 					// The ticket rides along with the roster and is returned unparsed: it
 					// carries its own signature by the same key, and the relay verifies it
 					// over the exact bytes it receives.
@@ -185,4 +195,56 @@ func canonicalPeers(in []protocol.Peer) []protocol.Peer {
 	}
 	sort.Slice(out, func(a, b int) bool { return out[a].ID < out[b].ID })
 	return out
+}
+
+// maxRosterCands is the most candidate endpoints a roster entry may carry — the
+// same ceiling the server applies when it records them (maxCandsPerPeer), so a
+// well-behaved server never exceeds it. It bounds what one roster can make this
+// buddy do: every candidate is hole-punched ~5x/second for the whole --punch
+// window, so an unbounded list would let whoever signs rosters turn a buddy into
+// a packet source aimed at addresses of their choosing.
+const maxRosterCands = maxCandsPerPeer
+
+// checkRosterPeer applies the buddy-side field checks to a partner entry taken
+// from a signed PEER_LIST (or from the local cache, which was filled from one).
+// The server validates the same fields before it signs them, so in a healthy
+// deployment nothing here ever fires; it exists for a hostile or buggy server —
+// the one party whose signature proves nothing about the CONTENT.
+//
+// What it refuses, and why:
+//   - an ID outside validField's alphabet: it is logged verbatim in CONNECTED/
+//     DISCONNECTED lines, so a control character would forge audit lines in
+//     this buddy's own log (the server closed the same hole on its side);
+//   - a name that fails ValidName: it would be TOFU-pinned into peers.json,
+//     served by BuddyDNS and printed by `peers list` unchecked;
+//   - more candidates than the server ever records, or a candidate that is not
+//     a literal IP:port (a hostname would have the punch resolve DNS for a
+//     server-chosen name; an unspecified/multicast address is never a peer).
+//
+// Key and virtual-IP consistency are checked separately, in connect.go, because
+// they need the decoded key.
+func checkRosterPeer(p protocol.Peer) error {
+	if !validField(p.ID) {
+		return errors.New("peer id is empty, too long, or outside [A-Za-z0-9_-]")
+	}
+	if p.Name != "" && !protocol.ValidName(p.Name) {
+		return errors.New("peer name is not a valid .buddy label")
+	}
+	if len(p.Candidates) > maxRosterCands {
+		return fmt.Errorf("%d candidate endpoints exceed the limit of %d", len(p.Candidates), maxRosterCands)
+	}
+	for _, c := range p.Candidates {
+		ap, err := netip.ParseAddrPort(c.Addr)
+		if err != nil {
+			return fmt.Errorf("candidate %q is not a literal IP:port", c.Addr)
+		}
+		a := ap.Addr().Unmap()
+		if ap.Port() == 0 || a.IsUnspecified() || a.IsMulticast() {
+			return fmt.Errorf("candidate %q is not a unicast endpoint", c.Addr)
+		}
+	}
+	if len(p.Relay) > protocol.MaxFieldLen {
+		return errors.New("relay endpoint is too long")
+	}
+	return nil
 }

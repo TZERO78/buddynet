@@ -161,7 +161,8 @@ func (s *quicSession) ExportKeyingMaterial(label string, context []byte, length 
 }
 
 func (s *quicSession) Close() error {
-	return s.conn.CloseWithError(0, "bye")
+	closeSilently(s.conn) // same empty reason phrase as every other close (see control.go)
+	return nil
 }
 
 // quicStream adapts *quic.Stream to Stream. A QUIC stream's Close already
@@ -213,9 +214,15 @@ func selfSignedCert(priv ed25519.PrivateKey) tls.Certificate {
 	// With InsecureSkipVerify the TLS stack never checks expiry, and we
 	// authenticate by the cert's public key, not its dates; a long NotAfter just
 	// avoids confusing anyone who inspects the cert.
+	//
+	// The Subject is EMPTY on purpose. Nothing reads it — identity is the key —
+	// and the certificate is handed to whoever completes a handshake with the
+	// right ALPN, so a product name in the CommonName was a free banner for a
+	// prober. An empty Subject is valid X.509 for a self-signed leaf and changes
+	// nothing for pinning, which compares the public key bytes only.
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "buddynet"},
+		Subject:      pkix.Name{},
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(100 * 365 * 24 * time.Hour),
 	}
