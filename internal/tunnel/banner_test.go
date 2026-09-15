@@ -8,7 +8,6 @@ import (
 	"crypto/x509"
 	"errors"
 	"net"
-	"net/netip"
 	"testing"
 	"time"
 
@@ -90,22 +89,9 @@ func TestControlCloseReasonIsUniform(t *testing.T) {
 		}
 	}
 
-	// Case 2: a source refused by the allowlist BEFORE it gets a slot must look
-	// exactly the same on the wire as an application-layer drop.
-	srvConn2, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
-	if err != nil {
-		t.Fatalf("server listen: %v", err)
-	}
-	defer srvConn2.Close()
-	srv2, err := ListenControl(srvConn2, srvPriv, 30*time.Second, []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")})
-	if err != nil {
-		t.Fatalf("ListenControl: %v", err)
-	}
-	defer srv2.Close()
-	ae := dialAndGetClosed(t, srvConn2.LocalAddr().(*net.UDPAddr), srvPub)
-	if ae.ErrorCode != 0 || ae.ErrorMessage != "" {
-		t.Fatalf("refused source: wire close = code %d reason %q; want code 0 and an empty reason", ae.ErrorCode, ae.ErrorMessage)
-	}
+	// A source refused by the allowlist never reaches TLS at all any more, so it
+	// has no application close to compare; its (even more uniform) shape — a bare
+	// CONNECTION_REFUSED with no certificate — is pinned in pretls_test.go.
 }
 
 // dialAndGetClosed opens a control connection, sends one request and returns the

@@ -544,21 +544,31 @@ path. In order:
    unconditionally on). A **spoofed** source gets a stateless Retry token back and
    nothing else: no connection, no memory, no handshake. This is the real
    anti-spoofing and anti-reflection boundary.
-2. **The TLS 1.3 handshake runs** — including the Ed25519 client certificate
-   exchange — because quic-go only hands over a connection that is already
-   established. This is unavoidable with this library, and it is asymmetric
-   crypto performed for a peer BuddyNet has not yet looked at.
-3. `--allow-cidr` is checked, and a disallowed source's connection is closed
-   **before** it occupies one of the 256 connection slots.
-4. Global and per-source (`/64`) connection caps.
-5. Per-source request rate limit inside the connection.
-6. Approval mode, when enabled, on the signed `REGISTER`.
+2. **`--allow-cidr` and the connection caps, before TLS.** quic-go calls the
+   transport's per-connection hook (`ConnContext`) once the Retry token has
+   checked out and before it starts the handshake. BuddyNet decides there: a
+   source outside `--allow-cidr`, or one that would exceed the 256 global /
+   16 per-source (`/64`) connection slots, gets a bare `CONNECTION_REFUSED` —
+   no certificate, no Ed25519 work, no slot. (Until v5.6.0 both checks ran
+   after the handshake, and these documents called that "unavoidable with this
+   library". It was not; the 2026-09-15 audit pointed at the hook.)
+3. **The TLS 1.3 handshake runs** — including the Ed25519 client certificate
+   exchange — for a source that passed step 2. It is asymmetric crypto performed
+   for a peer BuddyNet has not yet authorized, and the slot it holds is the one
+   from step 2: taken before the handshake, given back when the connection
+   ends, however it ends (served, refused, failed or timed out in the
+   handshake).
+4. Per-source request rate limit inside the connection.
+5. Approval mode, when enabled, on the signed `REGISTER`.
 
 **So the honest boundary is this:** an attacker who can receive packets at its
-claimed address — i.e. is not spoofing — can make the handshake server perform
-**one TLS handshake per connection attempt** before `--allow-cidr` or
-`--authorized` are consulted. Neither flag protects against that; they protect
-what comes after it. A spoofing attacker cannot even get that far.
+claimed address — i.e. is not spoofing — and who is inside `--allow-cidr` (or
+the default, which is open) can make the handshake server perform **one TLS
+handshake per admitted connection**, with at most 16 in flight per source and
+256 in total, before `--authorized` is consulted. `--allow-cidr` now does
+protect against that cost for everything outside it; `--authorized` protects
+what comes after the handshake. A spoofing attacker cannot even get that far.
+A refused source still learns that a QUIC endpoint answered (§5.6).
 
 Bounding *that* cost is the firewall's job, which is why the shipped ruleset
 rate-limits the handshake port at `limit rate 100/second burst 50 packets` with

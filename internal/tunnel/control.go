@@ -254,6 +254,16 @@ func (r *ControlRequest) Drop(reason string) {
 // operator keeps the detail: the server logs and counts each refusal locally.
 func closeSilently(qc *quic.Conn) { qc.CloseWithError(0, "") }
 
+// errConnRefused is what the pre-handshake gate returns to quic-go for a source
+// it will not serve. quic-go answers with a bare CONNECTION_REFUSED and never
+// starts TLS for it. The text is never sent; it is for the debug log only.
+var errConnRefused = errors.New("control connection refused before the handshake")
+
+// connReleaseKey carries a connection's slot-release closure in the connection
+// context, from the gate (where the slot is taken) to acceptConns (where the
+// serving goroutine gives it back).
+type connReleaseKey struct{}
+
 // ControlServer is the handshake server's QUIC control listener.
 type ControlServer struct {
 	tr        *quic.Transport
@@ -280,9 +290,9 @@ type ControlServer struct {
 
 	// allowed restricts which source networks may reach the control plane at all.
 	// Empty means open (the default). Read-only after construction, so it needs no
-	// lock. Enforced in acceptConns BEFORE a slot is handed out — it used to be
-	// checked in the REGISTER handler, i.e. after TLS and after the slot was taken,
-	// so a disallowed source could still occupy capacity.
+	// lock. Enforced in gateConn, BEFORE the TLS handshake and before a slot is
+	// handed out — it used to be checked in the REGISTER handler (after TLS and
+	// after the slot was taken), then in acceptConns (still after TLS).
 	allowed []netip.Prefix
 }
 
@@ -333,7 +343,8 @@ func (s *ControlServer) sourceAllowed(remote net.Addr) bool {
 
 // admit reserves a connection slot for a source, returning the release closure.
 // The closure is idempotent, so calling it on several exit paths is safe and
-// missing it is the only real hazard — hence the single defer at the call site.
+// missing it is the only real hazard — hence context.AfterFunc in gateConn (the
+// connection's own lifetime) plus the single defer in acceptConns.
 func (s *ControlServer) admit(remote net.Addr) (release func(), ok bool) {
 	key := ipKey(remote)
 	s.connMu.Lock()
@@ -385,9 +396,9 @@ func (s *ControlServer) noteRejection() {
 // and decide, per key, between "allowlisted", "enrolling with a code" and
 // "refused". The TLS layer itself makes no authorization decision.
 // allowed restricts which source networks may reach the control plane. An empty
-// slice keeps it open, which is the default; a non-empty one is enforced BEFORE a
-// connection is given a slot (see acceptConns) rather than in the REGISTER
-// handler, where it used to sit — after TLS and after the slot was already taken.
+// slice keeps it open, which is the default; a non-empty one is enforced in the
+// pre-handshake gate (see gateConn), so a disallowed source never gets a TLS
+// handshake, let alone a connection slot.
 func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duration, allowed []netip.Prefix) (*ControlServer, error) {
 	tr := &quic.Transport{Conn: conn}
 	// QUIC Retry for every unvalidated source (RFC 9000 §8.1.2). Without this,
@@ -404,6 +415,15 @@ func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duratio
 	// traffic here is a handful of dials per day. Always validating is the simpler
 	// and stricter rule.
 	tr.VerifySourceAddress = func(net.Addr) bool { return true }
+	s := &ControlServer{tr: tr, reqs: make(chan *ControlRequest), done: make(chan struct{}), perIP: map[string]int{}, allowed: allowed}
+	// The source allowlist and the connection budget are decided HERE, in
+	// quic-go's per-connection hook, which runs after the Retry token has been
+	// checked and BEFORE the TLS handshake starts. A source that is outside
+	// --allow-cidr, or that would exceed the global/per-source connection caps,
+	// gets a bare CONNECTION_REFUSED and costs no Ed25519 work at all. Until
+	// 2026-09-15 both checks lived in acceptConns, i.e. after the handshake; the
+	// 2026-09-15 audit (BN-04) pointed out that this hook exists.
+	tr.ConnContext = s.gateConn
 	tlsConf := &tls.Config{
 		Certificates: []tls.Certificate{selfSignedCert(priv)},
 		MinVersion:   tls.VersionTLS13,
@@ -423,37 +443,65 @@ func ListenControl(conn *net.UDPConn, priv ed25519.PrivateKey, idle time.Duratio
 		tr.Close()
 		return nil, err
 	}
-	s := &ControlServer{tr: tr, ln: ln, reqs: make(chan *ControlRequest), done: make(chan struct{}), perIP: map[string]int{}, allowed: allowed}
+	s.ln = ln
 	go s.acceptConns()
 	return s, nil
 }
 
+// gateConn is the pre-handshake admission decision, installed as the
+// transport's ConnContext hook. quic-go calls it once per incoming connection
+// after source-address validation and before any TLS, and refuses the
+// connection (CONNECTION_REFUSED, no certificate, no handshake) when it errors.
+//
+// It takes the connection slot right here, so the budget bounds TLS handshakes
+// in flight and not merely connections that completed one. The slot is tied to
+// the connection's lifetime through its context: quic-go cancels ctx when the
+// connection is gone, whether it was served, refused by the handler, failed its
+// handshake or timed out in it, so context.AfterFunc gives the slot back on
+// every one of those paths. acceptConns releases it too when the serving
+// goroutine returns — release is idempotent, and the explicit call keeps the
+// accounting exact for a connection the server itself closes.
+func (s *ControlServer) gateConn(ctx context.Context, info *quic.ClientInfo) (context.Context, error) {
+	// VerifySourceAddress is unconditionally on, so quic-go only gets here with a
+	// validated address. Checked anyway: a slot must never be taken for a source
+	// that has not proven it can receive packets.
+	if !info.AddrVerified {
+		s.noteRejection()
+		return nil, errConnRefused
+	}
+	if !s.sourceAllowed(info.RemoteAddr) {
+		s.noteRejection()
+		return nil, errConnRefused
+	}
+	release, ok := s.admit(info.RemoteAddr)
+	if !ok {
+		s.noteRejection()
+		return nil, errConnRefused
+	}
+	context.AfterFunc(ctx, release)
+	return context.WithValue(ctx, connReleaseKey{}, release), nil
+}
+
 func (s *ControlServer) acceptConns() {
-	// Cap concurrent connections globally AND per source, so neither a broad flood
-	// of (source-validated) QUIC dials nor one host opening connection after
-	// connection can grow goroutines/memory or lock other buddies out. The rate
-	// limiter one layer up gates work INSIDE a connection; this bounds how many
-	// connections exist at all.
+	// Concurrent connections are capped globally AND per source (in gateConn), so
+	// neither a broad flood of (source-validated) QUIC dials nor one host opening
+	// connection after connection can grow goroutines/memory or lock other buddies
+	// out. The rate limiter one layer up gates work INSIDE a connection; the cap
+	// bounds how many connections — and therefore TLS handshakes — exist at all.
 	for {
 		qc, err := s.ln.Accept(context.Background())
 		if err != nil {
 			return // listener closed
 		}
-		// Source allowlist BEFORE the slot: a disallowed source must not be able to
-		// occupy one of the 256 connection slots, which is what it could do while
-		// this check lived in the REGISTER handler. TLS has already run by the time
-		// quic-go hands us a connection — that is unavoidable with this library — but
-		// nothing of BuddyNet's own capacity is spent, and the connection is closed
-		// rather than left to idle out.
-		if !s.sourceAllowed(qc.RemoteAddr()) {
+		// The allowlist and the slot were decided in gateConn, before this
+		// connection's TLS handshake ran; the slot's release closure travels in the
+		// connection context. A connection without one cannot exist (every accepted
+		// connection went through the gate), so its absence is treated as a refusal
+		// rather than served unaccounted.
+		release, _ := qc.Context().Value(connReleaseKey{}).(func())
+		if release == nil {
 			s.noteRejection()
-			closeSilently(qc) // refused; the reason stays local (noteRejection)
-			continue
-		}
-		release, ok := s.admit(qc.RemoteAddr())
-		if !ok {
-			s.noteRejection()
-			closeSilently(qc) // shed load instead of queuing unboundedly; reason stays local
+			closeSilently(qc)
 			continue
 		}
 		go func() {

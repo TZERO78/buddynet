@@ -306,7 +306,7 @@ func (s *Server) rejectWindow(p ticket.Payload) {
 	if !s.throttleLocked(string(ticket.ReasonWindow)) {
 		return
 	}
-	log.Printf("RELAY: action=ticket-rejected sid=%s leg=%s reason=%q detail=%q",
+	log.Printf("RELAY: action=ticket-rejected sid=%q leg=%q reason=%q detail=%q",
 		ticket.ShortSID(p.SID), p.Leg, ticket.ReasonWindow,
 		"iat/exp outside the accepted window; check that this relay's and the handshake server's clocks are in sync (NTP), and that the ticket was issued by the expected server")
 }
@@ -327,8 +327,11 @@ func (s *Server) rejectTicket(reason, sid, leg string, src *net.UDPAddr) {
 		return
 	}
 	// sid arrives unverified on the failing paths, so it is only ever logged
-	// through ShortSID, which truncates it — never echoed whole.
-	line := "RELAY: action=ticket-rejected sid=%s leg=%s reason=%q"
+	// through ShortSID, which truncates it — never echoed whole — and with %q,
+	// which escapes it: truncation bounds the length, it does not neutralise a
+	// newline, and ParseBind's alphabet check is the first line of defence, not
+	// the only one.
+	line := "RELAY: action=ticket-rejected sid=%q leg=%q reason=%q"
 	args := []any{ticket.ShortSID(sid), leg, reason}
 	if s.debug && src != nil {
 		line += " src=%s"

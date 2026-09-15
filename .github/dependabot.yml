@@ -15,3 +15,11 @@ updates:
     directory: /deployments
     schedule:
       interval: weekly
+    ignore:
+      # The build image must match the `toolchain` line in go.mod exactly (the
+      # SBOM and govulncheck describe THAT stdlib). A minor/major bump of the
+      # image alone would break that lockstep silently — CI builds the image but
+      # compares nothing — so only patch releases are proposed here; moving to a
+      # new Go line is a deliberate change of both pins together.
+      - dependency-name: golang
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
