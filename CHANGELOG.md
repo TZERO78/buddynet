@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v5.6.0] — 2026-09-15
+
 Two findings from an external audit of v5.5.0 (2026-09-15, BN-04 and BN-05
 there), both for the attacker BuddyNet models first — a stranger on the public
 ports — plus the routine dependency and toolchain refresh that came with them.
@@ -2038,7 +2040,8 @@ and the peers manifest is YAML (`peers migrate` converts) — each detailed belo
 - Initial release: two-buddy tunnel over UDP with Ed25519 identity, NAT traversal,
   and SAS verification.
 
-[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.5.0...HEAD
+[Unreleased]: https://github.com/TZERO78/buddynet/compare/v5.6.0...HEAD
+[v5.6.0]: https://github.com/TZERO78/buddynet/compare/v5.5.0...v5.6.0
 [v5.5.0]: https://github.com/TZERO78/buddynet/compare/v5.4.0...v5.5.0
 [v5.4.0]: https://github.com/TZERO78/buddynet/compare/v5.3.3...v5.4.0
 [v5.3.3]: https://github.com/TZERO78/buddynet/compare/v5.3.2...v5.3.3
