@@ -27,7 +27,7 @@ RUN mkdir -p /out/state
 # Distroless static: no shell, no package manager, runs as an unprivileged user
 # (uid/gid 65532). The binary is fully static (CGO_ENABLED=0) and the roles
 # authenticate by pinned self-signed certs, so no CA bundle is needed.
-FROM gcr.io/distroless/static:nonroot@sha256:1c2c046bc09ed40fad370b599a0b1ae7987f55b01e247cf27a7c27cd97e5bbc7
+FROM gcr.io/distroless/static:nonroot@sha256:e2e927ec666bae08560abb3c55d0659eceabb657f56b6782ab500a9fc7f555e3
 COPY --from=build --chown=65532:65532 /out/buddynet /usr/local/bin/buddynet
 # The identity key lives here; owned by uid 65532 so a fresh named volume that
 # mounts over it is writable by the non-root process.
