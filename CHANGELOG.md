@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Two findings from an external audit of v5.5.0 (2026-09-15, BN-04 and BN-05
+there), both for the attacker BuddyNet models first — a stranger on the public
+ports — plus the routine dependency and toolchain refresh that came with them.
+The other three findings of that audit were already known: the open-server
+pairing that approval mode closes (SECURITY.md §5.4) and the recognisability
+written down as the deliberate residual in §5.6. No protocol change; buddies
+and servers of v5.5.0 interoperate.
+
+### Security — the control plane refuses before TLS, not after
+
+- **`--allow-cidr` and the connection caps are now decided before the TLS
+  handshake.** quic-go offers a per-connection hook that runs after the Retry
+  token is verified and before any TLS; the handshake server now makes its
+  source and capacity decision there. A source outside `--allow-cidr`, or one
+  past the 256-global / 16-per-source connection slots, gets a bare
+  `CONNECTION_REFUSED`: no identity certificate, no Ed25519 work, no slot.
+  Until now both checks ran once quic-go handed over an established
+  connection, so a refused source still cost one full handshake and received
+  the server's certificate first. The slot is tied to the connection's
+  lifetime, so a handshake that fails or times out gives it back too.
+  SECURITY.md §5.5 said this ordering was "unavoidable with this library"; it
+  was not, and the section is rewritten. (BN-04)
+- **Relay refusal log lines can no longer be shaped by the sender.** The
+  session token in a bind is length-checked at the edge but was not
+  alphabet-checked, and the relay wrote its first eight characters into the
+  `ticket-rejected` line unescaped — so a token beginning with a newline
+  added lines to the relay log, needing only a cookie, no ticket. `ParseBind`
+  now accepts the base64url alphabet only (every buddy has only ever sent
+  that; nothing real is refused), and the refusal lines print the session id
+  and leg escaped (`sid="…"`) so the log does not depend on the parser.
+  (BN-05)
+
+### Changed
+
+- Dependencies: quic-go 0.61.0 → 0.62.0 (requires Go 1.26, so the module's
+  minimum Go version is now 1.26; the pinned toolchain is unchanged in its
+  1.26 line), golang.org/x/crypto 0.55.0 → 0.57.0 (clears the two module-level
+  advisories govulncheck listed against the SSH package, which BuddyNet does
+  not import), x/term, x/net, x/sys; softprops/action-gh-release 3.0.3;
+  distroless base image digest.
+- Toolchain: every official build now uses go1.26.8 (go.mod `toolchain` line
+  and the container's `FROM golang:` pin, bumped together). Dependabot is told
+  to propose patch releases of that image only, since a minor bump would
+  silently break the lockstep with go.mod that the SBOM and govulncheck rely
+  on.
+
 ## [v5.5.0] — 2026-09-04
 
 A hardening release from the 2026-09-04 audit, sorted by who the attacker is: a
