@@ -121,10 +121,30 @@ func ParseBind(pkt []byte) (Bind, bool) {
 	if json.Unmarshal(pkt[len(BindPrefix):], &b) != nil ||
 		len(b.SessionToken) < MinSessionTokenLen ||
 		len(b.SessionToken) > protocol.MaxFieldLen || len(b.Cookie) > protocol.MaxFieldLen ||
-		len(b.Ticket) > maxTicketB64 || len(b.TicketSig) > maxSigB64 || len(b.BindSig) > maxSigB64 {
+		len(b.Ticket) > maxTicketB64 || len(b.TicketSig) > maxSigB64 || len(b.BindSig) > maxSigB64 ||
+		!base64urlOnly(b.SessionToken) {
 		return Bind{}, false
 	}
 	return b, true
+}
+
+// base64urlOnly reports whether s consists solely of the unpadded base64url
+// alphabet. Every session token a buddy has ever sent is exactly that
+// (role.sessionToken and ticket session ids are both RawURLEncoding), so this
+// refuses nothing that exists — what it refuses is a token carrying control
+// characters, which used to travel through ParseBind unexamined and reach the
+// relay's log on the refusal paths (2026-09-15 audit, BN-05). The alphabet is
+// checked at the edge so no later consumer has to remember to escape it.
+func base64urlOnly(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case 'A' <= c && c <= 'Z', 'a' <= c && c <= 'z', '0' <= c && c <= '9', c == '-', c == '_':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // MarshalChallenge encodes an address-validation challenge: ChallengePrefix ||

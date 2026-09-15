@@ -35,6 +35,26 @@ func TestParseBind(t *testing.T) {
 	if _, ok := ParseBind(MarshalBind(Bind{SessionToken: strings.Repeat("x", MinSessionTokenLen)})); !ok {
 		t.Fatal("a token at exactly MinSessionTokenLen must be accepted")
 	}
+	// The token alphabet is base64url and nothing else. Every buddy has only ever
+	// sent that, so this refuses nothing real — what it keeps out is a token with
+	// control characters in it, which used to pass here and reach the log on the
+	// refusal paths (2026-09-15 audit, BN-05).
+	for _, tok := range []string{
+		"\nFAKE\nXX" + strings.Repeat("a", MinSessionTokenLen),
+		strings.Repeat("a", MinSessionTokenLen) + "\r",
+		strings.Repeat("a", MinSessionTokenLen) + "\x1b[2J",
+		strings.Repeat("a", MinSessionTokenLen) + "\x00",
+		strings.Repeat("a", MinSessionTokenLen) + " ",
+		strings.Repeat("a", MinSessionTokenLen) + "+/=", // standard base64, not url
+		strings.Repeat("a", MinSessionTokenLen) + "\u00e9",
+	} {
+		if _, ok := ParseBind(MarshalBind(Bind{SessionToken: tok})); ok {
+			t.Fatalf("token %q outside the base64url alphabet must be rejected", tok)
+		}
+	}
+	if _, ok := ParseBind(MarshalBind(Bind{SessionToken: "AZaz09-_" + strings.Repeat("Q", MinSessionTokenLen)})); !ok {
+		t.Fatal("the full base64url alphabet must be accepted")
+	}
 	// A challenge must round-trip and must not be mistaken for a bind.
 	cookie := make([]byte, CookieLen)
 	chal := MarshalChallenge(cookie)
