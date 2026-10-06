@@ -22,7 +22,7 @@ toolchain go1.26.8
 require (
 	filippo.io/edwards25519 v1.2.0
 	github.com/miekg/dns v1.1.73
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.63.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/term v0.46.0
 	gopkg.in/yaml.v3 v3.0.1
