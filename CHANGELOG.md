@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Dependencies: quic-go 0.62.0 → 0.63.0 (its breaking changes are all in
+  `http3`, which BuddyNet does not import; the module's minimum Go version
+  stays 1.26); anchore/sbom-action 0.24.3; golang build-image digest refresh
+  (same `1.26.8-alpine` tag, in lockstep with the `toolchain` line).
+
 ## [v5.6.0] — 2026-09-15
 
 Two findings from an external audit of v5.5.0 (2026-09-15, BN-04 and BN-05
