@@ -13,7 +13,7 @@
 # Exact version AND digest, matching the `toolchain` line in go.mod: a floating
 # 1.26-alpine tag would drift away from the toolchain every other build path is
 # pinned to (A-07).
-FROM golang:1.26.8-alpine@sha256:51a7c389a5ddaf82f527191a1e9bff9928655130a44e4975dd1d7e0acf59f1ae AS build
+FROM golang:1.26.8-alpine@sha256:8ac98ca534ac3f51e1f420a1dd2c15e74c75cfa0f23f3ad27eb5d7236c349a0c AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
